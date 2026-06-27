@@ -1,0 +1,57 @@
+project:
+  event_id: venezuela_earthquake
+  default_country: Venezuela
+  output_mode: sanitized_jsonl
+
+# Starter config.
+# Recomendación: revisar legalidad, robots.txt, tasa de consulta y autorización antes de activar nuevas fuentes.
+sources:
+  - id: usgs_geojson_venezuela_region
+    name: USGS GeoJSON región Venezuela
+    type: api_json
+    enabled: true
+    trust_tier: A
+    url: "https://earthquake.usgs.gov/fdsnws/event/1/query?format=geojson&starttime=2026-06-24&endtime=2026-06-30&minmagnitude=4&latitude=10.5&longitude=-66.9&maxradiuskm=800"
+    refresh_minutes: 30
+    parser: geojson_earthquake
+    required_keywords:
+      - Venezuela
+      - earthquake
+
+  - id: reliefweb_reports_venezuela_earthquake
+    name: ReliefWeb reports Venezuela earthquake
+    type: api_json
+    enabled: false
+    trust_tier: A
+    url: "https://api.reliefweb.int/v2/reports?appname=REQUEST_APPROVED_APPNAME&query[value]=Venezuela%20earthquake&limit=10&preset=latest"
+    refresh_minutes: 30
+    parser: reliefweb_reports
+    required_keywords:
+      - Venezuela
+      - earthquake
+    notes: "Disabled until the project has an approved ReliefWeb v2 appname."
+
+  - id: gdacs_rss
+    name: GDACS RSS global
+    type: rss
+    enabled: false
+    trust_tier: A
+    url: "https://www.gdacs.org/xml/rss.xml"
+    refresh_minutes: 30
+    parser: rss
+    required_keywords:
+      - Venezuela
+      - earthquake
+
+  - id: copernicus_activation_page
+    name: Copernicus EMS activation page
+    type: html_static
+    enabled: false
+    trust_tier: A
+    url: "https://mapping.emergency.copernicus.eu/activations/EMSR884/"
+    refresh_minutes: 60
+    parser: html
+    required_keywords:
+      - Venezuela
+      - earthquake
+      - activation

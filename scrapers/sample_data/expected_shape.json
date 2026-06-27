@@ -1,0 +1,13 @@
+{
+  "documents_jsonl": {
+    "source_id": "demo_manual_synthetic",
+    "text": "texto saneado",
+    "raw_hash": "sha256"
+  },
+  "claims_jsonl": {
+    "claim_id": "claim_x",
+    "fingerprint": "sha256",
+    "claim_type": "need.water",
+    "verification_status": "new"
+  }
+}

@@ -1,0 +1,39 @@
+project:
+  event_id: venezuela_earthquake
+  default_country: Venezuela
+  output_mode: sanitized_jsonl
+
+sources:
+  - id: ejemplo_pagina_html
+    name: Página HTML de ejemplo
+    type: html_static
+    enabled: false
+    trust_tier: C
+    url: "https://example.org/reemplazar"
+    refresh_minutes: 30
+    parser: html
+    required_keywords:
+      - terremoto
+      - Venezuela
+
+  - id: ejemplo_api_json
+    name: API JSON de ejemplo
+    type: api_json
+    enabled: false
+    trust_tier: B
+    url: "https://example.org/api/reemplazar"
+    refresh_minutes: 30
+    parser: json_generic
+    required_keywords:
+      - emergencia
+
+  - id: ejemplo_archivo_manual
+    name: Archivo manual local
+    type: manual_file
+    enabled: false
+    trust_tier: D
+    url: "/ruta/externa/no-commit/dump.txt"
+    refresh_minutes: 60
+    parser: text
+    required_keywords:
+      - ayuda

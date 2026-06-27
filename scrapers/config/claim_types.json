@@ -1,0 +1,60 @@
+{
+  "need.water": [
+    "agua",
+    "hidratación",
+    "potable"
+  ],
+  "need.food": [
+    "comida",
+    "alimentos",
+    "víveres",
+    "comida preparada"
+  ],
+  "need.medical": [
+    "medicina",
+    "médico",
+    "hospital",
+    "heridos",
+    "insumos médicos"
+  ],
+  "need.shelter": [
+    "refugio",
+    "albergue",
+    "techo",
+    "evacuados"
+  ],
+  "infrastructure.collapsed_building": [
+    "colapsó",
+    "colapsado",
+    "derrumbe",
+    "edificio caído"
+  ],
+  "infrastructure.road_blocked": [
+    "vía bloqueada",
+    "carretera bloqueada",
+    "derrumbe en carretera"
+  ],
+  "service.power_outage": [
+    "sin luz",
+    "corte eléctrico",
+    "electricidad"
+  ],
+  "service.water_outage": [
+    "sin agua",
+    "corte de agua",
+    "servicio de agua"
+  ],
+  "casualties.deaths": [
+    "fallecidos",
+    "muertos",
+    "víctimas fatales"
+  ],
+  "casualties.injured": [
+    "heridos",
+    "lesionados"
+  ],
+  "casualties.missing": [
+    "desaparecidos",
+    "no localizados"
+  ]
+}
