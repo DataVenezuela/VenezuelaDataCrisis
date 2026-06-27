@@ -1,7 +1,9 @@
 # VZLA_DEDUP
 Limpiemos los registros en esta crisis.
 
-Venezuela necesita una base de datos centralizada y confiable de personas desaparecidas, necesidades activas e infraestructura afectada. Hay docenas de páginas con información valiosa pero fragmentada, duplicada y sin verificar. Este proyecto la consolida y la expone via API para que cualquier dev pueda construir encima.
+Tras los terremotos del 24 de junio, miles de familias buscan a sus seres queridos en decenas de páginas distintas: grupos de WhatsApp, publicaciones de hospitales, redes sociales. La misma persona aparece en cuatro lugares con cuatro nombres distintos. Nadie sabe cuál es la información correcta ni cuál está desactualizada.
+
+Este proyecto recolecta esos registros dispersos, los unifica en una sola base de datos limpia, deduplicada y consultable, y los expone via API para que cualquier dev pueda construir encima.
 
 → [Documentación](https://docs.google.com/document/d/1RzTa_bjouoZrjoS-fo1ojqUxjaTYy_w5Fg6Ad3fX8TU/edit?usp=sharing) · [Contribuir](./CONTRIBUTING.md) · [Reportar un problema](../../issues)
 
@@ -47,6 +49,54 @@ El siguiente diagrama muestra el flujo completo de datos: desde las fuentes orig
 ![Arquitectura del pipeline](./docs/pipeline.svg)
 
 > Fuente editable: [`docs/pipeline.dot`](./docs/pipeline.dot) (Graphviz)
+
+---
+
+## Pipeline en detalle
+
+El pipeline tiene cuatro capas secuenciales. Las dos primeras forman la **recolección**; las dos últimas son la **limpieza**, completamente independiente y reutilizable cuando el sistema pase a recibir datos de fuentes externas en vez de scrapearlos.
+
+### Adapters
+
+Cada tipo de fuente tiene un adapter dedicado que se encarga exclusivamente del fetch. El output de todos es siempre el mismo: el contenido raw de la fuente, sin procesar.
+
+| Fuente | Adapter |
+|--------|---------|
+| WebApps con JS dinámico | Playwright |
+| HTML estático | BeautifulSoup |
+| APIs / JSON | httpx |
+| PDFs y archivos manuales | pdfplumber |
+
+### Parsers
+
+Cada fuente tiene un parser específico que implementa una interfaz común. El parser recibe el raw del adapter y produce una entidad tipada: `Person`, `AcopioCenter` o `Event`. El parser conoce la estructura de su fuente: qué campo es el nombre, qué campo es la cédula, qué status mapea a qué enum.
+
+La configuración de fuentes (URL, tipo, parser asignado, trust_tier) vive en un YAML. **Agregar una fuente nueva requiere únicamente escribir un parser nuevo. El resto del pipeline no cambia.**
+
+### Limpieza
+
+La limpieza opera sobre entidades tipadas, no sobre texto crudo. Los módulos corren en **orden fijo** con una justificación concreta para cada posición:
+
+1. **PII** — va primero porque nunca se debe operar sobre datos sensibles en crudo más tiempo del necesario. Las cédulas y teléfonos se reemplazan por su HMAC antes de cualquier otro procesamiento. Los campos originales no se guardan.
+
+2. **Normalización** — va antes de deduplicación porque el matching necesita texto uniforme: `"JOSE LUIS"` y `"José Luis"` deben ser el mismo registro antes de comparar, no después. Cubre: unicode, tildes, mayúsculas, abreviaciones, fechas → ISO 8601, ubicaciones → normalización de nombre + llamada opcional a OpenStreetMap (si la API falla, el campo de coordenadas queda `null`; el registro no se descarta). Para fuentes de texto libre (PDFs, HTML narrativo) incluye un paso de NLP con spaCy (`es_core_news_sm`) para extraer entidades antes del mapeo.
+
+3. **Deduplicación** — para eventos y centros de acopio usa un fingerprint por contenido (SHA-256 tras normalización). Para personas el problema es más difícil porque el mismo individuo puede aparecer con nombre incompleto, sin cédula o con edad aproximada:
+   - **Blocking**: agrupa por fonética (Double Metaphone o NYSIIS — no Soundex, que fue diseñado para inglés) + primeras letras + estado. Solo se comparan candidatos dentro del mismo bloque.
+   - **Similarity scoring**: Jaro-Winkler para nombres, coincidencia de cédula HMAC, rango de edad, estado/ciudad, y opcionalmente similitud facial.
+   - **Clustering**: pares que superan el umbral se marcan como `probable_duplicate`. El algoritmo propone; un voluntario confirma.
+
+4. **Validación** — corre al final, sobre datos ya limpios y deduplicados. Asigna un `confidence_score` basado en cuántos campos clave están presentes y en el `trust_tier` de la fuente. Los campos ausentes se exportan como `null`. No se omiten.
+
+### Export
+
+La salida son tres streams JSONL independientes, listos para ingestión por DB/API:
+
+```
+persons.jsonl   →  registros de personas
+acopio.jsonl    →  centros de acopio activos
+events.jsonl    →  eventos (sismos, zonas afectadas)
+```
 
 ---
 
@@ -106,8 +156,9 @@ pytest scrapers/tests
 ## Stack
 
 **Scrapers/Cleaners**
-- Python: `requests`, `BeautifulSoup`, `PyYAML`
-- Detección de PII con regex + HMAC para correlación de cédulas
+- Python: `BeautifulSoup`, `Playwright`, `httpx`, `pdfplumber`, `PyYAML`
+- Detección y redacción de PII con regex + HMAC para correlación de cédulas
+- NLP: `spaCy` (`es_core_news_sm`) para extracción de entidades en texto libre
 
 **DB/API**
 - PostgreSQL
@@ -115,8 +166,9 @@ pytest scrapers/tests
 - SQLAlchemy
 
 **Deduplicación**
-- Fingerprint SHA-256 por contenido normalizado
-- Jaro-Winkler + Metaphone-ES para nombres (en desarrollo)
+- Fingerprint SHA-256 por contenido normalizado (eventos y centros de acopio)
+- Blocking fonético: Double Metaphone / NYSIIS (personas)
+- Jaro-Winkler para similitud de nombres
 
 ---
 
