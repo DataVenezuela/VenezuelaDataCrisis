@@ -1,0 +1,24 @@
+# Mapea claim_types a Matching Domains y define la llave decisiva determinista.
+# PR3 solo usa coincidencia determinista (sin fuzzy). El fuzzy llega en PR4 con
+# notebooks de evidencia. Postura: precisión > recall; sin señal fuerte NO se fusiona.
+#
+# Llaves decisivas:
+#   type_geo_day          -> <claim_type>|<geo_codigo>|<dia>   (need/infra/service/casualty)
+#   identity_or_name_geo  -> person|token|<cedula_hmac>        (persona; si no hay token, no fusiona)
+
+domains:
+  person:
+    claim_types: [casualties.missing]
+    decisive: identity_or_name_geo
+  casualty:
+    claim_types: [casualties.deaths, casualties.injured]
+    decisive: type_geo_day
+  need:
+    claim_types: [need.water, need.food, need.medical, need.shelter]
+    decisive: type_geo_day
+  service:
+    claim_types: [service.power_outage, service.water_outage]
+    decisive: type_geo_day
+  infrastructure:
+    claim_types: [infrastructure.collapsed_building, infrastructure.road_blocked]
+    decisive: type_geo_day

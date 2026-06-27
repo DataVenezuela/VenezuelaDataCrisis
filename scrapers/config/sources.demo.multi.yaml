@@ -1,0 +1,29 @@
+project:
+  event_id: venezuela_earthquake_demo
+  default_country: Venezuela
+  output_mode: sanitized_jsonl
+
+# Dos fuentes sintéticas que reportan el mismo hecho (agua en Caracas) con texto distinto.
+# Demuestra: huellas distintas (sobreviven dedup exacto) -> misma entidad por clustering.
+sources:
+  - id: demo_fuente_a
+    name: Demo fuente A
+    type: manual_file
+    enabled: true
+    trust_tier: C
+    url: scrapers/sample_data/synthetic_dump.txt
+    refresh_minutes: 60
+    required_keywords: [agua, terremoto]
+    parser: text
+    notes: "Datos 100% sintéticos."
+
+  - id: demo_fuente_b
+    name: Demo fuente B
+    type: manual_file
+    enabled: true
+    trust_tier: B
+    url: scrapers/sample_data/synthetic_dump_2.txt
+    refresh_minutes: 60
+    required_keywords: [agua, terremoto]
+    parser: text
+    notes: "Datos 100% sintéticos."

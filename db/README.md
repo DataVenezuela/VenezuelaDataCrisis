@@ -51,6 +51,18 @@ python -m scrapers.cli run --config scrapers/config/sources.demo.yaml --persist
 python -m shared.seed --output-dir scrapers/runtime_output
 ```
 
+## Clustering determinista (asignar afirmaciones a entidades)
+
+Agrupa afirmaciones en entidades por su llave decisiva (zona+tipo+día, o token de
+identidad para personas). Determinista e idempotente. Sin señal fuerte => entidad propia.
+
+```bash
+python -m scrapers.cli run --config scrapers/config/sources.demo.multi.yaml --persist
+python -m shared.clustering
+# Dos fuentes que reportan el mismo hecho -> una sola entidad:
+psql "$DATABASE_URL" -c "SELECT clave_match, count(*) FROM entidad e JOIN membresia_afirmacion m ON m.entidad_uuid=e.uuid GROUP BY clave_match;"
+```
+
 ## Verificar dedup exacto cross-run
 
 ```bash
