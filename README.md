@@ -40,6 +40,16 @@ Este proyecto ataca esas preguntas en 6 etapas:
 
 ---
 
+## Arquitectura del pipeline
+
+El siguiente diagrama muestra el flujo completo de datos: desde las fuentes originales hasta la base de datos, pasando por adapters, parsers, modelos tipados y los módulos de limpieza compartida.
+
+![Arquitectura del pipeline](./docs/pipeline.svg)
+
+> Fuente editable: [`docs/pipeline.dot`](./docs/pipeline.dot) (Graphviz)
+
+---
+
 ## Mapa de dependencias
 
 El siguiente diagrama muestra las dependencias entre los issues activos del proyecto. Úsalo como referencia para entender qué bloquea qué antes de empezar a trabajar.
