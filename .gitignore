@@ -218,3 +218,16 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local scraper outputs and sensitive data dumps
+outputs/
+dumps/
+raw/
+artifacts/
+tmp/
+temp/
+
+# Local secrets
+.env
+.env.*
+!.env.example
