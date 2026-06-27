@@ -45,5 +45,11 @@ def identity_token(raw_identifier: str | None, secret: str) -> str | None:
 
     Delega en `hmac_hex` para garantizar UNA sola normalización canónica
     compartida con el redactor.
+
+    CONTRATO DE EXPORTACIÓN: ésta es la ÚNICA fuente declarada del campo
+    `cedula_hmac` (export JSONL / columna DB VARCHAR(64)). Devuelve HEX PURO de
+    64 caracteres, SIN prefijo. NO confundir con
+    `scrapers.sanitizers.pii_tokenizer.hmac_token`, que añade el prefijo
+    "hmac_sha256:" y es SOLO para logs/redacción interna (nunca exportar).
     """
     return hmac_hex(raw_identifier, secret)
