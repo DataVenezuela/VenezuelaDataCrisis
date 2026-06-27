@@ -6,6 +6,7 @@ from scrapers.normalizers.text import (
     normalize_unicode,
 )
 from scrapers.normalizers.date import normalize_date
+from scrapers.normalizers.location import geocode_osm, normalize_location
 
 __all__ = [
     "normalize_text",
@@ -14,4 +15,6 @@ __all__ = [
     "normalize_proper_name",
     "normalize_unicode",
     "normalize_date",
+    "normalize_location",
+    "geocode_osm",
 ]
