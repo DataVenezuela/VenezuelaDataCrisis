@@ -23,6 +23,20 @@ def main() -> None:
         action="store_true",
         help="Keep redacted source snapshots locally for debugging; raw PII is never written",
     )
+    persist_group = run_cmd.add_mutually_exclusive_group()
+    persist_group.add_argument(
+        "--persist",
+        dest="persist_db",
+        action="store_true",
+        default=None,
+        help="Persist to Postgres (requires DATABASE_URL). Default: auto if DATABASE_URL is set",
+    )
+    persist_group.add_argument(
+        "--no-persist",
+        dest="persist_db",
+        action="store_false",
+        help="Skip Postgres persistence even if DATABASE_URL is set",
+    )
 
     validate_cmd = sub.add_parser("validate", help="Validate source config")
     validate_cmd.add_argument("--config", required=True, help="YAML config path")
@@ -41,12 +55,15 @@ def main() -> None:
             output_dir=Path(args.output_dir),
             limit=args.limit,
             keep_raw=args.keep_raw,
+            persist_db=args.persist_db,
         )
         print("Pipeline finalizado")
         print(f"Fuentes procesadas: {summary['sources_processed']}")
         print(f"Documentos exportados: {summary['documents_exported']}")
         print(f"Claims exportados: {summary['claims_exported']}")
         print(f"Claims deduplicados: {summary['claims_deduplicated']}")
+        if summary.get("persistence"):
+            print(f"Persistencia (Postgres): {summary['persistence']}")
         print(f"Errores: {len(summary['errors'])}")
         print(f"Salida: {Path(args.output_dir).resolve()}")
 

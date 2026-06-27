@@ -101,11 +101,39 @@ def _fetch_and_extract(source) -> list[Document]:
     raise ValueError(f"Tipo no soportado: {source.type}")
 
 
+def _maybe_persist(
+    documents: list[dict],
+    claims: list[dict],
+    persist_db: bool | None,
+) -> dict | None:
+    """Persiste a Postgres si hay DATABASE_URL. Offline (demo) lo omite sin fallar.
+
+    El dedup exacto cross-run lo garantiza el UNIQUE sobre claim.fingerprint."""
+    from shared.config import get_database_url
+
+    dsn = get_database_url()
+    if persist_db is False:
+        return None
+    if persist_db is None and not dsn:
+        return None
+    if not dsn:
+        return {"error": "persist solicitado pero DATABASE_URL no configurado"}
+
+    from shared.storage import ClaimStore
+
+    store = ClaimStore(dsn)
+    return {
+        "observations_inserted": store.upsert_observations(documents),
+        "claims_inserted": store.upsert_claims(claims),
+    }
+
+
 def run_pipeline(
     config_path: Path,
     output_dir: Path,
     limit: int | None = None,
     keep_raw: bool = False,
+    persist_db: bool | None = None,
 ) -> dict:
     project, sources = load_sources(config_path)
 
@@ -227,6 +255,12 @@ def run_pipeline(
     documents_exported = write_jsonl(documents_path, all_documents)
     claims_exported = write_jsonl(claims_path, deduped_claims)
 
+    try:
+        persistence = _maybe_persist(all_documents, deduped_claims, persist_db)
+    except Exception as exc:  # la persistencia no debe tumbar el pipeline offline
+        persistence = {"error": str(exc)}
+        errors.append({"source_id": "persistence", "error": str(exc)})
+
     summary = {
         "config_path": str(config_path),
         "output_dir": str(output_dir),
@@ -235,6 +269,7 @@ def run_pipeline(
         "claims_detected": len(all_claims),
         "claims_exported": claims_exported,
         "claims_deduplicated": duplicates,
+        "persistence": persistence,
         "errors": errors,
         "outputs": {
             "documents": str(documents_path),

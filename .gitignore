@@ -219,3 +219,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Salida local del pipeline: no commitear dumps/JSONL ni resúmenes (COMMIT_SAFETY.md)
+scrapers/runtime_output/*
+!scrapers/runtime_output/.gitkeep
+

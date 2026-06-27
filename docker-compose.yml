@@ -1,0 +1,24 @@
+# Postgres local para desarrollo. Portable a Supabase (cambiar DATABASE_URL).
+# La imagen pgvector deja lista la extensión `vector` para near-dup semántico futuro.
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: vzla_dedup_db
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-vzla}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-vzla_local_dev}
+      POSTGRES_DB: ${POSTGRES_DB:-vzla_dedup}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - vzla_pgdata:/var/lib/postgresql/data
+      # Las migraciones corren automáticamente en la primera inicialización del volumen.
+      - ./db/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-vzla} -d ${POSTGRES_DB:-vzla_dedup}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  vzla_pgdata:
