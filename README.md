@@ -52,18 +52,6 @@ El siguiente diagrama muestra el flujo completo de datos: desde las fuentes orig
 
 ---
 
-## Arquitectura de serving (API pública)
-
-El serving se separa en **dos planos desacoplados**, unidos por un artefacto inmutable que se reconstruye por ciclos (patrón read-model). La decisión completa, con sus trade-offs y alternativas descartadas, vive en [`docs/adr/0001-arquitectura-serving-publico.md`](./docs/adr/0001-arquitectura-serving-publico.md).
-
-- **Plano interno (fuente de verdad)** — Supabase / PostgreSQL. Datos completos, historial, UI para operadores y escrituras de Verification. Nunca recibe tráfico público. Sigue el estándar Python + SQLAlchemy.
-- **Plano público (solo lectura)** — Cloudflare Worker + D1 (SQLite en el borde) con **solo la proyección sanitizada** (HMAC y `masked`, jamás PII en claro). El borde aporta caché, WAF, rate-limit y Turnstile, que absorben los picos de tráfico.
-- **Puente** — un build job (cron, en Python) proyecta la vista pública desde Supabase hacia D1 cada 30–60 min con swap atómico.
-
-> Garantía de diseño: una brecha total del plano público expone, en el peor caso, datos **ya sanitizados**. Los datos completos quedan en el plano interno.
-
----
-
 ## Pipeline en detalle
 
 El pipeline tiene cuatro capas secuenciales. Las dos primeras forman la **recolección**; las dos últimas son la **limpieza**, completamente independiente y reutilizable cuando el sistema pase a recibir datos de fuentes externas en vez de scrapearlos.
@@ -208,12 +196,10 @@ El siguiente diagrama muestra las dependencias entre los issues activos del proy
 
 ## Estado actual
 
-El pipeline de scrapers está operativo con datos. El serving público (Worker + D1) y el build job están en construcción, según [`docs/adr/0001`](./docs/adr/0001-arquitectura-serving-publico.md) y el [plan de implementación](./docs/implementation-plan.md).
+El pipeline de scrapers está operativo con datos. La API y la capa de almacenamiento están en construcción.
 
 ```
-serving/                    → Plano público: Worker + D1 (TypeScript) — en construcción
-tools/                      → build_public_index: Supabase → D1 (Python) — en construcción
-api/                        → stubs supeditados al ADR 0001 (plano interno o build job)
+api/                        → FastAPI (en construcción)
 │   ├── auth.py
 │   ├── main.py
 │   └── routes/
@@ -258,17 +244,10 @@ pytest scrapers/tests
 - Detección y redacción de PII con regex + HMAC para correlación de cédulas
 - NLP: `spaCy` (`es_core_news_sm`) para extracción de entidades en texto libre
 
-**Plano interno (fuente de verdad)**
-- Supabase / PostgreSQL
-- SQLAlchemy (Python) para acceso y modelos
-- UI de Supabase para operadores y Verification
-
-**Plano público (API de solo lectura)**
-- Cloudflare Worker + D1 (SQLite en el borde, FTS5)
-- Caché, WAF, rate-limit y Turnstile en el borde
-- Build job en Python: proyección sanitizada Supabase → D1
-
-Ver [`docs/adr/0001-arquitectura-serving-publico.md`](./docs/adr/0001-arquitectura-serving-publico.md).
+**DB/API**
+- PostgreSQL
+- FastAPI (Python)
+- SQLAlchemy
 
 **Deduplicación**
 - Fingerprint SHA-256 por contenido normalizado (eventos y centros de acopio)
@@ -294,8 +273,7 @@ Este proyecto maneja información de personas desaparecidas. Las reglas son estr
 
 - Cédulas, teléfonos y contactos se redactan o se HMAC antes de exportar, nunca en claro
 - Los outputs del pipeline van a `scrapers/runtime_output/` (en `.gitignore`), nunca al repo
-- El plano público (Worker + D1) solo contiene la proyección sanitizada: nunca PII en claro
-- Existe un mecanismo de eliminación de datos a pedido, aplicado por el build job vía `denylist`
+- Existe un mecanismo de eliminación de datos a pedido
 
 ---
 
