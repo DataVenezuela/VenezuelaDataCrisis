@@ -80,24 +80,6 @@ Este documento debe mantenerse alineado con los modelos de base de datos y los J
 
 ---
 
-### `adr/`
-
-Architecture Decision Records: decisiones de arquitectura con su contexto,
-consecuencias y alternativas descartadas.
-
-* [`adr/0001-arquitectura-serving-publico.md`](./adr/0001-arquitectura-serving-publico.md)
-  — dos planos desacoplados: Supabase interno como fuente de verdad y Cloudflare
-  Worker + D1 como plano público de solo-lectura.
-
----
-
-### `implementation-plan.md`
-
-Desarrolla la ADR 0001 en fases ejecutables (build job, Worker, borde, CI/CD), con
-tareas, criterios de aceptación y orden de dependencias.
-
----
-
 ## Reglas globales
 
 Todos los documentos técnicos deben respetar estas reglas:
