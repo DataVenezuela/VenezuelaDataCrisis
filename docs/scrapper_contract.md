@@ -84,15 +84,17 @@ Event
 ```
 
 ---
-
 ## 4. Archivos de salida definidos actualmente
 
-La especificación actual define tres streams JSONL independientes:
+La especificación actual define los siguientes archivos JSONL independientes:
 
 ```text
-Persons.jsonl
-acopio.jsonl
 events.jsonl
+persons.jsonl
+person_notes.jsonl
+person_photos.jsonl
+person_sources.jsonl
+acopio.jsonl
 ```
 
 Cada archivo debe usar formato JSONL:
@@ -121,213 +123,7 @@ Ejemplo incorrecto:
 
 ---
 
-## 5. Convenciones globales
-
-Todos los archivos JSONL deben cumplir estas convenciones.
-
-### 5.1 Fechas
-
-Todas las fechas deben estar en UTC.
-
-Formato JSONL:
-
-```text
-ISO 8601
-```
-
-Ejemplo:
-
-```json
-"2026-06-24T14:32:00Z"
-```
-
----
-
-### 5.2 Booleanos
-
-Los booleanos deben ser booleanos reales de JSON.
-
-Correcto:
-
-```json
-true
-```
-
-```json
-false
-```
-
-Incorrecto:
-
-```json
-1
-```
-
-```json
-0
-```
-
-```json
-"Si"
-```
-
-```json
-"No"
-```
-
-```json
-"true"
-```
-
-```json
-"false"
-```
-
----
-
-### 5.3 Nulos
-
-Los valores desconocidos deben exportarse como `null`.
-
-Correcto:
-
-```json
-"municipio": null
-```
-
-Incorrecto:
-
-```json
-"municipio": ""
-```
-
-```json
-"municipio": "N/A"
-```
-
-```json
-"municipio": "null"
-```
-
-```json
-"municipio": 0
-```
-
----
-
-### 5.4 IDs internos
-
-Los IDs internos deben ser UUID v4 como string.
-
-Ejemplo:
-
-```json
-"person_record_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
-```
-
-No usar autoincrement entero para IDs que salen del sistema.
-
----
-
-### 5.5 Enums
-
-Los enums deben ser strings con valores controlados.
-
-No se deben agregar valores nuevos sin actualizar este contrato y la especificación de tipos.
-
----
-
-### 5.6 HMAC
-
-Los valores HMAC definidos en el schema deben representarse como string hexadecimal SHA-256.
-
-Longitud esperada:
-
-```text
-64 caracteres
-```
-
----
-
-### 5.7 Scores
-
-Los scores deben ser números entre:
-
-```text
-0.000 y 1.000
-```
-
-Ejemplo:
-
-```json
-"confidence_score": 0.420
-```
-
----
-
-## 6. Contrato de `events.jsonl`
-
-Una línea representa un evento.
-
-### 6.1 Campos
-
-| Campo             |    Tipo JSONL | Nullable | Descripción                           |
-| ----------------- | ------------: | -------: | ------------------------------------- |
-| `event_id`        |        string |       no | UUID v4 generado por el sistema       |
-| `name`            |        string |       no | Nombre legible del evento             |
-| `event_type`      |        string |       no | Tipo de evento                        |
-| `occurred_at`     |        string |       no | Fecha/hora del evento en ISO 8601 UTC |
-| `affected_states` | array<string> |       sí | Estados venezolanos afectados         |
-| `magnitude`       |        number |       sí | Magnitud                              |
-| `depth_km`        |        number |       sí | Profundidad en kilómetros             |
-| `status`          |        string |       no | Estado del evento                     |
-| `external_ids`    |        object |       sí | IDs externos asociados                |
-
----
-
-### 6.2 Enums
-
-`event_type` permite:
-
-```text
-earthquake
-flood
-landslide
-other
-```
-
-`status` permite:
-
-```text
-active
-monitoring
-closed
-```
-
----
-
-### 6.3 Ejemplo
-
-```json
-{
-  "event_id": "f0e1d2c3-b4a5-6789-0fed-cba987654321",
-  "name": "Terremoto 24-06-2026",
-  "event_type": "earthquake",
-  "occurred_at": "2026-06-24T14:32:00Z",
-  "affected_states": ["Yaracuy"],
-  "magnitude": null,
-  "depth_km": 12.50,
-  "status": "active",
-  "external_ids": {
-    "usgs": "us7000n4x",
-    "funvisis": "2026-001"
-  }
-}
-```
-
----
-
-## 7. Contrato de `Persons.jsonl`
+## 7. Contrato de `persons.jsonl`
 
 Una línea representa un registro de persona producido desde una fuente.
 
@@ -349,8 +145,6 @@ Una línea representa un registro de persona producido desde una fuente.
 | `verification_status` |        string |       no | Estado de verificación                                    |
 | `confidence_score`    |        number |       no | Score de confianza                                        |
 | `source_url`          |        string |       sí | URL primaria del registro                                 |
-
----
 
 ### 7.2 Enums
 
@@ -381,8 +175,6 @@ verified
 conflicting
 ```
 
----
-
 ### 7.3 `age_range`
 
 `age_range` debe ser un objeto.
@@ -402,8 +194,6 @@ Si no se conoce la edad o el rango no puede determinarse con seguridad:
 "age_range": null
 ```
 
----
-
 ### 7.4 `last_known_location`
 
 Debe usar la estructura `location_object` definida en este contrato.
@@ -414,8 +204,6 @@ Si no se conoce ubicación:
 "last_known_location": null
 ```
 
----
-
 ### 7.5 Ejemplo
 
 ```json
@@ -424,7 +212,7 @@ Si no se conoce ubicación:
   "event_id": "f0e1d2c3-b4a5-6789-0fed-cba987654321",
   "full_name": "JOSE LUIS PEREZ MARIN",
   "alternate_names": ["JOSE PEREZ", "JOSELO PEREZ MARIN"],
-  "cedula_hmac": "3b4c9e2a1f...",
+  "cedula_hmac": "3b4c9e2a1fd82f6a0bc347e1a9f2c8d5e047b3a12f9c6d71e8b405a3c2d1f9e0",
   "cedula_masked": "V-****5821",
   "age_range": {
     "min": 30,
@@ -443,17 +231,15 @@ Si no se conoce ubicación:
   "status": "missing",
   "verification_status": "unverified",
   "confidence_score": 0.420,
-  "source_url": "https://ejemplo.com/registro/12345"
+  "source_url": "https://encuentralos.org/registro/12345"
 }
 ```
 
 ---
 
-## 8. Información adicional de persona
+## 8. Contrato de `person_notes.jsonl`
 
-La especificación actual define campos para notas o información adicional asociada a una persona.
-
-Estos campos están definidos como `PERSONA → nota, información adicional`.
+Una línea representa una nota, claim o información adicional asociada a una persona.
 
 ### 8.1 Campos base de nota
 
@@ -468,8 +254,6 @@ Estos campos están definidos como `PERSONA → nota, información adicional`.
 | `entry_date`          |     string |       no | Fecha en que entra el registro                   |
 | `found`               |    boolean |       sí | `true` si fue localizada; `null` si se desconoce |
 | `last_known_location` |     object |       sí | Objeto de ubicación                              |
-
----
 
 ### 8.2 Enums
 
@@ -490,16 +274,12 @@ superseded
 retracted
 ```
 
----
-
 ### 8.3 Campos cuando `note_type = "missing"`
 
 | Campo                | Tipo JSONL | Nullable |
 | -------------------- | ---------: | -------: |
 | `last_seen_at`       |     string |       sí |
 | `last_seen_location` |     object |       sí |
-
----
 
 ### 8.4 Campos cuando `note_type = "injured"`
 
@@ -520,15 +300,11 @@ critico
 unknown
 ```
 
----
-
 ### 8.5 Campos cuando `note_type = "found"`
 
 | Campo      | Tipo JSONL | Nullable |
 | ---------- | ---------: | -------: |
 | `found_at` |     string |       sí |
-
----
 
 ### 8.6 Campos cuando `note_type = "deceased"`
 
@@ -549,9 +325,9 @@ pending
 
 ---
 
-## 9. Fotos de persona
+## 9. Contrato de `person_photos.jsonl`
 
-La especificación actual define campos para fotos asociadas a personas.
+Una línea representa una foto asociada a una persona.
 
 ### 9.1 Campos
 
@@ -566,9 +342,9 @@ La especificación actual define campos para fotos asociadas a personas.
 
 ---
 
-## 10. Fuente / corroboración de persona
+## 10. Contrato de `person_sources.jsonl`
 
-La especificación actual define campos de fuente o corroboración asociados a personas.
+Una línea representa una fuente o corroboración asociada a una persona.
 
 ### 10.1 Campos
 
@@ -580,8 +356,6 @@ La especificación actual define campos de fuente o corroboración asociados a p
 | `ext_id`           |     string |       sí | ID del registro en la fuente externa |
 | `trust_tier`       |     number |       no | Nivel de confianza                   |
 | `fetched_at`       |     string |       no | Fecha/hora en que fue scrapeado      |
-
----
 
 ### 10.2 `trust_tier`
 
@@ -601,22 +375,21 @@ Una línea representa un centro de acopio.
 
 ### 11.1 Campos
 
-| Campo              |    Tipo JSONL | Nullable | Descripción                    |
-| ------------------ | ------------: | -------: | ------------------------------ |
-| `acopio_id`        |        string |       no | UUID v4                        |
-| `event_id`         |        string |       no | Referencia a `events.event_id` |
-| `name`             |        string |       no | Nombre del centro              |
-| `location`         |        object |       sí | Objeto de ubicación            |
-| `confidence_score` |        number |       no | Score de confianza             |
-| `status`           |        string |       no | Estado del centro              |
-| `needs`            | array<string> |       sí | Necesidades                    |
-| `last_verified_at` |        string |       sí | Última verificación            |
-| `managing_org`     |        string |       sí | Organización responsable       |
-| `public_contact`   |        string |       sí | Contacto público               |
-| `capacity`         |        number |       sí | Capacidad                      |
-| `current_load`     |        number |       sí | Carga actual                   |
-
----
+| Campo              |    Tipo JSONL | Nullable | Descripción                       |
+| ------------------ | ------------: | -------: | --------------------------------- |
+| `acopio_id`        |        string |       no | UUID v4                           |
+| `event_id`         |        string |       no | Referencia a `events.event_id`    |
+| `name`             |        string |       no | Nombre del centro                 |
+| `location`         |        object |       sí | Objeto de ubicación               |
+| `confidence_score` |        number |       no | Score de confianza                |
+| `status`           |        string |       no | Estado del centro                 |
+| `needs`            | array<string> |       sí | Array de `need_keyword`           |
+| `last_verified_at` |        string |       sí | Última verificación               |
+| `managing_org`     |        string |       sí | Organización responsable          |
+| `contact_hmac`     |        string |       sí | HMAC SHA-256 del contacto         |
+| `contact_masked`   |        string |       sí | Contacto parcialmente enmascarado |
+| `capacity`         |        number |       sí | Capacidad                         |
+| `current_load`     |        number |       sí | Carga actual                      |
 
 ### 11.2 Enums
 
@@ -629,37 +402,74 @@ closed
 unverified
 ```
 
----
+`needs[]` permite:
 
-## 12. `location_object`
+```text
+agua
+alimentos
+medicamentos
+colchonetas
+ropa
+calzado
+higiene
+pañales
+leche_formula
+generador
+combustible
+herramientas
+voluntarios
+transporte
+otro
+```
 
-La estructura de ubicación definida es:
+### 11.3 Reglas para `needs`
+
+`needs` debe ser un array de keywords controladas.
+
+El parser debe mapear texto libre antes de exportar.
+
+Ejemplos:
+
+```text
+"H2O" -> "agua"
+"agua potable" -> "agua"
+"AGUA" -> "agua"
+```
+
+Si una necesidad no tiene keyword equivalente, usar:
+
+```text
+otro
+```
+
+No exportar necesidades como texto libre si existe una keyword definida.
+
+### 11.4 Ejemplo
 
 ```json
 {
-  "raw": "El Tocuyo, Lara",
-  "estado": "Lara",
-  "municipio": "Morán",
-  "parroquia": null,
-  "lat": 9.7834,
-  "lng": -69.7921
+  "acopio_id": "h8c9d0e1-f2a3-4567-bcde-678901234567",
+  "event_id": "f0e1d2c3-b4a5-6789-0fed-cba987654321",
+  "name": "Centro de Acopio Polideportivo Municipal San Felipe",
+  "location": {
+    "raw": "Polideportivo Municipal, San Felipe, Yaracuy",
+    "estado": "Yaracuy",
+    "municipio": "San Felipe",
+    "parroquia": null,
+    "lat": 10.3401,
+    "lng": -68.7456
+  },
+  "confidence_score": 0.850,
+  "status": "active",
+  "needs": ["agua", "alimentos", "medicamentos", "colchonetas", "pañales"],
+  "last_verified_at": "2026-06-26T08:00:00Z",
+  "managing_org": "Cruz Roja Venezuela — Seccional Yaracuy",
+  "contact_hmac": "9f1c3e7a2b4d6f8e0a2c4e6f8b0d2f4a6c8e0b2d4f6a8c0e2f4b6d8a0c2e4f6",
+  "contact_masked": "+58 412 ***7834",
+  "capacity": 400,
+  "current_load": 283
 }
 ```
-
-Campos:
-
-| Campo       | Tipo JSONL | Nullable |
-| ----------- | ---------: | -------: |
-| `raw`       |     string |       sí |
-| `estado`    |     string |       sí |
-| `municipio` |     string |       sí |
-| `parroquia` |     string |       sí |
-| `lat`       |     number |       sí |
-| `lng`       |     number |       sí |
-
-Si la geocodificación falla, `lat` y `lng` deben quedar como `null`.
-
-El registro no debe descartarse por no tener coordenadas.
 
 ---
 
@@ -687,65 +497,34 @@ phone_hmac
 phone_masked
 ```
 
-Si el proyecto decide soportar teléfonos en el contrato JSONL, debe actualizar este documento y el schema antes de que los scrapers lo exporten.
+Para centros de acopio, el schema actual define:
 
----
-
-## 14. Campos ausentes
-
-Si un scraper no puede obtener un campo, debe exportarlo como `null`.
-
-Ejemplo:
-
-```json
-{
-  "full_name": "JOSE LUIS PEREZ MARIN",
-  "age_range": null,
-  "last_known_location": null
-}
+```text
+contact_hmac
+contact_masked
 ```
 
-No debe omitir el campo si el campo pertenece al contrato.
+El contacto de un centro de acopio puede ser el teléfono personal de un voluntario, no necesariamente un número institucional.
 
----
+Por defecto:
 
-## 15. Campos no definidos
-
-Un scraper no debe agregar campos nuevos al JSONL sin que estén definidos en este contrato o en la especificación de tipos de datos.
-
-Incorrecto:
-
-```json
-{
-  "person_record_id": "uuid-v4",
-  "instagram_username": "@usuario"
-}
+```text
+contact_hmac   -> HMAC para lookup
+contact_masked -> versión enmascarada para display
 ```
 
-Si una fuente trae datos adicionales que parecen importantes, se debe abrir una discusión para definir:
+No se debe exportar:
 
-* Nombre del campo.
-* Tipo JSONL.
-* Nullable.
-* Entidad a la que pertenece.
-* Reglas de seguridad.
-* Relación con DB/API.
+```text
+public_contact
+contact
+phone
+telefono
+```
 
----
+Si el equipo de Validation confirma que un contacto es genuinamente público, esa decisión debe manejarse en app layer. El default del contrato JSONL es protegerlo.
 
-## 16. Normalización mínima requerida
-
-Los parsers deben producir datos compatibles con los tipos definidos.
-
-Normalizaciones mínimas:
-
-* Fechas a UTC ISO 8601.
-* Booleanos como `true` / `false`.
-* Valores desconocidos como `null`.
-* Enums mapeados a los valores permitidos.
-* IDs internos como UUID v4.
-* Scores como número entre `0.000` y `1.000`.
-* HMAC como SHA-256 hex cuando aplique.
+Si el proyecto decide soportar teléfonos de personas en el contrato JSONL, debe actualizar este documento y el schema antes de que los scrapers lo exporten.
 
 ---
 
@@ -763,6 +542,8 @@ UUIDs válidos
 Scores en rango 0.000 - 1.000
 Nulls representados como null
 Ausencia de cédula en claro
+Ausencia de contacto de acopio en claro
+needs[] contiene solo keywords permitidas
 ```
 
 ---
@@ -771,63 +552,11 @@ Ausencia de cédula en claro
 
 Este contrato no resuelve las ambigüedades que todavía existen en las especificaciones actuales.
 
-### 18.1 Nombre exacto de archivo de personas
-
-La especificación de scraping menciona:
-
-```text
-Persons.jsonl
-```
-
-La especificación de tipos muestra ejemplo como:
-
-```text
-persons.jsonl
-```
-
-Pendiente definir casing oficial.
-
-Hasta que se defina, los scrapers deben seguir el nombre que el pipeline de ingestión espere en el código.
-
----
-
-### 18.2 Notas, fotos y fuentes como archivos separados o embebidos
-
-La especificación de scraping define tres streams JSONL:
-
-```text
-Persons.jsonl
-acopio.jsonl
-events.jsonl
-```
-
-Pero la especificación de tipos define entidades/tablas separadas para:
-
-```text
-person_notes
-person_photos
-person_sources
-```
-
-Pendiente definir si esas entidades deben exportarse como:
-
-```text
-person_notes.jsonl
-person_photos.jsonl
-person_sources.jsonl
-```
-
-o si deben ir embebidas dentro de `Persons.jsonl`.
-
-Hasta que se defina, este documento solo lista los campos definidos, sin decidir una estructura nueva.
-
----
-
-### 18.3 Teléfonos
+### 18.1 Teléfonos de personas
 
 La especificación de scraping menciona teléfonos como datos sensibles a reemplazar por HMAC.
 
-El schema actual no define campos de teléfono en JSONL.
+El schema actual no define campos de teléfono para personas en JSONL.
 
 Pendiente definir si se agregan campos como:
 
@@ -836,28 +565,14 @@ phone_hmac
 phone_masked
 ```
 
-o si los teléfonos quedan fuera del contrato de exportación.
+o si los teléfonos de personas quedan fuera del contrato de exportación.
 
----
+Hasta que se defina, los scrapers no deben exportar teléfonos de personas.
 
-### 18.4 Deduplicación de personas
+### 18.2 Deduplicación de personas
 
 La especificación actual indica que los duplicados probables deben marcarse para revisión y que un voluntario confirma.
 
 Este documento no define todavía un archivo JSONL de candidatos de deduplicación porque no está definido en el schema actual.
 
 Pendiente definir contrato de salida para duplicados probables, si DB/API lo requiere.
-
----
-
-## 19. Regla final
-
-Los scrapers deben ser estrictos con el contrato y conservadores con los datos.
-
-```text
-No inventar datos.
-No agregar campos no definidos.
-No exportar PII en claro.
-No descartar registros incompletos.
-No confirmar merges de personas desde el scraper.
-```

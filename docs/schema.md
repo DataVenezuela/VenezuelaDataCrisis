@@ -32,7 +32,7 @@ JSONL
 
 ## 2. Reglas globales JSONL
 
-### 2.1 Fechas
+### Fechas
 
 Todas las fechas deben estar en UTC.
 
@@ -44,7 +44,7 @@ Ejemplo:
 
 ---
 
-### 2.2 Booleanos
+### Booleanos
 
 Correcto:
 
@@ -76,7 +76,7 @@ Incorrecto:
 
 ---
 
-### 2.3 Nulos
+### Nulos
 
 Correcto:
 
@@ -100,7 +100,7 @@ Incorrecto:
 
 ---
 
-### 2.4 IDs internos
+### IDs internos
 
 Los IDs internos deben ser UUID v4 como string.
 
@@ -114,7 +114,7 @@ No usar autoincrement entero para IDs que salgan del sistema.
 
 ---
 
-### 2.5 Enums
+### Enums
 
 Los enums deben representarse como strings controlados.
 
@@ -122,7 +122,7 @@ No usar `ENUM` nativo de MySQL.
 
 ---
 
-### 2.6 HMAC
+### HMAC
 
 Los HMAC deben ser SHA-256 en hexadecimal.
 
@@ -134,7 +134,7 @@ VARCHAR(64)
 
 ---
 
-### 2.7 Scores
+### Scores
 
 Los scores deben estar entre:
 
@@ -189,21 +189,21 @@ monitoring
 closed
 ```
 
-### Ejemplo
+### Ejemplo JSONL
 
 ```json
 {
   "event_id": "f0e1d2c3-b4a5-6789-0fed-cba987654321",
-  "name": "Terremoto 24-06-2026",
+  "name": "Terremoto Yaracuy 24-06-2026",
   "event_type": "earthquake",
   "occurred_at": "2026-06-24T14:32:00Z",
-  "affected_states": ["Yaracuy"],
-  "magnitude": null,
+  "affected_states": ["Yaracuy", "Lara", "Portuguesa"],
+  "magnitude": 7.30,
   "depth_km": 12.50,
   "status": "active",
   "external_ids": {
-    "usgs": "us7000n4x",
-    "funvisis": "2026-001"
+    "usgs": "us7000n4xy",
+    "funvisis": "VEN-2026-001"
   }
 }
 ```
@@ -227,7 +227,7 @@ persons
 | `full_name`           | `VARCHAR(300)`   | `string`        |       sí | Nombre normalizado                                        |
 | `alternate_names`     | `JSONB` / `JSON` | `array<string>` |       sí | Nombres alternativos encontrados                          |
 | `cedula_hmac`         | `VARCHAR(64)`    | `string`        |       sí | HMAC SHA-256 de la cédula                                 |
-| `cedula_masked`       | `VARCHAR(15)`    | `string`        |       sí | Solo últimos dígitos visibles                             |
+| `cedula_masked`       | `VARCHAR(15)`    | `string`        |       sí | Cédula parcialmente enmascarada                           |
 | `age_range`           | `JSONB` / `JSON` | `object`        |       sí | Rango de edad                                             |
 | `sex`                 | `VARCHAR(10)`    | `string`        |       sí | Enum definido                                             |
 | `is_minor`            | `BOOLEAN`        | `boolean`       |       sí | `true` si es menor de 18; `null` si no puede determinarse |
@@ -279,7 +279,7 @@ Ejemplo:
 
 Se usa `age_range` en lugar de edad exacta.
 
-### Ejemplo
+### Ejemplo JSONL
 
 ```json
 {
@@ -287,7 +287,7 @@ Se usa `age_range` en lugar de edad exacta.
   "event_id": "f0e1d2c3-b4a5-6789-0fed-cba987654321",
   "full_name": "JOSE LUIS PEREZ MARIN",
   "alternate_names": ["JOSE PEREZ", "JOSELO PEREZ MARIN"],
-  "cedula_hmac": "3b4c9e2a1f...",
+  "cedula_hmac": "3b4c9e2a1fd82f6a0bc347e1a9f2c8d5e047b3a12f9c6d71e8b405a3c2d1f9e0",
   "cedula_masked": "V-****5821",
   "age_range": {
     "min": 30,
@@ -306,7 +306,7 @@ Se usa `age_range` en lugar de edad exacta.
   "status": "missing",
   "verification_status": "unverified",
   "confidence_score": 0.420,
-  "source_url": "https://ejemplo.com/registro/12345"
+  "source_url": "https://encuentralos.org/registro/12345"
 }
 ```
 
@@ -512,20 +512,21 @@ acopio_centers
 
 ### Campos
 
-| Campo              | Tipo SQL         | Tipo JSONL                 | Nullable | Valores / Notas                |
-| ------------------ | ---------------- | -------------------------- | -------: | ------------------------------ |
-| `acopio_id`        | `VARCHAR(36)` PK | `string`                   |       no | UUID v4                        |
-| `event_id`         | `VARCHAR(36)` FK | `string`                   |       no | Referencia a `events.event_id` |
-| `name`             | `VARCHAR(300)`   | `string`                   |       no | Nombre del centro              |
-| `location`         | `JSONB` / `JSON` | `object` `location_object` |       sí | Ubicación                      |
-| `confidence_score` | `NUMERIC(4,3)`   | `number`                   |       no | Default `0.000`                |
-| `status`           | `VARCHAR(30)`    | `string`                   |       no | Enum definido                  |
-| `needs`            | `JSONB` / `JSON` | `array<string>`            |       sí | Necesidades                    |
-| `last_verified_at` | `TIMESTAMPTZ`    | `string` ISO 8601          |       sí | Última verificación            |
-| `managing_org`     | `VARCHAR(255)`   | `string`                   |       sí | Organización responsable       |
-| `public_contact`   | `VARCHAR(300)`   | `string`                   |       sí | Contacto público               |
-| `capacity`         | `INTEGER`        | `number` integer           |       sí | Capacidad                      |
-| `current_load`     | `INTEGER`        | `number` integer           |       sí | Carga actual                   |
+| Campo              | Tipo SQL         | Tipo JSONL                 | Nullable | Valores / Notas                   |
+| ------------------ | ---------------- | -------------------------- | -------: | --------------------------------- |
+| `acopio_id`        | `VARCHAR(36)` PK | `string`                   |       no | UUID v4                           |
+| `event_id`         | `VARCHAR(36)` FK | `string`                   |       no | Referencia a `events.event_id`    |
+| `name`             | `VARCHAR(300)`   | `string`                   |       no | Nombre del centro                 |
+| `location`         | `JSONB` / `JSON` | `object` `location_object` |       sí | Ubicación                         |
+| `confidence_score` | `NUMERIC(4,3)`   | `number`                   |       no | Default `0.000`                   |
+| `status`           | `VARCHAR(30)`    | `string`                   |       no | Enum definido                     |
+| `needs`            | `JSONB` / `JSON` | `array<string>`            |       sí | Array de `need_keyword`           |
+| `last_verified_at` | `TIMESTAMPTZ`    | `string` ISO 8601          |       sí | Última verificación               |
+| `managing_org`     | `VARCHAR(255)`   | `string`                   |       sí | Organización responsable          |
+| `contact_hmac`     | `VARCHAR(64)`    | `string`                   |       sí | HMAC SHA-256 del contacto         |
+| `contact_masked`   | `VARCHAR(30)`    | `string`                   |       sí | Contacto parcialmente enmascarado |
+| `capacity`         | `INTEGER`        | `number` integer           |       sí | Capacidad                         |
+| `current_load`     | `INTEGER`        | `number` integer           |       sí | Carga actual                      |
 
 ### Enums
 
@@ -536,6 +537,53 @@ active
 full
 closed
 unverified
+```
+
+`acopio_centers.needs[]`:
+
+```text
+agua
+alimentos
+medicamentos
+colchonetas
+ropa
+calzado
+higiene
+pañales
+leche_formula
+generador
+combustible
+herramientas
+voluntarios
+transporte
+otro
+```
+
+### Ejemplo JSONL
+
+```json
+{
+  "acopio_id": "h8c9d0e1-f2a3-4567-bcde-678901234567",
+  "event_id": "f0e1d2c3-b4a5-6789-0fed-cba987654321",
+  "name": "Centro de Acopio Polideportivo Municipal San Felipe",
+  "location": {
+    "raw": "Polideportivo Municipal, San Felipe, Yaracuy",
+    "estado": "Yaracuy",
+    "municipio": "San Felipe",
+    "parroquia": null,
+    "lat": 10.3401,
+    "lng": -68.7456
+  },
+  "confidence_score": 0.850,
+  "status": "active",
+  "needs": ["agua", "alimentos", "medicamentos", "colchonetas", "pañales"],
+  "last_verified_at": "2026-06-26T08:00:00Z",
+  "managing_org": "Cruz Roja Venezuela — Seccional Yaracuy",
+  "contact_hmac": "9f1c3e7a2b4d6f8e0a2c4e6f8b0d2f4a6c8e0b2d4f6a8c0e2f4b6d8a0c2e4f6",
+  "contact_masked": "+58 412 ***7834",
+  "capacity": 400,
+  "current_load": 283
+}
 ```
 
 ---
@@ -638,6 +686,26 @@ closed
 unverified
 ```
 
+## `acopio_centers.needs[]`
+
+```text
+agua
+alimentos
+medicamentos
+colchonetas
+ropa
+calzado
+higiene
+pañales
+leche_formula
+generador
+combustible
+herramientas
+voluntarios
+transporte
+otro
+```
+
 ---
 
 # Notas de implementación
@@ -666,11 +734,46 @@ El mapeo semántico vive en documentación y en app layer.
 
 ---
 
-## `needs` en acopio como array
+## `needs` en acopio como array de keywords
 
-Los centros de acopio pueden tener necesidades múltiples y cambiantes.
+`needs` se mantiene como array porque un centro de acopio puede tener múltiples necesidades.
 
-Un array de strings normalizado es más flexible que columnas individuales.
+Sin embargo, los valores deben ser keywords controladas por el enum `need_keyword`.
+
+El parser es responsable de mapear texto libre al keyword antes de exportar.
+
+Ejemplos:
+
+```text
+"H2O" -> "agua"
+"agua potable" -> "agua"
+"AGUA" -> "agua"
+```
+
+Para necesidades que no tengan keyword, se usa:
+
+```text
+otro
+```
+
+El enum es extensible: agregar un keyword nuevo no rompe registros existentes.
+
+---
+
+## `contact_hmac` / `contact_masked` en acopio
+
+El contacto de un centro de acopio puede ser el teléfono personal de un voluntario, no necesariamente un número institucional.
+
+Por defecto se aplica el mismo patrón que `cedula_hmac`:
+
+```text
+contact_hmac   -> HMAC para lookup
+contact_masked -> versión enmascarada para display
+```
+
+Si el equipo de Validation confirma que un contacto es genuinamente público, se puede exponer desde app layer.
+
+El default es protegerlo.
 
 ---
 
