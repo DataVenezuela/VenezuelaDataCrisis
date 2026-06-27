@@ -2,21 +2,21 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
-_PERSON_STATUS = {"desaparecido", "encontrado", "fallecido"}
+_PERSON_STATUS = {"missing", "found", "injured", "deceased", "unknown"}
 _TRUST_TIERS = {"A", "B", "C", "D"}
 
 
 class Person(BaseModel):
-    """Persona reportada (desaparecida/encontrada/fallecida)."""
+    """Persona reportada con estado compatible con el schema público."""
 
     model_config = ConfigDict(extra="forbid")
 
     full_name: str
     cedula_hmac: str | None = None
     cedula_masked: str | None = None
-    age_range: dict | None = None
+    age_range: dict[str, int] | None = None
     last_known_location: str | None = None
-    status: str = "desaparecido"
+    status: str = "missing"
     verification_status: str = "unverified"
     trust_tier: str = "D"
     confidence_score: float = 0.0
@@ -65,15 +65,15 @@ class Person(BaseModel):
     def _masked_shape(cls, v: str | None) -> str | None:
         if v is None:
             return v
-        if len(v) > 4:
-            raise ValueError("cedula_masked holds at most the last 4 digits")
-        if not v.isdigit():
-            raise ValueError("cedula_masked must contain only digits")
+        if not v.strip():
+            raise ValueError("cedula_masked must be non-empty when provided")
+        if len(v) > 15:
+            raise ValueError("cedula_masked holds at most 15 characters")
         return v
 
     @field_validator("age_range")
     @classmethod
-    def _age_range_shape(cls, v: dict | None) -> dict | None:
+    def _age_range_shape(cls, v: dict[str, int] | None) -> dict[str, int] | None:
         if v is None:
             return v
         if set(v) - {"min", "max"}:

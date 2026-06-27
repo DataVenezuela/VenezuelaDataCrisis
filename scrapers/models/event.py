@@ -5,6 +5,7 @@ from datetime import datetime
 from pydantic import BaseModel, ConfigDict, field_validator
 
 _TRUST_TIERS = {"A", "B", "C", "D"}
+_EVENT_TYPES = {"earthquake", "flood", "landslide", "other"}
 
 
 class Event(BaseModel):
@@ -26,6 +27,13 @@ class Event(BaseModel):
     def _non_empty(cls, v: str) -> str:
         if not v or not v.strip():
             raise ValueError("must be a non-empty string")
+        return v
+
+    @field_validator("event_type")
+    @classmethod
+    def _valid_event_type(cls, v: str) -> str:
+        if v not in _EVENT_TYPES:
+            raise ValueError(f"event_type must be one of {sorted(_EVENT_TYPES)}")
         return v
 
     @field_validator("confidence_score", mode="before")

@@ -17,7 +17,7 @@ def test_person_complete_tier_a_scores_one() -> None:
         full_name="Ana Perez",
         cedula_hmac="abc123",
         last_known_location="Caracas",
-        status="desaparecido",
+        status="missing",
         trust_tier="A",
         fuente="hospital",
     )

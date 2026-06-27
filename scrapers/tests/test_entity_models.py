@@ -14,7 +14,7 @@ def test_models_importable_from_package():
 
 def test_person_valid_and_defaults():
     p = Person(full_name="Juan Perez", fuente="encuentralos")
-    assert p.status == "desaparecido"
+    assert p.status == "missing"
     assert p.verification_status == "unverified"
     assert p.trust_tier == "D"
     assert p.confidence_score == 0.0
@@ -55,17 +55,18 @@ def test_person_age_range_and_masked():
         full_name="A",
         fuente="s",
         age_range={"min": 30, "max": 40},
-        cedula_masked="5678",
+        cedula_masked="V-****5821",
     )
     assert p.age_range == {"min": 30, "max": 40}
+    assert p.cedula_masked == "V-****5821"
     with pytest.raises(ValidationError):
         Person(full_name="A", fuente="s", age_range={"min": 50, "max": 40})
     with pytest.raises(ValidationError):
         Person(full_name="A", fuente="s", age_range={"edad": 30})
     with pytest.raises(ValidationError):
-        Person(full_name="A", fuente="s", cedula_masked="123456789")
+        Person(full_name="A", fuente="s", cedula_masked="1234567890123456")
     with pytest.raises(ValidationError):
-        Person(full_name="A", fuente="s", cedula_masked="abcd")
+        Person(full_name="A", fuente="s", cedula_masked="   ")
 
 
 def test_acopio_center_valid_and_defaults():
@@ -111,9 +112,11 @@ def test_event_valid_and_date_iso_validation():
     assert e.trust_tier == "D"
     assert e.confidence_score == 0.0
     with pytest.raises(ValidationError):
-        Event(event_type="x", description="y", fuente="s", date_iso="not-a-date")
+        Event(event_type="earthquake", description="y", fuente="s", date_iso="not-a-date")
     with pytest.raises(ValidationError):
-        Event(event_type="x", description="y", fuente="s", confidence_score=True)  # type: ignore[arg-type]
+        Event(event_type="earthquake", description="y", fuente="s", confidence_score=True)  # type: ignore[arg-type]
+    with pytest.raises(ValidationError):
+        Event(event_type="demo", description="y", fuente="s")
 
 
 def test_serialization_round_trip():
