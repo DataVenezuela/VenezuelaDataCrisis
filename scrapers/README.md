@@ -6,16 +6,9 @@ El objetivo es convertir páginas, APIs, RSS o archivos manuales en **claims san
 
 ## Flujo
 
-```text
-source config
-  -> fetch
-  -> extract
-  -> normalize
-  -> sanitize
-  -> dedup
-  -> validate
-  -> export JSONL
-```
+![Arquitectura del pipeline](../docs/pipeline.svg)
+
+> Fuente editable: [`docs/pipeline.dot`](../docs/pipeline.dot) (Graphviz)
 
 ## Regla de seguridad
 
