@@ -33,7 +33,7 @@ INSERT INTO entidad (dominio) VALUES (%(dominio)s) RETURNING uuid
 _INSERT_MEMBERSHIP = """
 INSERT INTO membresia_afirmacion (entidad_uuid, afirmacion_id, puntaje, razon)
 VALUES (%(entidad_uuid)s, %(afirmacion_id)s, %(puntaje)s, %(razon)s)
-ON CONFLICT (entidad_uuid, afirmacion_id) DO NOTHING
+ON CONFLICT DO NOTHING
 """
 
 

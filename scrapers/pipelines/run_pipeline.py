@@ -123,10 +123,7 @@ def _maybe_persist(
     from shared.storage import ClaimStore
 
     store = ClaimStore(dsn)
-    return {
-        "observations_inserted": store.upsert_observations(documents),
-        "claims_inserted": store.upsert_claims(claims),
-    }
+    return store.persist_run(documents, claims)
 
 
 def run_pipeline(

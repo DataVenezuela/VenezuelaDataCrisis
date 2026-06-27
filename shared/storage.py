@@ -94,6 +94,23 @@ class ClaimStore:
             inserted = cur.rowcount
         return inserted if inserted is not None and inserted >= 0 else len(rows)
 
+    def persist_run(self, documents: Iterable[dict], claims: Iterable[dict]) -> dict:
+        """Persiste observaciones y afirmaciones en UNA sola transacción (atómico).
+
+        Evita el estado parcial (observaciones sin sus afirmaciones) ante un crash."""
+        obs_rows = [self._observation_params(doc) for doc in documents]
+        claim_rows = [self._claim_params(claim) for claim in claims]
+        with self._connect() as conn, conn.cursor() as cur:
+            obs_inserted = 0
+            if obs_rows:
+                cur.executemany(_INSERT_OBSERVACION, obs_rows)
+                obs_inserted = cur.rowcount if cur.rowcount and cur.rowcount >= 0 else len(obs_rows)
+            claims_inserted = 0
+            if claim_rows:
+                cur.executemany(_INSERT_AFIRMACION, claim_rows)
+                claims_inserted = cur.rowcount if cur.rowcount and cur.rowcount >= 0 else len(claim_rows)
+        return {"observations_inserted": obs_inserted, "claims_inserted": claims_inserted}
+
     def count_claims(self) -> int:
         with self._connect() as conn, conn.cursor() as cur:
             cur.execute("SELECT count(*) FROM afirmacion")
