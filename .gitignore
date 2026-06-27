@@ -219,3 +219,11 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# SQLite local databases and write-ahead logs (WAL)
+vzla_dedup.db
+test_vzla_dedup.db
+*.db
+*.db-journal
+*.db-wal
+*.db-shm

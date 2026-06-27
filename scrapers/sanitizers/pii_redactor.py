@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from scrapers.sanitizers.pii_detector import detect_pii
+from scrapers.sanitizers.pii_tokenizer import pii_token
 
 
 def _merge_findings(findings: list[dict]) -> list[dict]:
@@ -23,6 +24,7 @@ def _merge_findings(findings: list[dict]) -> list[dict]:
 
 
 def redact_pii(text: str | None) -> str:
+    """Sanitiza PII en el texto redactando datos genéricos y tokenizando cédulas y teléfonos usando PBKDF2."""
     if not text:
         return ""
 
@@ -34,7 +36,18 @@ def redact_pii(text: str | None) -> str:
     for finding in sorted(findings, key=lambda item: item["start"], reverse=True):
         start = finding["start"]
         end = finding["end"]
-        kind = finding["kind"].upper()
-        redacted = redacted[:start] + f"[REDACTED_{kind}]" + redacted[end:]
+        kind = finding["kind"]
+        raw_value = finding["value"]
+
+        if kind in ("identity_document", "phone"):
+            token_hash = pii_token(raw_value, kind)
+            if token_hash:
+                replacement = f"[TOKEN_{kind.upper()}:pbkdf2:{token_hash}]"
+            else:
+                replacement = f"[REDACTED_{kind.upper()}]"
+        else:
+            replacement = f"[REDACTED_{kind.upper()}]"
+
+        redacted = redacted[:start] + replacement + redacted[end:]
 
     return redacted

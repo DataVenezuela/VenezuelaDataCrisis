@@ -4,13 +4,14 @@ import hashlib
 from pathlib import Path
 from typing import Iterable
 
-from scrapers.dedup.deduplicator import deduplicate_by_fingerprint
+from scrapers.dedup.deduplicator import deduplicate_fuzzy
 from scrapers.dedup.fingerprint import build_fingerprint
 from scrapers.extractors.claim_extractor import extract_claim_candidates
 from scrapers.extractors.html_extractor import extract_html_text
 from scrapers.extractors.json_extractor import extract_json_text
 from scrapers.extractors.rss_extractor import extract_rss_items
 from scrapers.extractors.text_extractor import extract_plain_text
+from scrapers.extractors.custom_json_extractor import extract_geojson_earthquakes, extract_reliefweb_reports
 from scrapers.fetchers.http_client import fetch_url
 from scrapers.fetchers.local_file import read_local_file
 from scrapers.models.document import Document
@@ -66,20 +67,57 @@ def _fetch_and_extract(source) -> list[Document]:
         ]
 
     if source.type == "api_json":
-        title, text, metadata = extract_json_text(raw)
-        metadata["content_type"] = content_type
-        return [
-            Document(
-                source_id=source.id,
-                source_name=source.name,
-                source_url=source.url,
-                title=title,
-                text=text,
-                raw_hash=_hash_text(raw),
-                trust_tier=source.trust_tier,
-                metadata=metadata,
-            )
-        ]
+        if getattr(source, "parser", None) == "geojson_earthquake":
+            parsed_items = extract_geojson_earthquakes(raw)
+            docs = []
+            for title, text, metadata in parsed_items:
+                metadata["content_type"] = content_type
+                docs.append(
+                    Document(
+                        source_id=source.id,
+                        source_name=source.name,
+                        source_url=source.url,
+                        title=title,
+                        text=text,
+                        raw_hash=_hash_text(text),
+                        trust_tier=source.trust_tier,
+                        metadata=metadata,
+                    )
+                )
+            return docs
+        elif getattr(source, "parser", None) == "reliefweb_reports":
+            parsed_items = extract_reliefweb_reports(raw)
+            docs = []
+            for title, text, metadata in parsed_items:
+                metadata["content_type"] = content_type
+                docs.append(
+                    Document(
+                        source_id=source.id,
+                        source_name=source.name,
+                        source_url=source.url,
+                        title=title,
+                        text=text,
+                        raw_hash=_hash_text(text),
+                        trust_tier=source.trust_tier,
+                        metadata=metadata,
+                    )
+                )
+            return docs
+        else:
+            title, text, metadata = extract_json_text(raw)
+            metadata["content_type"] = content_type
+            return [
+                Document(
+                    source_id=source.id,
+                    source_name=source.name,
+                    source_url=source.url,
+                    title=title,
+                    text=text,
+                    raw_hash=_hash_text(raw),
+                    trust_tier=source.trust_tier,
+                    metadata=metadata,
+                )
+            ]
 
     if source.type == "rss":
         docs: list[Document] = []
@@ -218,7 +256,7 @@ def run_pipeline(
         except Exception as exc:
             errors.append({"source_id": source.id, "error": str(exc)})
 
-    deduped_claims, duplicates = deduplicate_by_fingerprint(all_claims)
+    deduped_claims, duplicates = deduplicate_fuzzy(all_claims)
 
     documents_path = sanitized_dir / "documents.jsonl"
     claims_path = sanitized_dir / "claims.jsonl"
