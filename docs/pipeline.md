@@ -370,6 +370,40 @@ El parser puede tocar PII en memoria para transformarla, pero la PII cruda no de
 
 ---
 
+## Política de normalización de `cedula_hmac`
+
+`cedula_hmac` se calcula sobre el valor normalizado de la cédula
+(`shared.hashing.identity_token` / `hmac_hex`, usados también por
+`scrapers.sanitizers.pii_tokenizer.mask_cedula`). Esa normalización:
+
+* Quita puntuación, espacios y acentos.
+* **Conserva** la letra de nacionalidad (V/E) si la fuente la trae.
+
+Decisión explícita: la letra de nacionalidad SÍ forma parte del
+identificador canónico. `"V12345678"` y `"12345678"` (mismos dígitos, sin
+prefijo) producen `cedula_hmac` **distintos**.
+
+Por qué: los rangos de cédula V (venezolano) y E (extranjero) se asignan de
+forma independiente, así que los mismos 8 dígitos pueden pertenecer a dos
+personas reales distintas según el prefijo. Ignorar el prefijo arriesga un
+falso merge entre esas dos personas, que es justo el daño que busca evitar
+la "Regla crítica de deduplicación" (ver sección 8): *fusionar mal puede
+ser peligroso*, *duplicar es tolerable*.
+
+Costo aceptado: si una fuente reporta la cédula sin el prefijo de
+nacionalidad (error de captura o formato), ese registro no va a coincidir
+por `cedula_hmac` con el mismo dato sí-prefijado. Mitigación: `cedula_hmac`
+es una señal de blocking/similarity, no la única — el scoring de Personas
+(ver "Similarity scoring") debe poder generar candidatos por nombre, edad y
+ubicación aunque `cedula_hmac` no coincida; la revisión humana decide el
+merge final.
+
+Si en el futuro se decide ignorar el prefijo de nacionalidad, ese cambio
+debe documentarse explícitamente aquí y migrar/recalcular los
+`cedula_hmac` ya exportados — no son compatibles entre políticas distintas.
+
+---
+
 ## 7. Normalizer
 
 El normalizer convierte datos heterogéneos en formatos estables.

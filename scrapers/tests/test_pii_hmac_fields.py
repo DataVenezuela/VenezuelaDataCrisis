@@ -30,7 +30,13 @@ def test_mask_cedula_differs_for_different_values() -> None:
 def test_mask_cedula_distinguishes_nationality_prefix() -> None:
     """Issue #51: "V12345678" y "12345678" ya NO deben colapsar al mismo
     token — la letra de nacionalidad es parte del identificador canónico
-    (misma normalización que `shared.hashing.identity_token`)."""
+    (misma normalización que `shared.hashing.identity_token`).
+
+    Política documentada en docs/pipeline.md ("Política de normalización
+    de `cedula_hmac`"): los rangos V/E se asignan de forma independiente,
+    así que ignorar el prefijo arriesga fusionar a dos personas reales
+    distintas. Cambiar esta política implica también actualizar ese doc.
+    """
     venezolano_hmac, _ = mask_cedula("V12345678", SECRET)
     sin_prefijo_hmac, _ = mask_cedula("12345678", SECRET)
 
