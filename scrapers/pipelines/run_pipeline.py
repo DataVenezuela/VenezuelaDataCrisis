@@ -371,6 +371,13 @@ def _apply_normalization(records: list[dict], errors: list[str]) -> list[dict]:
                 elif estado:
                     rec["last_known_location"] = estado
 
+            # Compute deterministic_id
+            from scrapers.normalizers.phonetic import phonetic_hash as _compute_phonetic, build_deterministic_id as _build_det_id
+            from scrapers.normalizers.person import normalize_person_name as _norm_name
+            _name_norm = _norm_name(rec.get("full_name") or "")
+            _ph = _compute_phonetic(_name_norm) if _name_norm else None
+            rec["deterministic_id"] = _build_det_id(_ph, rec.get("last_known_location"))
+
             # Normalizar date_iso para Event
             date_raw = rec.get("date_iso")
             if isinstance(date_raw, str) and date_raw:
