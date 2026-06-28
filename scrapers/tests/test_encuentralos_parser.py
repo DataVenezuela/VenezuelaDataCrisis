@@ -32,8 +32,6 @@ import re
 from pathlib import Path
 from typing import Any
 
-import pytest
-
 from scrapers.adapters.base import RawContent
 from scrapers.parsers.base import ParserProtocol
 from scrapers.parsers.encuentralos_parser import (

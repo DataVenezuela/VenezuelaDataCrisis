@@ -56,7 +56,6 @@ from typing import Any
 from scrapers.adapters.base import RawContent
 from scrapers.models import Person
 from scrapers.normalizers import normalize_location, normalize_proper_name
-from scrapers.parsers.base import ParserProtocol
 from scrapers.sanitizers.pii_tokenizer import _masked_last4
 from shared.hashing import identity_token
 
