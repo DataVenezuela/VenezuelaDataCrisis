@@ -79,21 +79,27 @@ def _masked_last4(value: str) -> str:
 
 
 def mask_cedula(cedula: str, salt: str) -> tuple[str, str]:
-    """Devuelve (`cedula_hmac`, `cedula_masked`) sin conservar cédula cruda."""
-    normalized = _digits_only(cedula)
-    digest = hmac_hex(normalized, salt)
+    """Devuelve (`cedula_hmac`, `cedula_masked`) sin conservar cédula cruda.
+
+    El HMAC se calcula sobre la normalización canónica de `shared.hashing`
+    (la misma que usa `identity_token`), para que el redactor y el matcher
+    de Personas coincidan en el token de la misma cédula (issue #51).
+    """
+    digest = hmac_hex(cedula, salt)
     if digest is None:
         raise ValueError("No hay dígitos de cédula para tokenizar")
-    return digest, _masked_last4(normalized)
+    return digest, _masked_last4(cedula)
 
 
 def mask_telefono(telefono: str, salt: str) -> tuple[str, str]:
-    """Devuelve (`telefono_hmac`, `telefono_masked`) sin conservar teléfono crudo."""
-    normalized = _digits_only(telefono)
-    digest = hmac_hex(normalized, salt)
+    """Devuelve (`telefono_hmac`, `telefono_masked`) sin conservar teléfono crudo.
+
+    Ver `mask_cedula`: misma normalización canónica compartida con el matcher.
+    """
+    digest = hmac_hex(telefono, salt)
     if digest is None:
         raise ValueError("No hay dígitos de teléfono para tokenizar")
-    return digest, _masked_last4(normalized)
+    return digest, _masked_last4(telefono)
 
 
 def tokenize_pii_fields(
