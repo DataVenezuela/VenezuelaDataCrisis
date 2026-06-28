@@ -5,7 +5,7 @@ from pathlib import Path
 import yaml
 
 
-SUPPORTED_TYPES = {"html_static", "api_json", "rss", "manual_file", "webapp", "pdf"}
+SUPPORTED_TYPES = {"html_static", "api_json", "rss", "manual_file", "webapp_js", "pdf"}
 SUPPORTED_TRUST_TIERS = {"A", "B", "C", "D"}
 REQUIRED_SOURCE_FIELDS = {
     "id",
@@ -64,6 +64,23 @@ def _validate_optional_fields(source: dict, label: str) -> None:
         and not isinstance(source["notes"], str)
     ):
         raise ValueError(f"{label} debe tener 'notes' como texto o null.")
+
+    timeout_seconds = source.get("timeout_seconds")
+    if timeout_seconds is not None:
+        if isinstance(timeout_seconds, bool) or not isinstance(
+            timeout_seconds, (int, float)
+        ) or timeout_seconds <= 0:
+            raise ValueError(
+                f"{label} debe tener 'timeout_seconds' como numero positivo."
+            )
+
+    max_retries = source.get("max_retries")
+    if max_retries is not None:
+        if isinstance(max_retries, bool) or not isinstance(max_retries, int) or max_retries < 1:
+            raise ValueError(
+                f"{label} debe tener 'max_retries' como entero positivo (representa el numero "
+                f"total de intentos; 0 dejaria el adapter sin ningun intento)."
+            )
 
 
 def validate_sources_config(config_path: Path) -> dict:

@@ -23,7 +23,7 @@ def test_custom_template_config_is_valid():
     payload = validate_sources_config(path)
 
     assert len(payload["sources"]) == 5
-    assert {source["type"] for source in payload["sources"]} >= {"webapp", "pdf"}
+    assert {source["type"] for source in payload["sources"]} >= {"webapp_js", "pdf"}
 
 
 def test_missing_required_field_is_rejected(tmp_path):
@@ -64,6 +64,28 @@ sources:
     )
 
     with pytest.raises(ValueError, match="type no soportado"):
+        validate_sources_config(config)
+
+
+def test_zero_max_retries_is_rejected(tmp_path):
+    config = tmp_path / "zero_retries.yaml"
+    config.write_text(
+        """
+sources:
+  - id: webapp_sin_intentos
+    name: WebApp con max_retries en cero
+    type: webapp_js
+    enabled: true
+    trust_tier: C
+    url: "https://example.org/app"
+    refresh_minutes: 30
+    parser_asignado: html
+    max_retries: 0
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="max_retries"):
         validate_sources_config(config)
 
 
