@@ -40,13 +40,13 @@ def _resolve_db_path(db_path: str | Path | None) -> Path:
 
 
 def deduplicate_by_fingerprint(
-    items: list[dict],
+    items: list[dict[str, object]],
     db_path: str | Path | None = None,
-) -> tuple[list[dict], int]:
+) -> tuple[list[dict[str, object]], int]:
     database_path = _resolve_db_path(db_path)
     database_path.parent.mkdir(parents=True, exist_ok=True)
 
-    output: list[dict] = []
+    output: list[dict[str, object]] = []
     duplicates = 0
 
     with sqlite3.connect(database_path) as connection:
