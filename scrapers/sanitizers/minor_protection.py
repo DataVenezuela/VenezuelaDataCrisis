@@ -16,8 +16,9 @@ from typing import Any
 
 # Campos que se anulan por completo cuando is_minor=True: alta capacidad de
 # identificar/localizar a la persona (foto) o de mostrarla parcialmente en
-# claro (cedula_masked).
-_MINOR_REDACTED_FIELDS = ("foto", "cedula_masked")
+# claro (cedula_masked). Parte del contrato público del módulo (ver docstring
+# arriba) — no es un detalle de implementación, por eso no lleva "_".
+MINOR_REDACTED_FIELDS = ("foto", "cedula_masked")
 
 
 def protect_minor_fields(record: Mapping[str, Any]) -> dict[str, Any]:
@@ -30,7 +31,7 @@ def protect_minor_fields(record: Mapping[str, Any]) -> dict[str, Any]:
         return dict(record)
 
     sanitized = dict(record)
-    for field in _MINOR_REDACTED_FIELDS:
+    for field in MINOR_REDACTED_FIELDS:
         if field in sanitized:
             sanitized[field] = None
 

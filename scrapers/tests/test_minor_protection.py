@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from scrapers.models import Person
 from scrapers.sanitizers.minor_protection import (
-    _MINOR_REDACTED_FIELDS,
+    MINOR_REDACTED_FIELDS,
     protect_minor_fields,
 )
 
@@ -87,5 +87,5 @@ def test_redacted_field_names_still_exist_on_person():
     este módulo, la protección de menores deja de aplicar en silencio —
     este test debe fallar primero."""
     person_fields = set(Person.model_fields)
-    for field in (*_MINOR_REDACTED_FIELDS, "is_minor", "last_known_location"):
+    for field in (*MINOR_REDACTED_FIELDS, "is_minor", "last_known_location"):
         assert field in person_fields, f"{field!r} ya no existe en Person"
