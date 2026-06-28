@@ -66,3 +66,14 @@ sources:
     parser_asignado: encuentralos
     required_keywords: []
     notes: "API paginada (limit/offset, ~290 registros). Usa ApiAdapter con page_size=20."
+
+  - id: acopio_ve
+    name: Acopio VE - centros de acopio comunitarios
+    type: api_json
+    enabled: false
+    trust_tier: C
+    url: "https://acopio-ve-2026-default-rtdb.firebaseio.com/centros.json"
+    refresh_minutes: 30
+    parser_asignado: acopio_ve
+    required_keywords: []
+    notes: "Issue #99. Firebase RTDB → AcopioCenter. Disabled hasta confirmar con el dev la forma del payload (objeto {push_id: centro} vs lista) contra el endpoint real."

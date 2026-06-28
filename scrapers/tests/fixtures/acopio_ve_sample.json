@@ -1,0 +1,42 @@
+{
+  "-Ndemo001": {
+    "nombre": "Centro de Acopio Demo Caracas",
+    "estado": "Distrito Capital",
+    "municipio": "Libertador",
+    "lat": 10.492,
+    "lng": -66.942,
+    "capacidad": "disponible",
+    "insumos": ["Agua potable", "Alimentos no perecederos", "Medicamentos"],
+    "actualizadoEn": 1751000000000
+  },
+  "-Ndemo002": {
+    "nombre": "Polideportivo Demo San Felipe",
+    "estado": "Yaracuy",
+    "municipio": "San Felipe",
+    "lat": 10.34,
+    "lng": -68.74,
+    "capacidad": "lleno",
+    "insumos": ["Colchonetas", "Pañales", "Leche de fórmula"],
+    "actualizadoEn": 1751000100000
+  },
+  "-Ndemo003": {
+    "nombre": "Refugio Demo Lara",
+    "estado": "Lara",
+    "municipio": null,
+    "lat": 10.07,
+    "lng": -69.32,
+    "capacidad": "parcial",
+    "insumos": ["Ropa", "Calzado", "Kit de higiene"],
+    "actualizadoEn": 1751000200000
+  },
+  "-Ndemo004": {
+    "nombre": "Punto Demo Zulia",
+    "estado": "Zulia",
+    "municipio": "Maracaibo",
+    "lat": 10.65,
+    "lng": -71.64,
+    "capacidad": null,
+    "insumos": ["Hielo seco artesanal"],
+    "actualizadoEn": null
+  }
+}

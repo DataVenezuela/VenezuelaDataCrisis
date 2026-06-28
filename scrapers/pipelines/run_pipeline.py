@@ -130,6 +130,7 @@ def _get_parser(source: SourceConfig, event_id: str) -> Any:
 
     Parsers concretos (producen entidades tipadas):
       encuentralos  → EncuentralosParser → list[Person]
+      acopio_ve     → AcopioVeParser    → list[AcopioCenter]
 
     Parsers genéricos (producen entidades tipadas con texto crudo como nota):
       text / html / rss / json_generic / geojson_earthquake / reliefweb_reports
@@ -149,6 +150,10 @@ def _get_parser(source: SourceConfig, event_id: str) -> Any:
         from scrapers.parsers.encuentralos_parser import EncuentralosParser
         secret = os.getenv("PII_HMAC_SECRET")
         return EncuentralosParser(event_id=event_id, secret=secret)
+
+    if pa == "acopio_ve":
+        from scrapers.parsers.acopio_ve_parser import AcopioVeParser
+        return AcopioVeParser(event_id=event_id)
 
     # Fallback genérico para parsers aún no implementados
     return _TextFallbackParser(source=source, event_id=event_id)
