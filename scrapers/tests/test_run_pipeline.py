@@ -19,7 +19,7 @@ Cobertura
 - documents_exported refleja registros reales en JSONL
 - Pipeline con fuente deshabilitada (enabled=false) la omite
 - Error en una fuente no tumba las demás
-- Adapter no implementado (webapp) no cuenta como error fatal
+- Adapter no implementado para un type desconocido no cuenta como error fatal
 - Límite por fuente (limit=N) se respeta
 - JSONL producido es parseable como JSON línea a línea
 - Campos obligatorios presentes en cada registro exportado
@@ -41,7 +41,8 @@ import pytest
 
 from scrapers.adapters.base import RawContent
 from scrapers.models import Person
-from scrapers.pipelines.run_pipeline import run_pipeline
+from scrapers.models.source import SourceConfig
+from scrapers.pipelines.run_pipeline import _get_adapter, run_pipeline
 
 # ---------------------------------------------------------------------------
 # Constantes y helpers
@@ -380,26 +381,20 @@ sources:
         assert summary["sources_processed"] == 0
         assert len(summary["errors"]) >= 1
 
-    def test_unimplemented_adapter_type_skipped(self, tmp_path: Path, demo_config: Path) -> None:
-        """Fuente webapp (sin adapter) debe omitirse sin error fatal."""
-        cfg = _make_demo_config(tmp_path, """
-project:
-  event_id: test
-  default_country: Venezuela
-  output_mode: sanitized_jsonl
-sources:
-  - id: webapp_sin_adapter
-    name: WebApp sin adapter
-    type: webapp
-    enabled: true
-    trust_tier: C
-    url: "https://example.org/app"
-    refresh_minutes: 60
-    parser_asignado: html
-""")
-        # No debe lanzar excepción
-        summary = run_pipeline(config_path=cfg, output_dir=tmp_path / "out")
-        assert isinstance(summary, dict)
+    def test_unimplemented_adapter_type_skipped(self) -> None:
+        """Un type sin adapter registrado en `_get_adapter` debe omitirse (None), no lanzar."""
+        source = SourceConfig(
+            id="fuente_futura",
+            name="Fuente con type aun no soportado",
+            type="not_yet_implemented",
+            enabled=True,
+            trust_tier="C",
+            url="https://example.org/app",
+            refresh_minutes=60,
+            parser_asignado="html",
+        )
+
+        assert _get_adapter(source) is None
 
 
 # ---------------------------------------------------------------------------
@@ -560,6 +555,42 @@ sources:
 
         for rec in _read_jsonl(out / "persons.jsonl"):
             assert "_entity_type" not in rec
+
+    def test_adapter_close_called_even_when_fetch_raises(
+        self, tmp_path: Path, demo_config: Path
+    ) -> None:
+        """Un adapter con recursos vivos (ej. browser de Playwright) no debe
+        quedar huerfano si fetch_all() falla — close() debe correr en finally."""
+        cfg = _make_demo_config(tmp_path, """
+project:
+  event_id: test
+  default_country: Venezuela
+  output_mode: sanitized_jsonl
+sources:
+  - id: encuentralos_tecnosoft
+    name: Encuentralos tecnosoft
+    type: api_json
+    enabled: true
+    trust_tier: C
+    url: "https://encuentralos.tecnosoft.dev/api/personas"
+    refresh_minutes: 30
+    parser_asignado: encuentralos
+""")
+        mock_adapter = self._mock_adapter()
+        mock_adapter.fetch_all.side_effect = RuntimeError("fetch agotado tras reintentos")
+
+        with patch(
+            "scrapers.pipelines.run_pipeline._get_adapter",
+            return_value=mock_adapter,
+        ), patch(
+            "scrapers.pipelines.run_pipeline._get_parser",
+            return_value=self._mock_parser(),
+        ):
+            summary = run_pipeline(config_path=cfg, output_dir=tmp_path / "out")
+
+        mock_adapter.close.assert_called_once()
+        assert summary["sources_processed"] == 0
+        assert len(summary["errors"]) == 1
 
 
 # ---------------------------------------------------------------------------

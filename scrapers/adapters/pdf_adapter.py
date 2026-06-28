@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import hashlib
 from collections.abc import Iterator
-from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
@@ -11,6 +9,7 @@ from urllib.parse import urlparse
 import httpx
 import pdfplumber
 
+from scrapers.adapters._shared import now_utc, sha256_hex
 from scrapers.adapters.base import RawContent
 from scrapers.adapters.http_client import USER_AGENT
 from scrapers.models.source import SourceConfig
@@ -94,10 +93,10 @@ class PdfAdapter:
         return RawContent(
             source_key=source_key,
             source_url=source_url,
-            fetched_at=_now_utc(),
+            fetched_at=now_utc(),
             http_status=http_status,
             content_type=content_type,
-            content_hash=_sha256_bytes(pdf_bytes),
+            content_hash=sha256_hex(pdf_bytes),
             raw_content=pages,
             page=None,
             total_pages=len(pages),
@@ -185,9 +184,3 @@ def _source_key_from_ref(value: str) -> str:
     return path.stem or value
 
 
-def _now_utc() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _sha256_bytes(data: bytes) -> str:
-    return f"sha256:{hashlib.sha256(data).hexdigest()}"

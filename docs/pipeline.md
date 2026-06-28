@@ -60,7 +60,12 @@ SourceConfig (YAML)
 | `api_json` | `scrapers/adapters/api_adapter.py` | ✅ Implementado (httpx, paginación, retry) |
 | `html_static` / `rss` | `scrapers/adapters/http_client.py` | ✅ Implementado (fetch wrapper) |
 | `manual_file` / `text` | `scrapers/adapters/local_file.py` | ✅ Implementado (lectura local) |
-| `webapp` / `pdf` | — | ⏳ Pendiente (se omite con warning) |
+| `pdf` | `scrapers/adapters/pdf_adapter.py` | ✅ Implementado (pdfplumber) |
+| `webapp_js` | `scrapers/adapters/playwright_adapter.py` | ✅ Implementado (Playwright headless, timeout/retries configurables) |
+
+Helpers de implementación compartidos entre adapters (timestamp UTC, hash de
+contenido para `content_hash`, backoff exponencial con jitter) viven en
+`scrapers/adapters/_shared.py` — ningún adapter debería reimplementarlos.
 
 ### Parsers implementados
 
@@ -83,6 +88,10 @@ python -m scrapers.cli run --config scrapers/config/sources.yaml --output scrape
 
 - Un error en un registro individual no tumba el pipeline.
 - Un error en una fuente entera se loguea y se continúa con la siguiente.
+- `adapter.close()` corre en `finally` dentro de `_run_source()`: si el fetch
+  de una fuente falla (ej. Playwright agota sus reintentos), el adapter
+  libera sus recursos (browser, conexiones) igual, sin importar si la fuente
+  finalmente cuenta como error o no.
 - `PII_SALT` es opcional en CI: sin salt, los campos PII crudos se eliminan antes de exportar.
 - La deduplicación de Person se excluye intencionalmente del orquestador (requiere revisión humana).
 

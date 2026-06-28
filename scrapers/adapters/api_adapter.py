@@ -31,18 +31,17 @@ Uso básico
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
-import random
 import time
-from datetime import datetime, timezone
 from typing import Any, Iterator
 
 import httpx
 
-from .base import RawContent
+from scrapers.adapters._shared import backoff_delay, now_utc, sha256_hex
 from scrapers.adapters.http_client import USER_AGENT
+
+from .base import RawContent
 
 log = logging.getLogger(__name__)
 
@@ -53,8 +52,6 @@ log = logging.getLogger(__name__)
 _DEFAULT_PAGE_SIZE = 20
 _DEFAULT_TIMEOUT = 30.0          # segundos
 _MAX_RETRIES = 5
-_BACKOFF_BASE = 1.0              # segundos base para backoff
-_BACKOFF_MAX = 60.0              # techo del backoff
 _RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 
 _DEFAULT_HEADERS: dict[str, str] = {
@@ -66,28 +63,10 @@ _DEFAULT_HEADERS: dict[str, str] = {
 # Helpers internos
 # ---------------------------------------------------------------------------
 
-def _now_utc() -> str:
-    """ISO-8601 UTC sin microsegundos."""
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
 def _sha256(obj: Any) -> str:
     """Hash SHA-256 del contenido serializado como JSON compacto."""
     raw = json.dumps(obj, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
-    return f"sha256:{digest}"
-
-
-def _backoff_delay(attempt: int) -> float:
-    """
-    Exponential backoff con jitter completo.
-
-    ``attempt`` empieza en 1.  Fórmula:
-        delay = min(base * 2^(attempt-1), max) + random(0, 1)
-    """
-    exp = _BACKOFF_BASE * (2 ** (attempt - 1))
-    capped = min(exp, _BACKOFF_MAX)
-    return capped + random.random()
+    return sha256_hex(raw.encode("utf-8"))
 
 
 # ---------------------------------------------------------------------------
@@ -174,7 +153,7 @@ class ApiAdapter:
                         response=resp,
                     )
                     if attempt < self.max_retries:
-                        delay = _backoff_delay(attempt)
+                        delay = backoff_delay(attempt)
                         log.warning(
                             "HTTP %s en intento %d/%d — reintento en %.1fs",
                             resp.status_code, attempt, self.max_retries, delay,
@@ -193,7 +172,7 @@ class ApiAdapter:
             except (httpx.TimeoutException, httpx.NetworkError) as exc:
                 last_exc = exc
                 if attempt < self.max_retries:
-                    delay = _backoff_delay(attempt)
+                    delay = backoff_delay(attempt)
                     log.warning(
                         "%s en intento %d/%d — reintento en %.1fs",
                         type(exc).__name__, attempt, self.max_retries, delay,
@@ -241,7 +220,7 @@ class ApiAdapter:
         return RawContent(
             source_key=self.source_key,
             source_url=str(resp.url),
-            fetched_at=_now_utc(),
+            fetched_at=now_utc(),
             http_status=resp.status_code,
             content_type=resp.headers.get("content-type", ""),
             content_hash=_sha256(data),
@@ -338,7 +317,7 @@ class ApiAdapter:
             yield RawContent(
                 source_key=self.source_key,
                 source_url=str(resp.url),
-                fetched_at=_now_utc(),
+                fetched_at=now_utc(),
                 http_status=resp.status_code,
                 content_type=resp.headers.get("content-type", ""),
                 content_hash=_sha256(data),

@@ -23,7 +23,7 @@ def _flatten(obj: Any, prefix: str = "") -> list[str]:
     return lines
 
 
-def extract_json_text(raw: str) -> tuple[str | None, str, dict]:
+def extract_json_text(raw: str) -> tuple[str | None, str, dict[str, Any]]:
     payload = json.loads(raw)
     lines = _flatten(payload)
     title = None

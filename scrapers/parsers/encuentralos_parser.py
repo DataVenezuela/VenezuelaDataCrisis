@@ -117,9 +117,9 @@ def _location_str(location_obj: dict[str, Any]) -> str | None:
     if municipio and estado:
         return f"{municipio}, {estado}"
     if estado:
-        return estado
+        return str(estado)
     if raw:
-        return raw
+        return str(raw)
     return None
 
 

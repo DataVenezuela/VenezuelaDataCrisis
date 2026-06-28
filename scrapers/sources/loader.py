@@ -24,6 +24,8 @@ def load_sources(config_path: Path) -> tuple[dict, list[SourceConfig]]:
                 parser_asignado=source["parser_asignado"],
                 required_keywords=source.get("required_keywords", []) or [],
                 notes=source.get("notes"),
+                timeout_seconds=source.get("timeout_seconds"),
+                max_retries=source.get("max_retries"),
             )
         )
 

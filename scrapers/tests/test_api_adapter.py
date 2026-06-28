@@ -372,9 +372,9 @@ class TestRetryBackoff:
 
     def test_backoff_delay_increases(self) -> None:
         """El delay debe aumentar con cada intento (sin jitter, verificar tendencia)."""
-        from scrapers.adapters.api_adapter import _backoff_delay
+        from scrapers.adapters._shared import backoff_delay
 
-        delays = [_backoff_delay(i) for i in range(1, 6)]
+        delays = [backoff_delay(i) for i in range(1, 6)]
         # Verificar que la parte determinista crece (sin contar el jitter aleatorio)
         bases = [min(1.0 * (2 ** (i - 1)), 60.0) for i in range(1, 6)]
         assert bases == sorted(bases)   # crece monotónicamente
