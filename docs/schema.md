@@ -169,6 +169,7 @@ events
 | `depth_km`        | `NUMERIC(6,2)`    | `number`          |       sí | Profundidad en kilómetros              |
 | `status`          | `VARCHAR(30)`     | `string`          |       no | Enum definido                          |
 | `external_ids`    | `JSONB` / `JSON`  | `object`          |       sí | IDs externos asociados                 |
+| `dedup_hash`      | `VARCHAR(64)`     | `string`          |       sí | Hash estable para auto-merge exacto    |
 
 ### Enums
 
@@ -528,6 +529,7 @@ acopio_centers
 | `contact_masked`   | `VARCHAR(30)`    | `string`                   |       sí | Contacto parcialmente enmascarado |
 | `capacity`         | `INTEGER`        | `number` integer           |       sí | Capacidad                         |
 | `current_load`     | `INTEGER`        | `number` integer           |       sí | Carga actual                      |
+| `dedup_hash`       | `VARCHAR(64)`    | `string`                   |       sí | Hash estable para auto-merge exacto |
 
 ### Enums
 
@@ -586,6 +588,69 @@ otro
   "current_load": 283
 }
 ```
+
+---
+
+## 11. Consolidation / dedup SQL — Paso 1 (#90)
+
+El Paso 1 agrega soporte mínimo de consolidation sobre tablas existentes sin
+tocar todavía la ingesta a staging de #81.
+
+SQL versionado en el repo:
+
+```text
+tools/sql/issue_90_step1_consolidation.sql
+tools/sql/issue_90_step1_consolidation_rollback.sql
+```
+
+### Cambios implementados
+
+- `events.dedup_hash varchar(64)` para auto-merge exacto de eventos.
+- Índice único `events_dedup_uniq` sobre `events(dedup_hash)`.
+- `acopio_centers.dedup_hash varchar(64)` para auto-merge exacto de centros de acopio.
+- Índice único `acopio_centers_dedup_uniq` sobre `acopio_centers(dedup_hash)`.
+- Tabla `dedup_candidates` para candidatos de deduplicación de personas.
+
+PostgreSQL permite múltiples `NULL` en índices `UNIQUE`, por lo que agregar
+`dedup_hash` nullable no rompe filas históricas ni bloquea migraciones aunque
+los hashes aún no estén backfilleados.
+
+### Tabla `dedup_candidates`
+
+| Campo          | Tipo SQL       | Nullable | Valores / Notas                                      |
+| -------------- | -------------- | -------: | ---------------------------------------------------- |
+| `candidate_id` | `uuid`         |       no | PK, `DEFAULT gen_random_uuid()`                      |
+| `event_id`     | `uuid`         |       no | FK a `public.events(event_id)`                       |
+| `left_person`  | `uuid`         |       no | FK a `public.persons(person_record_id)`              |
+| `right_person` | `uuid`         |       no | FK a `public.persons(person_record_id)`              |
+| `score`        | `numeric(4,3)` |       no | Score de similitud candidato                         |
+| `reasons`      | `jsonb`        |       sí | Señales explicables usadas para generar el candidato |
+| `priority`     | `text`         |       no | Prioridad operativa del candidato                    |
+| `decision`     | `text`         |       no | Default `pending`                                    |
+| `created_at`   | `timestamptz`  |       no | Default `now()`                                      |
+
+Restricción:
+
+```text
+UNIQUE (left_person, right_person)
+```
+
+### Pendiente
+
+Paso 2 queda pendiente hasta que #81 cree `aportes`. Esta PR no crea ni modifica
+`aportes` y no crea `dedup_decisions`.
+
+### Rollback
+
+El rollback documentado elimina solamente lo creado por Paso 1:
+
+- `public.dedup_candidates`
+- índice `events_dedup_uniq`
+- índice `acopio_centers_dedup_uniq`
+- columna `public.events.dedup_hash`
+- columna `public.acopio_centers.dedup_hash`
+
+No toca `aportes` ni `dedup_decisions`.
 
 ---
 
