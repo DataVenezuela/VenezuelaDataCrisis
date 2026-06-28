@@ -33,8 +33,8 @@ PII
 Un centro de acopio es un lugar público, no una persona. El modelo
 ``AcopioCenter`` actual no tiene campos de contacto y la fuente no expone
 PII de personas en el esquema documentado, así que este parser **no
-tokeniza ni persiste PII**. Los mensajes de log no incluyen valores de
-campos del registro.
+aplica HMAC ni almacena PII de personas**. Los mensajes de log no incluyen
+valores de campos del registro.
 
 Forma del payload (supuesto a confirmar)
 ----------------------------------------
