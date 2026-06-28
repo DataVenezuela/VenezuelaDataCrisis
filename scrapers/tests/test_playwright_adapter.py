@@ -131,6 +131,67 @@ def test_exhausts_retries_and_raises_clear_error(monkeypatch: pytest.MonkeyPatch
     assert page.closed is True
 
 
+def test_max_retries_one_makes_exactly_one_attempt_with_no_sleep(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Borde inferior: max_retries=1 no debe reintentar ni dormir."""
+    page = _FakePage(fail_times=99)
+    adapter = PlaywrightAdapter(max_retries=1, page_factory=lambda: page)
+    sleep_calls: list[float] = []
+    monkeypatch.setattr(
+        "scrapers.adapters.playwright_adapter.time.sleep", sleep_calls.append
+    )
+
+    with pytest.raises(PlaywrightAdapterError):
+        adapter.fetch("https://example.org/app")
+
+    assert len(page.goto_calls) == 1
+    assert sleep_calls == []
+
+
+def test_non_network_exception_is_still_retried_and_wrapped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """El catch es deliberadamente amplio (errores de Playwright son heterogeneos);
+    un error que no sea de red/timeout tambien debe agotar reintentos y
+    terminar envuelto en PlaywrightAdapterError, no propagar crudo."""
+    page = _FakePage(fail_times=99, error_cls=ValueError)
+    adapter = PlaywrightAdapter(max_retries=2, page_factory=lambda: page)
+    monkeypatch.setattr("scrapers.adapters.playwright_adapter.time.sleep", lambda _seconds: None)
+
+    with pytest.raises(PlaywrightAdapterError, match="No se pudo renderizar"):
+        adapter.fetch("https://example.org/app")
+
+    assert len(page.goto_calls) == 2
+
+
+def test_fetch_all_propagates_fetch_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    page = _FakePage(fail_times=99)
+    adapter = PlaywrightAdapter(max_retries=1, page_factory=lambda: page)
+    monkeypatch.setattr("scrapers.adapters.playwright_adapter.time.sleep", lambda _seconds: None)
+
+    with pytest.raises(PlaywrightAdapterError):
+        list(adapter.fetch_all("https://example.org/app"))
+
+
+def test_rejects_zero_timeout() -> None:
+    with pytest.raises(ValueError, match="timeout debe ser > 0"):
+        PlaywrightAdapter(timeout=0, page_factory=_FakePage)
+
+
+def test_rejects_negative_timeout() -> None:
+    with pytest.raises(ValueError, match="timeout debe ser > 0"):
+        PlaywrightAdapter(timeout=-5, page_factory=_FakePage)
+
+
+def test_from_source_config_rejects_explicit_zero_timeout() -> None:
+    """timeout_seconds=0 no debe caer al default por ser falsy — debe rechazarse."""
+    config = _source_config(timeout_seconds=0.0)
+
+    with pytest.raises(ValueError, match="timeout debe ser > 0"):
+        PlaywrightAdapter.from_source_config(config, page_factory=_FakePage)
+
+
 def test_from_source_config_uses_timeout_and_retries_from_config() -> None:
     config = _source_config(timeout_seconds=5.0, max_retries=1)
 
@@ -153,6 +214,11 @@ def test_from_source_config_uses_defaults_when_not_set() -> None:
 def test_rejects_max_retries_below_one() -> None:
     with pytest.raises(ValueError, match="max_retries debe ser >= 1"):
         PlaywrightAdapter(max_retries=0, page_factory=_FakePage)
+
+
+def test_rejects_unsupported_browser_type() -> None:
+    with pytest.raises(ValueError, match="browser_type debe ser uno de"):
+        PlaywrightAdapter(browser_type="Chromium", page_factory=_FakePage)
 
 
 def test_rejects_non_webapp_source_config() -> None:

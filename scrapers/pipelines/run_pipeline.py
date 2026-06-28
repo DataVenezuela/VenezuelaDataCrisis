@@ -36,6 +36,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+from scrapers.adapters._shared import now_utc, sha256_hex
 from scrapers.adapters.base import RawContent
 from scrapers.dedup.deduplicator import deduplicate_typed_entities
 from scrapers.models import AcopioCenter, Event, Person
@@ -152,17 +153,14 @@ class _StaticHttpAdapter:
         self._fetch = fetch_fn
 
     def fetch(self, url: str, **_: Any) -> RawContent:
-        import hashlib
-        from datetime import datetime, timezone
         text, content_type = self._fetch(url)
-        digest = hashlib.sha256(text.encode()).hexdigest()
         return RawContent(
             source_key=self.source_key,
             source_url=url,
-            fetched_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            fetched_at=now_utc(),
             http_status=200,
             content_type=content_type,
-            content_hash=f"sha256:{digest}",
+            content_hash=sha256_hex(text.encode("utf-8")),
             raw_content=text,
             page=None,
             total_pages=None,
@@ -183,17 +181,14 @@ class _LocalFileAdapter:
         self._read = read_fn
 
     def fetch(self, url: str, **_: Any) -> RawContent:
-        import hashlib
-        from datetime import datetime, timezone
         text = self._read(url)
-        digest = hashlib.sha256(text.encode()).hexdigest()
         return RawContent(
             source_key=self.source_key,
             source_url=url,
-            fetched_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            fetched_at=now_utc(),
             http_status=200,
             content_type="text/plain",
-            content_hash=f"sha256:{digest}",
+            content_hash=sha256_hex(text.encode("utf-8")),
             raw_content=text,
             page=None,
             total_pages=None,
@@ -560,15 +555,19 @@ def _run_source(
     parser = _get_parser(source)
 
     # 3. Fetch
-    pages = _fetch_pages(adapter, source)
-    log.info("%s: %d página(s) descargadas", source.id, len(pages))
+    # El close() va en finally: si fetch_all() lanza (ej. PlaywrightAdapter
+    # agotando retries), el adapter puede mantener recursos vivos (browser,
+    # conexiones) y el error sube igual al orquestador principal.
+    try:
+        pages = _fetch_pages(adapter, source)
+    finally:
+        if hasattr(adapter, "close"):
+            try:
+                adapter.close()
+            except Exception:
+                pass
 
-    # Cerrar adapter si es context-manager (ApiAdapter)
-    if hasattr(adapter, "close"):
-        try:
-            adapter.close()
-        except Exception:
-            pass
+    log.info("%s: %d página(s) descargadas", source.id, len(pages))
 
     # 4. Parse
     entities, parse_errors = _parse_pages(parser, pages, limit)

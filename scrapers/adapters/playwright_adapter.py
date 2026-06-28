@@ -34,14 +34,12 @@ Uso basico
 
 from __future__ import annotations
 
-import hashlib
 import logging
-import random
 import time
 from collections.abc import Callable, Iterator
-from datetime import datetime, timezone
 from typing import Any, Protocol
 
+from scrapers.adapters._shared import backoff_delay, now_utc, sha256_hex
 from scrapers.adapters.base import RawContent
 from scrapers.models.source import SourceConfig
 
@@ -53,9 +51,8 @@ log = logging.getLogger(__name__)
 
 _DEFAULT_TIMEOUT = 30.0  # segundos
 _MAX_RETRIES = 5
-_BACKOFF_BASE = 1.0  # segundos base para backoff
-_BACKOFF_MAX = 60.0  # techo del backoff
 _WEBAPP_SOURCE_TYPES = {"webapp_js"}
+_SUPPORTED_BROWSERS = {"chromium", "firefox", "webkit"}
 
 
 class PlaywrightAdapterError(RuntimeError):
@@ -95,21 +92,6 @@ def _import_sync_playwright() -> Any:
             "'playwright install chromium'."
         ) from exc
     return sync_playwright
-
-
-def _now_utc() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _sha256(text: str) -> str:
-    return f"sha256:{hashlib.sha256(text.encode('utf-8')).hexdigest()}"
-
-
-def _backoff_delay(attempt: int) -> float:
-    """Exponential backoff con jitter completo. ``attempt`` empieza en 1."""
-    exp: float = _BACKOFF_BASE * (2 ** (attempt - 1))
-    capped: float = min(exp, _BACKOFF_MAX)
-    return capped + random.random()
 
 
 def _validate_webapp_source(source_config: SourceConfig) -> None:
@@ -155,8 +137,15 @@ class PlaywrightAdapter:
         browser_type: str = "chromium",
         page_factory: PageFactory | None = None,
     ) -> None:
+        if timeout <= 0:
+            raise ValueError(f"timeout debe ser > 0 (recibido: {timeout})")
         if max_retries < 1:
             raise ValueError(f"max_retries debe ser >= 1 (recibido: {max_retries})")
+        if browser_type not in _SUPPORTED_BROWSERS:
+            raise ValueError(
+                f"browser_type debe ser uno de {sorted(_SUPPORTED_BROWSERS)!r}; "
+                f"recibido: {browser_type!r}"
+            )
 
         self.source_key = source_key
         self.timeout = timeout
@@ -178,7 +167,11 @@ class PlaywrightAdapter:
         _validate_webapp_source(source_config)
         return cls(
             source_key=source_config.id,
-            timeout=source_config.timeout_seconds or _DEFAULT_TIMEOUT,
+            timeout=(
+                source_config.timeout_seconds
+                if source_config.timeout_seconds is not None
+                else _DEFAULT_TIMEOUT
+            ),
             max_retries=(
                 source_config.max_retries
                 if source_config.max_retries is not None
@@ -205,10 +198,10 @@ class PlaywrightAdapter:
         return RawContent(
             source_key=self.source_key,
             source_url=final_url,
-            fetched_at=_now_utc(),
+            fetched_at=now_utc(),
             http_status=200,
             content_type="text/html",
-            content_hash=_sha256(html),
+            content_hash=sha256_hex(html.encode("utf-8")),
             raw_content=html,
             page=None,
             total_pages=None,
@@ -232,7 +225,7 @@ class PlaywrightAdapter:
             except Exception as exc:  # noqa: BLE001 - errores de Playwright son heterogeneos
                 last_exc = exc
                 if attempt < self.max_retries:
-                    delay = _backoff_delay(attempt)
+                    delay = backoff_delay(attempt)
                     log.warning(
                         "Error en intento %d/%d (%s) al navegar a %s — reintento en %.1fs",
                         attempt,
