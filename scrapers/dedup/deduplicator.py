@@ -148,3 +148,21 @@ def _source_id(entity: Event | AcopioCenter) -> str:
     # Los modelos actuales exponen `fuente`; mantenemos compatibilidad futura
     # con `source_id` sin inventar ese campo en el schema tipado.
     return str(getattr(entity, "source_id", None) or getattr(entity, "fuente", "unknown"))
+
+
+def deduplicate_persons(
+    persons: list[dict],
+    threshold: float = 0.75,
+) -> tuple[list[dict], list[dict], int]:
+    """Run 3-stage dedup pipeline on Person records.
+    
+    Returns (all_persons, candidates, candidate_count).
+    All persons are preserved — none are deleted or merged.
+    """
+    from scrapers.dedup.blocking import build_blocks
+    from scrapers.dedup.clustering import find_candidates
+    
+    blocks = build_blocks(persons)
+    candidates = find_candidates(blocks, threshold=threshold)
+    
+    return persons, candidates, len(candidates)

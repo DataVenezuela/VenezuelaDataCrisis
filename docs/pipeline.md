@@ -48,7 +48,7 @@ SourceConfig (YAML)
     → parser (encuentralos / fallback genérico)
       → PII tokenizer (HMAC o strip)
         → normalización (fechas, ubicaciones)
-          → dedup (Event / AcopioCenter; Person excluido intencionalmente)
+          → dedup (Event / AcopioCenter / Person — 3-stage: blocking → scoring → clustering)
             → confidence_score
               → JSONL export (persons.jsonl / acopio.jsonl / events.jsonl)
 ```

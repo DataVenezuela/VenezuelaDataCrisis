@@ -402,18 +402,20 @@ def _apply_normalization(records: list[dict], errors: list[str]) -> list[dict]:
 def _apply_dedup(
     records: list[dict],
     errors: list[str],
-) -> tuple[list[dict], int]:
+) -> tuple[list[dict], int, list[dict]]:
     """
-    Deduplicación para Event y AcopioCenter.
+    Deduplicación para Event, AcopioCenter y Person.
 
-    Person se excluye de dedup global por diseño: un falso merge puede
-    costar una vida.  Los Person pasan sin filtrar.
+    Event y AcopioCenter usan dedup por fingerprint (auto-merge).
+    Person usa 3-stage pipeline (Blocking → Similarity → Clustering).
+    Person NO se mergea — solo produce candidatos de revisión.
     """
     events_raw = [r for r in records if r.get("_entity_type") == "Event"]
     acopio_raw = [r for r in records if r.get("_entity_type") == "AcopioCenter"]
     persons = [r for r in records if r.get("_entity_type") == "Person"]
 
     total_deduped = 0
+    all_candidates: list[dict] = []
 
     def _to_event(d: dict) -> Event | None:
         try:
@@ -456,7 +458,13 @@ def _apply_dedup(
                 d["_entity_type"] = "AcopioCenter"
                 deduped_acopio.append(d)
 
-    return persons + deduped_events + deduped_acopio, total_deduped
+    # Person dedup — 3-stage pipeline (no auto-merge, only candidates)
+    from scrapers.dedup.deduplicator import deduplicate_persons
+    persons, person_candidates, n_candidates = deduplicate_persons(persons)
+    if person_candidates:
+        all_candidates.extend(person_candidates)
+
+    return persons + deduped_events + deduped_acopio, total_deduped, all_candidates
 
 
 def _apply_confidence(
@@ -485,6 +493,7 @@ def _export(
     records: list[dict],
     output_dir: Path,
     errors: list[str],
+    candidates: list[dict] | None = None,
 ) -> int:
     """
     Escribe los registros a persons.jsonl / acopio.jsonl / events.jsonl.
@@ -519,6 +528,14 @@ def _export(
             n = write_jsonl(output_dir / "events.jsonl", events)
             total += n
             log.info("Exportados %d Event → events.jsonl", n)
+        # Export dedup candidates
+        if candidates:
+            import json
+            candidates_path = output_dir / "dedup_candidates.jsonl"
+            with open(candidates_path, "w", encoding="utf-8") as f:
+                for cand in candidates:
+                    f.write(json.dumps(cand, ensure_ascii=False, sort_keys=True) + "\n")
+            log.info("Exportados %d dedup candidates → dedup_candidates.jsonl", len(candidates))
     except Exception as exc:
         msg = f"Error exportando JSONL: {exc}"
         log.error(msg)
@@ -536,11 +553,11 @@ def _run_source(
     output_dir: Path,
     limit: int | None,
     all_errors: list[str],
-) -> tuple[int, int]:
+) -> tuple[int, int, int]:
     """
     Ejecuta el pipeline completo para una fuente.
 
-    Devuelve (registros_exportados, duplicados_eliminados).
+    Devuelve (registros_exportados, duplicados_eliminados, candidates_generados).
     Cualquier excepción no capturada sube al orquestador principal.
     """
     log.info("Iniciando fuente: %s (type=%s, parser=%s)", source.id, source.type, source.parser_asignado)
@@ -549,7 +566,7 @@ def _run_source(
     # 1. Adapter
     adapter = _get_adapter(source)
     if adapter is None:
-        return 0, 0
+        return 0, 0, 0
 
     # 2. Parser
     parser = _get_parser(source)
@@ -572,7 +589,7 @@ def _run_source(
 
     if not entities:
         all_errors.extend([f"[{source.id}] {e}" for e in source_errors])
-        return 0, 0
+        return 0, 0, 0
 
     # 5. PII
     records = _apply_pii(entities, source_errors)
@@ -580,18 +597,18 @@ def _run_source(
     # 6. Normalización adicional
     records = _apply_normalization(records, source_errors)
 
-    # 7. Dedup (solo Event/AcopioCenter)
-    records, n_deduped = _apply_dedup(records, source_errors)
+    # 7. Dedup (Event/AcopioCenter auto-merge + Person candidate generation)
+    records, n_deduped, person_candidates = _apply_dedup(records, source_errors)
 
     # 8. Confidence score
     records = _apply_confidence(records, source_errors)
 
     # 9. Export
-    n_exported = _export(records, output_dir, source_errors)
+    n_exported = _export(records, output_dir, source_errors, candidates=person_candidates)
 
     all_errors.extend([f"[{source.id}] {e}" for e in source_errors])
-    log.info("%s: %d exportados, %d deduplicados, %d errores", source.id, n_exported, n_deduped, len(source_errors))
-    return n_exported, n_deduped
+    log.info("%s: %d exportados, %d deduplicados, %d candidates, %d errores", source.id, n_exported, n_deduped, len(person_candidates), len(source_errors))
+    return n_exported, n_deduped, len(person_candidates)
 
 
 # ---------------------------------------------------------------------------
@@ -646,14 +663,16 @@ def run_pipeline(
 
     total_exported = 0
     total_deduped = 0
+    total_candidates = 0
     sources_processed = 0
     all_errors: list[str] = []
 
     for source in enabled:
         try:
-            n_exp, n_dup = _run_source(source, output_dir, limit, all_errors)
+            n_exp, n_dup, n_cand = _run_source(source, output_dir, limit, all_errors)
             total_exported += n_exp
             total_deduped += n_dup
+            total_candidates += n_cand
             sources_processed += 1
         except Exception as exc:
             msg = f"[{source.id}] Error fatal en fuente: {exc}"
@@ -666,11 +685,12 @@ def run_pipeline(
         "documents_exported": total_exported,
         "claims_exported": total_exported,       # alias legacy para cli.py
         "claims_deduplicated": total_deduped,
+        "candidates_found": total_candidates,
         "errors": all_errors,
     }
 
     log.info(
-        "Pipeline finalizado — fuentes=%d exportados=%d deduplicados=%d errores=%d",
-        sources_processed, total_exported, total_deduped, len(all_errors),
+        "Pipeline finalizado — fuentes=%d exportados=%d deduplicados=%d candidates=%d errores=%d",
+        sources_processed, total_exported, total_deduped, total_candidates, len(all_errors),
     )
     return summary
