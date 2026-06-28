@@ -58,6 +58,7 @@ from scrapers.models import Person
 from scrapers.normalizers import normalize_location, normalize_proper_name
 from scrapers.parsers.base import ParserProtocol
 from scrapers.sanitizers.pii_tokenizer import _masked_last4
+from shared.hashing import identity_token
 
 log = logging.getLogger(__name__)
 
@@ -209,9 +210,15 @@ class EncuentralosParser:
 
         results: list[Person] = []
         for rec in records:
-            person = self._parse_record(rec)
-            if person is not None:
-                results.append(person)
+            try:
+                person = self._parse_record(rec)
+                if person is not None:
+                    results.append(person)
+            except Exception as exc:
+                log.warning(
+                    "%s: registro malformado omitido: %s",
+                    SOURCE_KEY, exc,
+                )
 
         log.debug("%s: %d/%d registros parseados", SOURCE_KEY, len(results), len(records))
         return results
@@ -246,7 +253,6 @@ class EncuentralosParser:
             if raw_cedula_str:
                 cedula_masked = _mask_cedula(raw_cedula_str)
                 if self._secret:
-                    from shared.hashing import identity_token
                     try:
                         cedula_hmac = identity_token(raw_cedula_str, self._secret)
                     except Exception as exc:
