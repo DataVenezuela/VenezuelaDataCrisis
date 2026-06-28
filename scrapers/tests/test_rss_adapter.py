@@ -26,6 +26,25 @@ RSS_SAMPLE = """<?xml version="1.0" encoding="UTF-8"?>
 </rss>
 """
 
+ATOM_SAMPLE = """<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Atom Feed Demo</title>
+  <entry>
+    <title>Alerta 1</title>
+    <summary>Sismo reportado en Mérida</summary>
+    <link href="https://example.test/a1"/>
+  </entry>
+  <entry>
+    <title>Alerta 2</title>
+    <summary>Deslizamiento en Vargas</summary>
+    <link href="https://example.test/a2"/>
+  </entry>
+</feed>
+"""
+
+ATOM_ITEM_1 = "Alerta 1 Sismo reportado en Mérida https://example.test/a1"
+ATOM_ITEM_2 = "Alerta 2 Deslizamiento en Vargas https://example.test/a2"
+
 ITEM_1 = "Reporte 1 Persona vista en Maracay https://example.test/1"
 ITEM_2 = "Reporte 2 Centro de acopio en Valencia https://example.test/2"
 
@@ -175,3 +194,78 @@ def test_pipeline_registry_returns_rss_adapter() -> None:
 
     assert isinstance(adapter, RssAdapter)
     assert adapter.source_key == "rss_demo"
+
+
+# ── Atom feed support (#113) ──────────────────────────────────────
+
+
+def test_atom_fetch_all_yields_one_raw_content_per_entry() -> None:
+    fetcher, _calls = _fake_fetcher(raw=ATOM_SAMPLE, content_type="application/atom+xml")
+    adapter = RssAdapter(source_key="atom_demo", fetcher=fetcher)
+
+    results = list(adapter.fetch_all("https://example.test/atom.xml"))
+
+    assert len(results) == 2
+    assert [r["raw_content"] for r in results] == [ATOM_ITEM_1, ATOM_ITEM_2]
+    assert [r["rss_title"] for r in results] == ["Alerta 1", "Alerta 2"]
+    assert [r["page"] for r in results] == [1, 2]
+    assert all(r["total_pages"] == 2 for r in results)
+
+
+def test_atom_fetch_returns_combined_text() -> None:
+    fetcher, _calls = _fake_fetcher(raw=ATOM_SAMPLE)
+    adapter = RssAdapter(source_key="atom_demo", fetcher=fetcher)
+
+    result = adapter.fetch("https://example.test/atom.xml")
+
+    assert result["raw_content"] == f"{ATOM_ITEM_1}\n{ATOM_ITEM_2}"
+    assert result["rss_item_count"] == 2
+
+
+def test_atom_entry_with_content_instead_of_summary() -> None:
+    feed = """<?xml version="1.0" encoding="UTF-8"?>
+    <feed xmlns="http://www.w3.org/2005/Atom">
+      <entry>
+        <title>Nota</title>
+        <content>Texto completo del contenido</content>
+        <link href="https://example.test/c1"/>
+      </entry>
+    </feed>
+    """
+    fetcher, _calls = _fake_fetcher(raw=feed)
+    adapter = RssAdapter(source_key="atom_demo", fetcher=fetcher)
+
+    results = list(adapter.fetch_all("https://example.test/atom.xml"))
+
+    assert len(results) == 1
+    assert "Texto completo del contenido" in results[0]["raw_content"]
+
+
+def test_atom_without_namespace_still_parses() -> None:
+    feed = """<?xml version="1.0" encoding="UTF-8"?>
+    <feed>
+      <entry>
+        <title>Sin NS</title>
+        <summary>Entry sin namespace</summary>
+        <link href="https://example.test/ns"/>
+      </entry>
+    </feed>
+    """
+    fetcher, _calls = _fake_fetcher(raw=feed)
+    adapter = RssAdapter(source_key="atom_demo", fetcher=fetcher)
+
+    results = list(adapter.fetch_all("https://example.test/atom.xml"))
+
+    assert len(results) == 1
+    assert results[0]["rss_title"] == "Sin NS"
+
+
+def test_rss_items_still_work_after_atom_support() -> None:
+    """Regression: RSS <item> parsing must remain identical."""
+    fetcher, _calls = _fake_fetcher(raw=RSS_SAMPLE)
+    adapter = RssAdapter(source_key="rss_demo", fetcher=fetcher)
+
+    results = list(adapter.fetch_all("https://example.test/feed.xml"))
+
+    assert len(results) == 2
+    assert [r["raw_content"] for r in results] == [ITEM_1, ITEM_2]
