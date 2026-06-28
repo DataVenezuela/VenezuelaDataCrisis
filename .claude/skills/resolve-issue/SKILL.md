@@ -14,11 +14,19 @@ Argumento esperado: número o URL del issue (`/resolve-issue 103`).
 
 ## 0. Antes de empezar
 
-- Verifica que `gh` esté autenticado antes de avanzar:
+- Verifica que `gh` esté autenticado **y** que el token tenga permiso de
+  escritura sobre PRs antes de avanzar — `gh auth status` solo confirma
+  que hay sesión, no que el token pueda crear PRs:
   ```bash
   gh auth status
+  gh api repos/{owner}/{repo} --jq .permissions.push
   ```
-  Si falla, detente y pide al usuario que corra `gh auth login`.
+  Si `gh auth status` falla, pide al usuario que corra `gh auth login`.
+  Si `permissions.push` es `false`, o si más adelante `gh pr create`
+  falla con "Resource not accessible by personal access token", detente
+  de inmediato y pide al usuario que amplíe los scopes del token
+  (`gh auth refresh -h github.com -s repo`) — no sigas intentando otras
+  cosas para esquivarlo.
 - Si no se pasó número de issue, pídelo.
 - Lee el issue completo:
   ```bash
@@ -26,14 +34,6 @@ Argumento esperado: número o URL del issue (`/resolve-issue 103`).
   ```
   Si `state` no es `OPEN`, avisa al usuario y confirma si quiere
   continuar igual.
-- Revisa si ya existe un PR vinculado a este issue antes de duplicar
-  trabajo:
-  ```bash
-  gh pr list --search "<n> in:body" --state all
-  ```
-  Si ya hay un PR abierto para el mismo issue, pregunta al usuario si
-  quiere que continúes ese PR (ver "Reanudar trabajo existente" más
-  abajo) en vez de crear uno nuevo.
 - Si el issue no tiene criterios de aceptación claros, o es ambiguo en
   alcance, pregunta al usuario antes de escribir código. No asumas.
 - Identifica el área que toca (`scrapers`, `db-api`, `verification`,
@@ -43,20 +43,29 @@ Argumento esperado: número o URL del issue (`/resolve-issue 103`).
 
 ### Reanudar trabajo existente (idempotencia)
 
-Antes de crear nada, comprueba si ya hay rama o PR de una corrida
-anterior de este skill para el mismo issue:
+El nombre de rama siempre incluye el número del issue (ver paso 1), así
+que el chequeo de trabajo previo se hace por número, sin depender de
+ningún slug que todavía no existe en este punto. Antes de crear nada:
 
 ```bash
-git branch --list '*<slug-o-numero>*'
-git branch -r --list 'origin/*<slug-o-numero>*'
+git fetch origin --prune
+git branch --list "*<n>-*"
+git branch -r --list "origin/*<n>-*"
 gh pr list --search "<n> in:body" --state all
 ```
+
+(El `git fetch --prune` es obligatorio antes de mirar ramas remotas —
+sin él, `git branch -r` puede mostrar refs obsoletos y no detectar una
+rama que otra persona ya creó.)
 
 - Si la rama ya existe localmente o en remoto: haz `git checkout` sobre
   ella en vez de crear una nueva, y sigue desde el paso que corresponda
   según lo que ya esté hecho (¿ya hay commits? ¿ya hay PR abierto?).
 - Si ya existe un PR abierto: continúa desde el paso 7 (vigilar checks)
-  en vez de recrearlo.
+  en vez de recrearlo. La búsqueda por `<n> in:body` es texto libre y
+  puede traer falsos positivos (el número aparece en el body por otra
+  razón) o falsos negativos (el PR cierra el issue de otra forma) —
+  confirma siempre con el usuario antes de asumir que es "el mismo PR".
 - No crees una segunda rama o un segundo PR para el mismo issue salvo
   que el usuario lo pida explícitamente.
 
@@ -70,11 +79,13 @@ git pull origin master
 Si hay cambios locales sin commitear que no son tuyos, detente y avisa al
 usuario — no los descartes.
 
-Crea la rama con el prefijo correcto (ver tabla). Usa un slug corto y
-descriptivo derivado del título del issue, no el número solo:
+Crea la rama con el prefijo correcto (ver tabla) y el formato
+`<prefijo>/<n>-<slug-descriptivo>` — el número del issue siempre va
+primero en el slug para que el chequeo de idempotencia del paso 0 lo
+pueda encontrar sin ambigüedad:
 
 ```bash
-git checkout -b <prefijo>/<slug-descriptivo>
+git checkout -b <prefijo>/<n>-<slug-descriptivo>
 ```
 
 Si `git checkout -b` falla porque la rama ya existe, no la borres ni
@@ -194,6 +205,10 @@ EOF
 )"
 ```
 
+`gh pr create` imprime la URL del PR creado (termina en `/pull/<n>`).
+Toma el número de ahí para el paso siguiente — no lo inventes ni asumas
+que es el mismo que el del issue.
+
 El PR debe resolver exactamente lo que pide el issue, ni más ni menos.
 
 ## 7. Vigilar los checks de CI
@@ -201,6 +216,10 @@ El PR debe resolver exactamente lo que pide el issue, ni más ni menos.
 ```bash
 gh pr checks <pr-number> --watch
 ```
+
+(`<pr-number>` es el que obtuviste de la URL devuelta por
+`gh pr create` en el paso anterior, o el de `gh pr list --search "<n> in:body"`
+si estás reanudando un PR existente.)
 
 El workflow `ci.yml` corre: tests (pytest), lint (ruff), gitleaks,
 bloqueo de archivos de datos reales, pip-audit, bandit, scan de
