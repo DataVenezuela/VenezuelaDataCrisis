@@ -145,6 +145,7 @@ Una línea representa un registro de persona producido desde una fuente.
 | `verification_status` |        string |       no | Estado de verificación                                    |
 | `confidence_score`    |        number |       no | Score de confianza                                        |
 | `source_url`          |        string |       sí | URL primaria del registro                                 |
+| `deterministic_id`    |        string |       sí | ID determinístico basado en hash fonético y ubicación     |
 
 ### 7.2 Enums
 
