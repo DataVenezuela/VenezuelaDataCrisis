@@ -5,7 +5,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TypeAlias
 
-import requests
+import httpx
 import yaml
 
 from scrapers.normalizers.text import expand_abbreviations, normalize_for_match, normalize_text
@@ -163,7 +163,7 @@ def geocode_osm(
     """Return lat/lng from OpenStreetMap Nominatim, or None on failure."""
     try:
         params: dict[str, str | int] = {"q": query, "format": "json", "limit": 1}
-        response = requests.get(
+        response = httpx.get(
             OSM_SEARCH_URL,
             params=params,
             headers={"User-Agent": user_agent},
@@ -175,7 +175,7 @@ def geocode_osm(
             return None
         first = data[0]
         return float(first["lat"]), float(first["lon"])
-    except (requests.RequestException, ValueError, KeyError, TypeError, IndexError):
+    except (httpx.HTTPError, ValueError, KeyError, TypeError, IndexError):
         return None
 
 
@@ -221,7 +221,7 @@ def _safe_geocode(
 ) -> tuple[float, float] | None:
     try:
         return geocoder(query, timeout, user_agent)
-    except (requests.RequestException, ValueError, TypeError):
+    except (httpx.HTTPError, ValueError, TypeError):
         return None
 
 

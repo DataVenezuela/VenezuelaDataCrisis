@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import requests
+import httpx
 
 from scrapers.normalizers import normalize_location
 from scrapers.normalizers.location import _load_location_synonyms, geocode_osm
@@ -100,7 +100,7 @@ def test_location_normalizer_uses_optional_geocoder() -> None:
 
 def test_location_normalizer_keeps_coordinates_null_when_geocoder_fails() -> None:
     def failing_geocoder(_query: str, _timeout: float, _user_agent: str) -> tuple[float, float]:
-        raise requests.Timeout("demo timeout")
+        raise httpx.TimeoutException("demo timeout")
 
     result = normalize_location("Estado Miranda", geocode=True, geocoder=failing_geocoder)
 
@@ -126,7 +126,7 @@ def test_geocode_osm_uses_nominatim_contract(monkeypatch) -> None:
         captured["timeout"] = timeout
         return FakeResponse()
 
-    monkeypatch.setattr(requests, "get", fake_get)
+    monkeypatch.setattr(httpx, "get", fake_get)
 
     assert geocode_osm("Ciudad Demo, Venezuela", timeout=3.0, user_agent="test-agent") == (10.5, -66.9)
     assert captured["params"] == {"q": "Ciudad Demo, Venezuela", "format": "json", "limit": 1}
@@ -145,16 +145,16 @@ def test_geocode_osm_returns_none_on_empty_result(monkeypatch) -> None:
     def fake_get(*_args: object, **_kwargs: object) -> FakeResponse:
         return FakeResponse()
 
-    monkeypatch.setattr(requests, "get", fake_get)
+    monkeypatch.setattr(httpx, "get", fake_get)
 
     assert geocode_osm("Ciudad Demo") is None
 
 
 def test_geocode_osm_returns_none_on_request_error(monkeypatch) -> None:
     def fake_get(*_args: object, **_kwargs: object) -> object:
-        raise requests.Timeout("demo timeout")
+        raise httpx.TimeoutException("demo timeout")
 
-    monkeypatch.setattr(requests, "get", fake_get)
+    monkeypatch.setattr(httpx, "get", fake_get)
 
     assert geocode_osm("Ciudad Demo") is None
 
