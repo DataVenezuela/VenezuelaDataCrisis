@@ -68,9 +68,10 @@ def _get_adapter(source: SourceConfig) -> Any:
       api_json    → ApiAdapter (httpx, paginación automática)
       html_static → fetch_url de http_client (requests, devuelve str)
       manual_file / text → local_file (lectura local)
+      pdf         → PdfAdapter (pdfplumber, texto por página)
       rss         → fetch_url (el RSS es HTML/XML estático)
 
-    Tipos no implementados (webapp, pdf) devuelven None y la fuente se omite.
+    Tipos no implementados (webapp) devuelven None y la fuente se omite.
     """
     stype = source.type
 
@@ -97,6 +98,10 @@ def _get_adapter(source: SourceConfig) -> Any:
     if stype in ("manual_file", "text"):
         from scrapers.adapters.local_file import read_local_file
         return _LocalFileAdapter(source_key=source.id, read_fn=read_local_file)
+
+    if stype == "pdf":
+        from scrapers.adapters.pdf_adapter import PdfAdapter
+        return PdfAdapter.from_source_config(source)
 
     log.warning(
         "Adapter para type=%r no implementado (fuente=%s) — omitida",
