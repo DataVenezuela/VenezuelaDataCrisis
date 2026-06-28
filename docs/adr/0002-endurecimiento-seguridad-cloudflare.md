@@ -146,7 +146,7 @@ Tres niveles, de genérico a específico:
 
 # Bloquear rutas que no existen en el contrato v1 (reduce fuzzing)
 (starts_with(http.request.uri.path, "/v1/") and not
-    any(http.request.uri.path in {"/v1/personas" "/v1/acopio" "/v1/events"}))
+    http.request.uri.path in {"/v1/personas" "/v1/acopio" "/v1/events"})
     → block
 ```
 
