@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 from scrapers.models._validators import validate_score_range, validate_uuid_str
 
@@ -90,3 +90,17 @@ class Person(BaseModel):
         if lo is not None and hi is not None and lo > hi:
             raise ValueError("age_range['min'] must be <= age_range['max']")
         return v
+
+    @model_validator(mode="after")
+    def _infer_is_minor(self) -> Person:
+        """Derive is_minor from age_range when not set explicitly."""
+        if self.is_minor is not None:
+            return self
+        if self.age_range is not None:
+            hi = self.age_range.get("max")
+            lo = self.age_range.get("min")
+            if hi is not None and hi < 18:
+                self.is_minor = True
+            elif lo is not None and lo >= 18:
+                self.is_minor = False
+        return self
