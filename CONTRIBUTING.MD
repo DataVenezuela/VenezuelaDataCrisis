@@ -156,7 +156,7 @@ Cada PR contra `master` corre automáticamente el workflow `.github/workflows/ci
 
 1. Instala `scrapers/requirements.txt` y corre `python -m pytest scrapers/tests`.
 2. Bloquea el PR si agrega archivos `.csv`, `.jsonl`, `.pdf`, `.db`, `.sqlite` o `.xlsx`.
-3. Escanea las líneas **nuevas** del diff buscando `cedula`, `telefono`, `password`, `secret`, `api_key`, `token` (la misma búsqueda de la sección de abajo), con una allowlist para los archivos donde esas palabras son nombres de campo legítimos del pipeline de tokenización de PII (`shared/hashing.py`, `scrapers/sanitizers/pii_tokenizer.py`, tests de PII, etc.).
+3. Escanea las líneas **nuevas** del diff buscando `cedula`, `telefono`, `password`, `secret`, `api_key`, `token` (la misma búsqueda de la sección de abajo, normalizando tildes antes de comparar), con una allowlist para los archivos donde esas palabras son nombres de campo legítimos del pipeline de tokenización de PII (`shared/hashing.py`, `scrapers/sanitizers/pii_tokenizer.py`, tests de PII, etc.). El log del check solo muestra qué palabra clave hizo match y en qué archivo, nunca el valor real de la línea, para no exponer datos sensibles si el match es real.
 
 El check `ci` es requerido para mergear a `master`: si falla, el PR no se puede mergear hasta corregirlo.
 
