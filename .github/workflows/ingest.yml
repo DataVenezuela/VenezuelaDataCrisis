@@ -1,0 +1,97 @@
+name: Ingest
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"      # cada 10 minutos
+  workflow_dispatch:
+    inputs:
+      config:
+        description: "YAML config path"
+        default: "scrapers/config/sources.venezuela.starter.yaml"
+
+concurrency:
+  group: ingest
+  cancel-in-progress: false       # no cancelar runs en curso
+
+permissions:
+  contents: read
+
+jobs:
+  # ── Discover: qué fuentes necesitan ejecutarse ──────────────────
+  discover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      matrix: ${{ steps.list.outputs.matrix }}
+      has_sources: ${{ steps.list.outputs.has_sources }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: scrapers/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r scrapers/requirements.txt
+
+      - name: List enabled sources
+        id: list
+        run: |
+          CONFIG="${{ inputs.config || 'scrapers/config/sources.venezuela.starter.yaml' }}"
+          SOURCES=$(python -m scrapers.cli list-enabled --config "$CONFIG" --json)
+          echo "matrix={\"source_id\":$SOURCES}" >> "$GITHUB_OUTPUT"
+
+          # Check if there are sources to process
+          COUNT=$(echo "$SOURCES" | python -c "import sys,json; print(len(json.load(sys.stdin)))")
+          if [ "$COUNT" -gt 0 ]; then
+            echo "has_sources=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_sources=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ── Ingest: un job por fuente (matrix) ──────────────────────────
+  ingest:
+    needs: discover
+    if: needs.discover.outputs.has_sources == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false            # una fuente fallida no cancela las demás
+      max-parallel: 4
+      matrix: ${{ fromJson(needs.discover.outputs.matrix) }}
+    concurrency:
+      group: ingest-${{ matrix.source_id }}
+      cancel-in-progress: false   # no superponer la misma fuente
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: scrapers/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r scrapers/requirements.txt
+
+      - name: Ingest source ${{ matrix.source_id }}
+        env:
+          PII_SALT: ${{ secrets.PII_HMAC_SECRET }}
+          PII_HMAC_SECRET: ${{ secrets.PII_HMAC_SECRET }}
+        run: |
+          CONFIG="${{ inputs.config || 'scrapers/config/sources.venezuela.starter.yaml' }}"
+          python -m scrapers.cli ingest \
+            --config "$CONFIG" \
+            --source "${{ matrix.source_id }}" \
+            --output-dir scrapers/runtime_output
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ingest-${{ matrix.source_id }}
+          path: scrapers/runtime_output/
+          retention-days: 7
+          if-no-files-found: ignore
