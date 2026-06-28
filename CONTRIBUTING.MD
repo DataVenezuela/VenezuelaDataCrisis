@@ -138,17 +138,28 @@ Este proyecto puede procesar datos de personas desaparecidas, heridas, fallecida
 Cada PR contra `master` corre `ci.yml` automáticamente:
 1. `pytest scrapers/tests`, bloqueante
 2. `ruff check .`, bloqueante
-3. Bloqueo de archivos `.csv`, `.jsonl`, `.pdf`, `.db`, `.sqlite`, `.xlsx`, bloqueante
-4. Scan de keywords PII/secretos en el diff, bloqueante (con allowlist para archivos legítimos)
-5. `gitleaks`, informativo (no bloqueante aún)
-6. `bandit` y `pip-audit`, informativo
+3. `mypy --strict` sobre `scrapers/adapters` y `scrapers/parsers`, bloqueante (ver abajo)
+4. Bloqueo de archivos `.csv`, `.jsonl`, `.pdf`, `.db`, `.sqlite`, `.xlsx`, bloqueante
+5. Scan de keywords PII/secretos en el diff, bloqueante (con allowlist para archivos legítimos)
+6. `gitleaks`, informativo (no bloqueante aún)
+7. `bandit` y `pip-audit`, informativo
 
 Corre localmente antes de hacer push:
 
 ```bash
 pytest scrapers/tests
 pip install ruff && ruff check .
+pip install -r scrapers/requirements.txt
+python -m mypy --strict --follow-imports=silent scrapers/adapters scrapers/parsers
 ```
+
+### `mypy --strict` en adapters/parsers
+
+Cualquier `Adapter` (`AdapterProtocol`, `scrapers/adapters/base.py`) o `Parser`
+(`ParserProtocol`, `scrapers/parsers/base.py`) nuevo debe pasar
+`mypy --strict` antes de mergear. El check solo cubre esos dos directorios —
+el resto del repo todavía no exige tipado estricto, así que un PR no
+relacionado con adapters/parsers no se ve afectado por este check.
 
 ---
 
