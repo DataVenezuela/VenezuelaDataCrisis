@@ -4,12 +4,19 @@ on:
   pull_request:
     branches: [master]
 
+# Cancela runs anteriores del mismo PR/branch para no desperdiciar minutos.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
+  pull-requests: write   # necesario para que dependency-review-action comente en el PR
 
 jobs:
   ci:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
@@ -22,7 +29,8 @@ jobs:
           cache-dependency-path: scrapers/requirements.txt
 
       - name: Install dependencies
-        run: pip install -r scrapers/requirements.txt ruff==0.15.20
+        run: |
+          pip install -r scrapers/requirements.txt ruff==0.15.20
 
       - name: Run tests
         run: python -m pytest scrapers/tests
@@ -47,18 +55,36 @@ jobs:
             exit 1
           fi
 
+      - name: Dependency vulnerability scan (pip-audit)
+        if: always()
+        run: |
+          pip install pip-audit
+          pip-audit -r scrapers/requirements.txt
+
+      - name: SAST (bandit)
+        if: always()
+        continue-on-error: true
+        run: |
+          pip install bandit
+          bandit -r scrapers/ tools/ shared/ --skip B101 -f json -o /tmp/bandit-report.json || true
+          bandit -r scrapers/ tools/ shared/ --skip B101
+
+      - name: Dependency review (new deps in this PR)
+        if: always()
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+
       - name: Security keyword scan (PII / secrets)
         run: |
           set -euo pipefail
           # Archivos donde estas palabras son nombres de campo legitimos del
           # propio pipeline de tokenizacion de PII, no datos filtrados.
-          ALLOWLIST='^(shared/hashing\.py|scrapers/sanitizers/pii_tokenizer\.py|scrapers/sanitizers/pii_redactor\.py|scrapers/normalizers/person\.py|scrapers/normalizers/text\.py|scrapers/normalizers/location\.py|scrapers/models/person\.py|scrapers/validators/quality\.py|scrapers/tests/test_pii_hmac_fields\.py|scrapers/tests/test_pii_hmac_unified\.py|scrapers/tests/test_person_hashing\.py|scrapers/tests/test_sanitizer\.py|scrapers/tests/test_entity_models\.py|scrapers/tests/test_quality\.py|scrapers/tests/test_run_pipeline\.py|scrapers/pipelines/run_pipeline\.py|scrapers/parsers/encuentralos_parser\.py|scrapers/parsers/base\.py|scrapers/tests/test_encuentralos_parser\.py|scrapers/tests/fixtures/encuentralos_api_sample\.json|\.github/workflows/ci\.yml)$'
-          # Patron solo ASCII; las lineas del diff se normalizan (tildes -> ASCII)
-          # antes de comparar, asi tambien se detecta "cedula", "telefono", etc.
+          ALLOWLIST='^(shared/hashing\.py|scrapers/sanitizers/pii_tokenizer\.py|scrapers/sanitizers/pii_redactor\.py|scrapers/normalizers/person\.py|scrapers/normalizers/text\.py|scrapers/normalizers/location\.py|scrapers/models/person\.py|scrapers/validators/quality\.py|scrapers/tests/test_pii_hmac_fields\.py|scrapers/tests/test_pii_hmac_unified\.py|scrapers/tests/test_person_hashing\.py|scrapers/tests/test_sanitizer\.py|scrapers/tests/test_entity_models\.py|scrapers/tests/test_quality\.py|scrapers/tests/test_run_pipeline\.py|scrapers/pipelines/run_pipeline\.py|scrapers/parsers/encuentralos_parser\.py|scrapers/parsers/base\.py|scrapers/tests/test_encuentralos_parser\.py|scrapers/tests/fixtures/encuentralos_api_sample\.json|tools/ingest_supabase/ingestor\.py|tools/ingest_supabase/tests/test_ingestor\.py|tools/build_public_index/projection\.py|tools/build_public_index/tests/test_projection\.py|tools/sql/schema_internal\.sql|tools/sql/public_views\.sql|\.github/workflows/ci\.yml)$'
           PATTERN='cedula|telefono|password|secret|api_key|token'
 
           FOUND=0
-          for f in $(git diff --name-only --diff-filter=ACMR "origin/${{ github.base_ref }}...HEAD" -- '*.py' '*.js' '*.ts' '*.json' '*.yaml' '*.yml'); do
+          for f in $(git diff --name-only --diff-filter=ACMR "origin/${{ github.base_ref }}...HEAD" -- '*.py' '*.js' '*.ts' '*.json' '*.yaml' '*.yml' '*.sql'); do
             if echo "$f" | grep -qE "$ALLOWLIST"; then
               continue
             fi

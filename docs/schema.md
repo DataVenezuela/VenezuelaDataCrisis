@@ -787,3 +787,74 @@ Esto simplifica consultas del tipo:
 ```text
 dame todas las notas de esta persona
 ```
+
+---
+
+# Vista pública (ADR 0001 §5)
+
+El artefacto D1 (plano público de serving) contiene **únicamente** los campos
+listados aquí. Ningún otro campo es exportado al plano público, por diseño.
+
+La proyección se aplica en la base de datos mediante vistas de solo-lectura
+(`tools/sql/public_views.sql`), no en el código del build job, para que sea
+imposible filtrar un campo sensible por descuido.
+
+**Campos prohibidos en D1:** cédula en claro, teléfono en claro, contacto
+familiar, fotos reales, datos médicos identificables, `raw_content`, y cualquier
+campo marcado sensible en `base-standards.md §10`.
+
+## Vista pública: `persons`
+
+Vista SQL: `public_persons`
+
+| Campo | Tipo JSONL | Notas |
+|-------|-----------|-------|
+| `person_record_id` | `string` UUID v4 | PK |
+| `event_id` | `string` UUID v4 | FK → events |
+| `full_name` | `string` | normalizado (mayúsculas) |
+| `alternate_names` | `array<string>` | |
+| `cedula_hmac` | `string` HEX 64 | sin prefijo — solo para lookup |
+| `cedula_masked` | `string` | últimos 4 dígitos |
+| `age_range` | `object` `{min, max}` | |
+| `sex` | `string` enum | |
+| `last_known_location` | `object` `location_object` | solo estado/municipio/parroquia/lat/lng |
+| `status` | `string` enum | |
+| `verification_status` | `string` enum | |
+| `confidence_score` | `number` | 0.000–1.000 |
+| `source_url` | `string` | trazabilidad |
+| `deterministic_id` | `string` | ID fonético precomputado para FTS5 blocking |
+
+## Vista pública: `acopio_centers`
+
+Vista SQL: `public_acopio`
+
+| Campo | Tipo JSONL | Notas |
+|-------|-----------|-------|
+| `acopio_id` | `string` UUID v4 | PK |
+| `event_id` | `string` UUID v4 | FK → events |
+| `name` | `string` | |
+| `location` | `object` `location_object` | |
+| `confidence_score` | `number` | |
+| `status` | `string` enum | |
+| `needs` | `array<string>` | keywords normalizadas |
+| `last_verified_at` | `string` ISO 8601 | |
+| `managing_org` | `string` | |
+| `contact_masked` | `string` | enmascarado |
+| `capacity` | `number` | |
+| `current_load` | `number` | |
+
+## Vista pública: `events`
+
+Vista SQL: `public_events`
+
+| Campo | Tipo JSONL | Notas |
+|-------|-----------|-------|
+| `event_id` | `string` UUID v4 | PK |
+| `name` | `string` | |
+| `event_type` | `string` enum | |
+| `occurred_at` | `string` ISO 8601 | |
+| `affected_states` | `array<string>` | |
+| `magnitude` | `number` | nullable |
+| `depth_km` | `number` | nullable |
+| `status` | `string` enum | |
+| `external_ids` | `object` | nullable |

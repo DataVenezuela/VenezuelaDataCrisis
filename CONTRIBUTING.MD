@@ -340,6 +340,32 @@ Una contribución está lista cuando:
 
 ---
 
+## Secretos y credenciales de CI/CD
+
+Los tres workflows de GitHub Actions (`ci.yml`, `scrapers.yml`, `build_public_index.yml`)
+usan secretos del repositorio. **Ningún secreto va al repo bajo ninguna circunstancia.**
+
+Los secretos deben configurarse en **Settings → Secrets and variables → Actions** del repo.
+
+| Secret | Usado por | Descripción |
+|--------|-----------|-------------|
+| `PII_SALT` | `scrapers.yml` | Salt para HMAC de PII en el pipeline de scrapers |
+| `PII_HMAC_SECRET` | `scrapers.yml`, `build_public_index.yml` | Mismo valor que `PII_SALT`; para lookup server-side de cédulas |
+| `SUPABASE_DB_URL` | `scrapers.yml`, `build_public_index.yml` | PostgreSQL connection string de Supabase |
+| `CLOUDFLARE_API_TOKEN` | `build_public_index.yml` | Token Cloudflare con permisos `D1:Edit` |
+| `CLOUDFLARE_ACCOUNT_ID` | `build_public_index.yml` | ID de la cuenta Cloudflare |
+| `D1_DATABASE_ID` | `build_public_index.yml` | UUID de la base D1 (`vzla_public`) |
+
+**Reglas:**
+
+- Estos secretos **nunca se imprimen en logs** (los workflows y el código solo reportan conteos y duraciones).
+- Las credenciales de Cloudflare se crean con mínimos permisos necesarios (solo `D1:Edit` para el token del build job).
+- `SUPABASE_DB_URL` del build job debe apuntar a un usuario de **solo lectura** sobre las vistas públicas.
+- Si crees que un secreto fue comprometido, rótalo inmediatamente en Cloudflare/Supabase y en GitHub Actions.
+- Ver ADR 0001 §8 (`docs/adr/0001-arquitectura-serving-publico.md`) para el contexto completo de seguridad.
+
+---
+
 ## ¿Dudas?
 
 Abre un Issue en el repo o escribe en el canal del equipo correspondiente.

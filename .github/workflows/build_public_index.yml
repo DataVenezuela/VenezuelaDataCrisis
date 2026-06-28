@@ -1,0 +1,40 @@
+name: Build Public Index (Supabase → D1)
+
+# Cron cada 30 minutos. El offset de :00/:30 deja margen tras el scraper (:05).
+# También puede lanzarse manualmente para forzar un rebuild inmediato.
+on:
+  schedule:
+    - cron: "0,30 * * * *"   # cada 30 min a los :00 y :30 (UTC)
+  workflow_dispatch:
+    inputs:
+      denylist_file:
+        description: "Ruta al archivo de denylist (vacío = leer de Supabase)"
+        required: false
+        default: ""
+
+# Un solo build a la vez. No tiene sentido correr dos rebuilds en paralelo.
+concurrency:
+  group: build-public-index
+  cancel-in-progress: false   # dejar que el actual termine antes de empezar otro
+
+permissions:
+  contents: read   # mínimo necesario
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # TODO: implementar tools/build_public_index/ para proyectar Supabase → D1.
+      # Una vez implementado, reemplazar este step por:
+      #   uses: actions/setup-python@v5 (python-version: "3.12")
+      #   pip install -r tools/requirements.txt
+      #   python -m tools.build_public_index.cli [--denylist-file ...]
+      # Secretos requeridos: SUPABASE_DB_URL, CLOUDFLARE_API_TOKEN,
+      #   CLOUDFLARE_ACCOUNT_ID, D1_DATABASE_ID, PII_HMAC_SECRET
+      # Ver docs/implementation-plan.md Fase 2 y Fase 3.
+      - name: Build and publish public index to D1 (pendiente)
+        run: |
+          echo "Build Supabase → D1 aún no implementado. Ver docs/implementation-plan.md."
