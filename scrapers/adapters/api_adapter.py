@@ -124,11 +124,16 @@ class ApiAdapter:
         extra_headers: dict[str, str] | None = None,
         max_retries: int = _MAX_RETRIES,
         source_key: str | None = None,
+        default_path: str | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.page_size = page_size
         self.timeout = timeout
         self.max_retries = max_retries
+        # Fix: default_path as constructor param instead of monkey-patching
+        # a private attr after construction. Allows _run_source to know the
+        # API path without coupling to internal attribute names.
+        self.default_path = default_path
 
         merged_headers = {**_DEFAULT_HEADERS, **(extra_headers or {})}
         self._client = httpx.Client(

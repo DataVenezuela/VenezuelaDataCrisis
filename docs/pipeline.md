@@ -36,6 +36,62 @@ Verification humana / externa
 
 ---
 
+## Estado de implementación
+
+El orquestador del pipeline está implementado en `scrapers/pipelines/run_pipeline.py`.
+
+### Flujo ejecutable
+
+```text
+SourceConfig (YAML)
+  → adapter (api_json / html_static / manual_file)
+    → parser (encuentralos / fallback genérico)
+      → PII tokenizer (HMAC o strip)
+        → normalización (fechas, ubicaciones)
+          → dedup (Event / AcopioCenter; Person excluido intencionalmente)
+            → confidence_score
+              → JSONL export (persons.jsonl / acopio.jsonl / events.jsonl)
+```
+
+### Adapters implementados
+
+| Tipo | Módulo | Estado |
+|------|--------|--------|
+| `api_json` | `scrapers/adapters/api_adapter.py` | ✅ Implementado (httpx, paginación, retry) |
+| `html_static` / `rss` | `scrapers/adapters/http_client.py` | ✅ Implementado (fetch wrapper) |
+| `manual_file` / `text` | `scrapers/adapters/local_file.py` | ✅ Implementado (lectura local) |
+| `webapp` / `pdf` | — | ⏳ Pendiente (se omite con warning) |
+
+### Parsers implementados
+
+| Parser | Módulo | Estado |
+|--------|--------|--------|
+| `encuentralos` | `scrapers/parsers/encuentralos_parser.py` | ⏳ Pendiente |
+| Fallback genérico | `_TextFallbackParser` (interno) | ✅ Para text/html/rss |
+
+### Ejecución
+
+```bash
+# Pipeline completo con fuentes del config
+python -m scrapers.cli run --config scrapers/config/sources.yaml --output scrapers/runtime_output
+
+# Limitar a N registros por fuente
+python -m scrapers.cli run --config scrapers/config/sources.yaml --output scrapers/runtime_output --limit 50
+```
+
+### Diseño de resiliencia
+
+- Un error en un registro individual no tumba el pipeline.
+- Un error en una fuente entera se loguea y se continúa con la siguiente.
+- `PII_SALT` es opcional en CI: sin salt, los campos PII crudos se eliminan antes de exportar.
+- La deduplicación de Person se excluye intencionalmente del orquestador (requiere revisión humana).
+
+### Tests
+
+28 tests de integración offline en `scrapers/tests/test_run_pipeline.py`.
+
+---
+
 ## Principios del pipeline
 
 El pipeline sigue estos principios:
