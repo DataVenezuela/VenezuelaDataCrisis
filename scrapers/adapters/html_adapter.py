@@ -61,9 +61,9 @@ class HtmlAdapter:
             source_key = self.source_key or _source_key_from_url(url)
 
         html, content_type = self.fetcher(url, timeout or self.timeout)
-        title, text = extract_html_text(html)
+        title, raw_text = extract_html_text(html)
         title = _clean_extracted_text(title)
-        text = _clean_extracted_text(text)
+        text = _clean_extracted_text(raw_text) or ""
         text = _drop_duplicate_title(text, title)
 
         return RawContent(

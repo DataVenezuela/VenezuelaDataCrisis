@@ -64,7 +64,8 @@ def phonetic_hash(name: str) -> str:
     cleaned = _strip_accents(name.strip().lower())
     primary, alternate = dmetaphone(cleaned)
     if primary or alternate:
-        return primary or alternate
+        result: str = primary or alternate
+        return result
 
     spa_key = _spanish_phonetic_key(name)
     if spa_key:

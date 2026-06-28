@@ -162,9 +162,10 @@ def geocode_osm(
 ) -> tuple[float, float] | None:
     """Return lat/lng from OpenStreetMap Nominatim, or None on failure."""
     try:
+        params: dict[str, str | int] = {"q": query, "format": "json", "limit": 1}
         response = requests.get(
             OSM_SEARCH_URL,
-            params={"q": query, "format": "json", "limit": 1},
+            params=params,
             headers={"User-Agent": user_agent},
             timeout=timeout,
         )

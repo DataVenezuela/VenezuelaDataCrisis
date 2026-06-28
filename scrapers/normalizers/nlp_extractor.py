@@ -103,7 +103,8 @@ def _load_spacy_model(model_name: str = SPACY_MODEL) -> NlpPipeline:
         raise RuntimeError(_missing_spacy_dependency_message(exc)) from exc
 
     try:
-        return spacy.load(model_name)
+        pipeline: NlpPipeline = spacy.load(model_name)
+        return pipeline
     except OSError as exc:
         raise RuntimeError(_missing_model_message(model_name)) from exc
 

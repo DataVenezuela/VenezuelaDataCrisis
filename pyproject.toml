@@ -3,3 +3,15 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F"]
+
+[tool.mypy]
+python_version = "3.12"
+
+[[tool.mypy.overrides]]
+module = [
+    "phonetics",
+    "spacy",
+    "playwright.sync_api",
+    "pdfplumber",
+]
+ignore_missing_imports = true
