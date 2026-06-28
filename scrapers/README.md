@@ -1,111 +1,68 @@
-# VZLA_DEDUP - Módulo `scrapers`
+# VZLA_DEDUP
+> Limpiemos los registros en esta crisis!
 
-Este paquete implementa una base ejecutable para el equipo de scrapers/cleaners.
+Tras los terremotos del 24 de junio, miles de familias buscan a sus seres queridos en decenas de páginas distintas. La misma persona aparece en cuatro lugares con cuatro nombres distintos.
 
-El objetivo es convertir páginas, APIs, RSS o archivos manuales en **claims saneados, deduplicados y trazables**, evitando que datos sensibles entren a la salida operacional.
+Este proyecto recolecta esos registros, los unifica en una base de datos limpia y deduplicada, y los expone via API para que cualquier dev pueda construir encima.
 
-## Flujo
+→ [Contribuir](./CONTRIBUTING.MD) · [Pipeline técnico](./docs/pipeline.md) · [Reportar un problema](../../issues)
 
-![Arquitectura del pipeline](../docs/pipeline.svg)
+---
 
-> Fuente editable: [`docs/pipeline.dot`](../docs/pipeline.dot) (Graphviz)
+## Cómo funciona
 
-## Regla de seguridad
-
-- No se commitean dumps reales.
-- No se commitean PDFs reales, CSV reales, imágenes reales, teléfonos, cédulas, nombres de menores ni direcciones exactas.
-- El raw solo puede guardarse en cuarentena externa/cifrada si existe autorización.
-- La salida por defecto es saneada y deduplicada.
-
-## Archivos principales
-
-```text
-scrapers/
-├── cli.py                              # CLI principal
-├── config/
-│   ├── sources.demo.yaml               # demo offline con datos sintéticos
-│   ├── sources.venezuela.starter.yaml  # starter para URLs/APIs reales
-│   └── sources.custom.template.yaml    # plantilla para agregar páginas
-├── pipelines/
-│   └── run_pipeline.py                 # orquestador principal
-├── sanitizers/
-│   ├── pii_detector.py
-│   ├── pii_redactor.py
-│   └── pii_tokenizer.py
-├── dedup/
-│   └── fingerprint.py
-├── outputs/
-│   └── jsonl_writer.py
-└── runtime_output/                     # salida local, ignorar en Git
+```
+Fuentes externas
+      ↓
+Adapters + Parsers + PII masking + Normalización
+      ↓
+Raw DB (R2 + Supabase)    ←── Quarantine DB
+      ↓
+Staging (aportes)              ← inbox cross-source
+      ↓  consolidation job
+Canonical (persons / events / acopio_centers)
+      ↓  build job
+Cloudflare Worker + D1         ← API pública
 ```
 
-## Instalación
+El pipeline no escribe archivos locales. El destino es staging en Supabase. La dedup real ocurre en el consolidation job, donde convergen datos de todas las fuentes.
 
-Desde la raíz del repo:
+Documentación técnica completa en [`docs/pipeline.md`](./docs/pipeline.md).
+
+---
+
+## Equipos
+
+| Equipo | Responsabilidad |
+|---|---|
+| **Scrapers/Cleaners** | Adapters, parsers, PII masking, normalización, ingesta a staging |
+| **DB/API** | Supabase schema, consolidation job, Cloudflare Worker + D1 |
+| **Verification** | Revisar candidatos de duplicado, validar claims |
+
+---
+
+## Quickstart
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
+git clone https://github.com/DataVenezuela/VZLA_DEDUP.git
+cd VZLA_DEDUP
+python3 -m venv .venv && source .venv/bin/activate
 pip install -r scrapers/requirements.txt
-```
-
-## Ejecutar demo offline
-
-```bash
+pytest scrapers/tests
 python -m scrapers.cli run --config scrapers/config/sources.demo.yaml
 ```
 
-Salida esperada:
+---
 
-```text
-scrapers/runtime_output/sanitized/claims.jsonl
-scrapers/runtime_output/sanitized/documents.jsonl
-scrapers/runtime_output/run_summary.json
-```
+## Reglas de seguridad
 
-## Ejecutar con fuentes starter
+Este proyecto maneja datos de personas desaparecidas. Las reglas no son negociables:
 
-```bash
-python -m scrapers.cli run --config scrapers/config/sources.venezuela.starter.yaml --limit 5
-```
+- No commitear datos reales bajo ninguna circunstancia
+- Cédulas y teléfonos se HMAC antes de cualquier persistencia, nunca en claro
+- `cedula_hmac` = hex puro de 64 chars, sin prefijo
+- La API pública nunca expone PII directa
 
-## Agregar nuevas páginas
+---
 
-1. Copiar `scrapers/config/sources.custom.template.yaml`.
-2. Agregar fuente con `type: html_static`, `api_json`, `rss` o `manual_file`.
-3. Ejecutar validación:
-
-```bash
-python -m scrapers.cli validate --config scrapers/config/sources.custom.yaml
-```
-
-4. Ejecutar pipeline:
-
-```bash
-python -m scrapers.cli run --config scrapers/config/sources.custom.yaml
-```
-
-## Salida operacional
-
-Cada claim exportado contiene:
-
-- `claim_id`
-- `fingerprint`
-- `source_id`
-- `source_url`
-- `claim_type`
-- `description`
-- `location_text`
-- `confidence_score`
-- `verification_status`
-- `evidence_text`
-- `fetched_at`
-
-## Variables opcionales
-
-```bash
-export PII_HMAC_SECRET="cambiar-esto-por-secreto-real"
-export SCRAPERS_KEEP_RAW="0"
-```
-
-`--keep-raw` conserva snapshots saneados para depuración local. El pipeline no escribe PII raw en claro.
+MIT License · 2026 · DataVenezuela

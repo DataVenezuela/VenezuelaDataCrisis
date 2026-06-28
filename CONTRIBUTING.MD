@@ -1,6 +1,6 @@
 # Cómo contribuir a VZLA_DEDUP
 
-Gracias por querer ayudar. Este proyecto maneja información sensible en un contexto de emergencia, así que cada contribución debe priorizar tres cosas:
+Gracias por querer ayudar. Este proyecto maneja información sensible en un contexto de emergencia. Cada contribución debe priorizar tres cosas:
 
 1. No exponer datos personales.
 2. No romper trazabilidad.
@@ -12,226 +12,149 @@ Si tienes dudas, abre un Issue antes de implementar.
 
 ## Antes de empezar
 
-Asegúrate de estar trabajando en una tarea clara.
+Revisa el mapa de dependencias en el README. Muchos issues están bloqueados, agarrar uno bloqueado sin resolver sus dependencias primero es trabajo perdido.
 
 Puedes contribuir en uno de estos equipos:
 
-* `scrapers`: recolección, parsing, limpieza, normalización y exportación.
-* `db-api`: base de datos, modelos, endpoints, cifrado e ingestión.
-* `verification`: validación de registros, fuentes y claims.
-* `docs`: documentación técnica, guías y contratos.
+- `scrapers`: adapters, parsers, PII masking, normalización, staging exporter
+- `db-api`: Supabase schema, consolidation job, Cloudflare Worker + D1, build job
+- `verification`: revisión de candidatos de duplicado, validación de claims
+- `DevSecOps`: CI/CD config.
+- `docs` — documentación técnica, contratos, guías
 
 ---
 
 ## Configuración local
 
-Clona el repositorio:
-
 ```bash
 git clone https://github.com/DataVenezuela/VZLA_DEDUP.git
 cd VZLA_DEDUP
-```
-
-Crea el entorno virtual:
-
-```bash
 python3 -m venv .venv
 source .venv/bin/activate
-```
-
-Instala dependencias de scrapers:
-
-```bash
 pip install -r scrapers/requirements.txt
-```
-
-Corre los tests antes de cambiar algo:
-
-```bash
-python -m pytest scrapers/tests
+pytest scrapers/tests   # debe pasar antes de tocar nada
 ```
 
 ---
 
 ## Flujo de trabajo
 
-No hagas push directo a la rama principal. Todo cambio debe ir por rama y Pull Request.
-
-### 1. Actualiza tu rama base
-
-Actualmente la rama base del repositorio es `master`.
+No hagas push directo a `master`. Todo cambio va por rama y Pull Request.
 
 ```bash
-git checkout master
-git pull origin master
-```
-
-Si el proyecto migra oficialmente a `main`, usa `main` en lugar de `master`.
-
-### 2. Crea una rama descriptiva
-
-Usa el prefijo del área que estás tocando:
-
-```bash
+git checkout master && git pull origin master
 git checkout -b scrapers/nombre-descriptivo
-git checkout -b db-api/nombre-descriptivo
-git checkout -b verification/nombre-descriptivo
-git checkout -b docs/nombre-descriptivo
-git checkout -b fix/nombre-descriptivo
 ```
 
-Ejemplos:
+Prefijos de rama por equipo:
 
-```bash
-scrapers/parser-hospital-central
-scrapers/normalize-person-status
-db-api/person-sources-model
+```
+scrapers/parser-encuentralos
+db-api/staging-exporter
 verification/criteria-trust-tier
-docs/scraper-output-contract
-fix/pii-redaction-phones
+docs/pipeline-4-layers
+fix/pii-hmac-prefix
 ```
 
 ---
 
 ## Reglas para Pull Requests
 
-Un PR debe resolver una sola cosa.
+Un PR debe resolver un issue. No mezcles un parser nuevo con cambios de schema o refactors no relacionados.
 
-Evita mezclar cambios no relacionados. Por ejemplo, no mezcles un parser nuevo con cambios de base de datos, refactors grandes o documentación no relacionada.
+Todo PR debe describir:
+- Qué cambiaste y por qué
+- Cómo se prueba
+- Qué riesgo tiene
+- Si toca PII, cómo la protege
 
-Todo PR debe incluir:
-
-* Qué cambiaste.
-* Por qué era necesario.
-* Cómo se prueba.
-* Qué riesgo tiene.
-* Si toca PII, cómo la protege.
-* Ejemplo de salida usando datos ficticios, si aplica.
-
-Checklist obligatorio:
+Checklist mental:
 
 ```md
-- [ ] Corrí los tests.
-- [ ] No incluí datos reales.
-- [ ] No incluí dumps, CSVs, PDFs, imágenes reales ni JSONL con información sensible.
-- [ ] No logueo cédulas, teléfonos, direcciones, nombres completos sensibles ni secretos.
+- [ ] Corrí los tests (`pytest scrapers/tests`).
+- [ ] No incluí datos reales (personas, cédulas, teléfonos, PDFs, CSVs, JSONL).
+- [ ] No logueo PII en ningún mensaje de log o error.
 - [ ] El cambio mantiene trazabilidad hacia la fuente original.
-- [ ] Actualicé documentación si cambié contratos, schemas o comportamiento esperado.
+- [ ] Actualicé documentación si cambié contratos, schemas o comportamiento.
 - [ ] El PR resuelve una sola cosa.
+- [ ] Si agrego un parser nuevo, los registros sin parser van a cuarentena, no al basura.
 ```
 
-El PR necesita al menos una aprobación antes de mergear.
+Requiere al menos una aprobación antes de mergear. Branch protection activo: la rama debe estar al día con `master` antes de mergear.
 
 ---
 
-## Reglas de seguridad obligatorias
+## Dónde aterriza cada cosa
 
-Este proyecto puede procesar datos de personas desaparecidas, heridas, fallecidas, menores de edad, familiares, hospitales y centros de ayuda.
+El pipeline **no escribe JSONL en disco**. El destino de las entidades procesadas es staging en Supabase vía `POST /api/v1/dedup/*`.
 
-Por eso:
-
-* No subas datos reales al repo.
-* No subas archivos de output generados por el pipeline.
-* No subas screenshots con datos personales.
-* No subas PDFs, CSVs, JSONL, bases de datos o imágenes reales.
-* No guardes cédulas o teléfonos en claro.
-* No imprimas PII en logs.
-* No uses datos reales en tests.
-* No hagas commits con claves, tokens o secretos.
-* No expongas información de menores sin revisión explícita.
-
-Los outputs locales deben ir en:
-
-```bash
-scrapers/runtime_output/
+```
+Adapter → Parser → PII → Normalización → staging exporter → aportes (Supabase)
+                                                   ↓
+                                         consolidation job (cada 20 min)
+                                                   ↓
+                                         persons / events / acopio_centers
 ```
 
-Esa carpeta debe permanecer ignorada por Git.
+Si no hay parser para una fuente, el registro va a **cuarentena**. No se descarta, no se procesa con un fallback genérico. La cuarentena es trazable y revisable.
 
 ---
 
-## Integración continua (CI)
+## Estándares para parsers
 
-Cada PR contra `master` corre automáticamente el workflow `.github/workflows/ci.yml` en GitHub Actions, que:
+Todo parser nuevo debe:
+1. Implementar `ParserProtocol` (`scrapers/parsers/base.py`).
+2. Producir `list[Person | AcopioCenter | Event]` — entidades tipadas, nunca texto crudo.
+3. Aplicar HMAC a cédulas **antes** de crear la entidad, usando `shared/hashing.identity_token`.
+4. Usar `trust_tier` en letra (`A`/`B`/`C`/`D`), no entero.
+5. Dejar campos desconocidos como `None`, nunca inventar valores.
+6. Tener tests con fixtures sintéticos en `scrapers/tests/`.
+7. Estar declarado en el YAML de fuentes con `parser_asignado`.
 
-1. Instala `scrapers/requirements.txt` y corre `python -m pytest scrapers/tests`.
-2. Corre `ruff check .` (config en `pyproject.toml`). **Bloqueante**: un import sin usar, una variable sin usar u otro error de `ruff` falla el build.
-3. Bloquea el PR si agrega archivos `.csv`, `.jsonl`, `.pdf`, `.db`, `.sqlite` o `.xlsx`.
-4. Escanea las líneas **nuevas** del diff buscando `cedula`, `telefono`, `password`, `secret`, `api_key`, `token` (la misma búsqueda de la sección de abajo, normalizando tildes antes de comparar), con una allowlist para los archivos donde esas palabras son nombres de campo legítimos del pipeline de tokenización de PII (`shared/hashing.py`, `scrapers/sanitizers/pii_tokenizer.py`, tests de PII, etc.). El log del check solo muestra qué palabra clave hizo match y en qué archivo, nunca el valor real de la línea, para no exponer datos sensibles si el match es real.
-5. Corre `gitleaks` (`gitleaks/gitleaks-action`) buscando secretos por patrón/entropía en el diff del PR. **No bloqueante** por ahora (`continue-on-error: true`): reporta hallazgos en el log pero no impide el merge, mientras se valida que no haya falsos positivos con los fixtures/ejemplos del repo.
-
-El check `ci` es requerido para mergear a `master`: si falla `pytest`, `ruff` o el bloqueo de archivos/keywords, el PR no se puede mergear hasta corregirlo. `gitleaks` es informativo por ahora.
-
-Esto **no reemplaza** la revisión manual de abajo: el grep del CI y `gitleaks` son léxicos/heurísticos (no entienden contexto), así que pueden dar falsos positivos o falsos negativos. Sigue corriendo la revisión local antes de hacer push.
-
-Corre el lint localmente antes de hacer push:
-
-```bash
-pip install ruff
-ruff check .
-```
+Documentar al menos:
+- Nombre y URL de la fuente
+- Tipo de fuente (`api_json`, `html_static`, `webapp_js`, `pdf`)
+- Entidad que produce (`Person`, `AcopioCenter`, `Event`)
+- `trust_tier` asignado y justificación
+- Limitaciones conocidas del parser
 
 ---
 
-## Revisión rápida antes de commitear
+## Reglas de seguridad
 
-Busca archivos de datos que no deberían entrar al repo:
-
-```bash
-find . -type f \( \
-  -name "*.csv" -o \
-  -name "*.jsonl" -o \
-  -name "*.pdf" -o \
-  -name "*.db" -o \
-  -name "*.sqlite" -o \
-  -name "*.xlsx" \
-\)
-```
-
-Busca posibles datos sensibles o secretos:
-
-```bash
-grep -rIn \
-  "cedula\|cédula\|telefono\|teléfono\|password\|secret\|api_key\|token" \
-  --include="*.py" \
-  --include="*.js" \
-  --include="*.ts" \
-  --include="*.json" \
-  --include="*.yaml" \
-  --include="*.yml" \
-  .
-```
-
-Si aparece algo sensible, no hagas commit hasta revisarlo.
+Este proyecto puede procesar datos de personas desaparecidas, heridas, fallecidas, menores de edad y sus familiares.
+- No subas datos reales al repo bajo ninguna circunstancia
+- No subas outputs generados por el pipeline (ni JSONL, ni CSVs, ni nada de `runtime_output/`)
+- No guardes cédulas ni teléfonos en claro, ni siquiera en tests
+- No imprimas PII en logs
+- No expongas información de menores sin revisión explícita
+- `cedula_hmac` = hex puro de 64 chars, **sin prefijo** `hmac_sha256:`
+- `trust_tier` en scrapers = letras A/B/C/D, nunca enteros
 
 ---
 
-## Estándares para scrapers
+## Integración continua
 
-Todo scraper nuevo debe cumplir estas reglas:
+Cada PR contra `master` corre `ci.yml` automáticamente:
+1. `pytest scrapers/tests`, bloqueante
+2. `ruff check .`, bloqueante
+3. Bloqueo de archivos `.csv`, `.jsonl`, `.pdf`, `.db`, `.sqlite`, `.xlsx`, bloqueante
+4. Scan de keywords PII/secretos en el diff, bloqueante (con allowlist para archivos legítimos)
+5. `gitleaks`, informativo (no bloqueante aún)
+6. `bandit` y `pip-audit`, informativo
 
-1. Debe tener una fuente declarada en configuración.
-2. Debe poder correr con fixtures o datos ficticios.
-3. Debe separar fetch, parsing, sanitización, normalización y export.
-4. Debe producir salida compatible con el contrato JSONL del proyecto.
-5. Debe usar `null` para datos desconocidos.
-6. Debe usar fechas en UTC.
-7. Debe usar enums controlados.
-8. Debe proteger PII antes del export.
-9. Debe tener tests.
-10. No debe hacer merge destructivo de personas.
+Corre localmente antes de hacer push:
 
-Regla importante:
-
-> En personas, un falso merge puede hacer más daño que un duplicado. Si hay duda, se debe proponer revisión, no colapsar registros automáticamente.
+```bash
+pytest scrapers/tests
+pip install ruff && ruff check .
+```
 
 ---
 
 ## Datos de prueba
 
-Los tests deben usar datos ficticios.
-
-Permitido:
+Los tests deben usar exclusivamente datos ficticios:
 
 ```text
 JOSE LUIS PEREZ DEMO
@@ -241,91 +164,34 @@ Hospital Demo
 Centro de Acopio Demo
 ```
 
-No permitido:
-
-```text
-Nombres reales de víctimas
-Cédulas reales
-Teléfonos reales
-URLs reales con datos personales
-Imágenes reales
-PDFs reales con listados de personas
-```
+Nunca: nombres reales, cédulas reales, teléfonos reales, URLs con datos personales, imágenes o PDFs reales.
 
 ---
 
 ## Convenciones de código
 
-Para Python:
-
-* Usa nombres claros.
-* Mantén funciones pequeñas.
-* Evita lógica de negocio escondida en scripts sueltos.
-* Agrega tests cuando agregues comportamiento nuevo.
-* No silenciosamente ignores errores importantes.
-* No uses prints para debugging permanente.
-* Los logs no deben incluir PII.
-
-Cuando agregues una fuente nueva, documenta al menos:
-
-* Nombre de la fuente.
-* Tipo de fuente.
-* Parser usado.
-* Entidad producida.
-* `trust_tier`.
-* Limitaciones conocidas.
-
----
-
-## Estructura del repositorio
-
-```text
-api/          → FastAPI: endpoints, auth, rutas y modelos de API
-scrapers/     → pipeline de scraping, limpieza, dedup y exportación
-shared/       → configuración, hashing y utilidades compartidas
-verification/ → herramientas y criterios de validación
-docs/         → documentación técnica, contratos y guías
-```
-
----
-
-## Documentación técnica
-
-Antes de cambiar contratos, schemas o comportamiento del pipeline, revisa la documentación en `docs/`.
-
-Documentos recomendados:
-
-```text
-docs/pipeline.md
-docs/schema.md
-docs/scraper_contract.md
-docs/source_config.md
-docs/deduplication.md
-docs/verification.md
-```
-
-Si alguno no existe todavía y tu cambio depende de eso, puedes abrir un PR de documentación primero.
+- Identificadores en inglés, comentarios en español
+- Los comentarios explican **por qué**, no **qué**
+- Funciones pequeñas con una sola responsabilidad
+- Nunca silencies errores importantes
+- No prints de debugging permanentes
+- Los logs no incluyen PII
 
 ---
 
 ## Cuándo abrir un Issue antes de codear
 
 Abre un Issue si tu cambio:
-
-* Cambia el contrato JSONL.
-* Cambia enums.
-* Cambia lógica de deduplicación.
-* Cambia reglas de PII.
-* Cambia estructura de base de datos.
-* Agrega una fuente sensible.
-* Agrega scraping sobre una fuente no pública.
-* Puede afectar exposición pública de datos.
+- Modifica el schema de entidades (`Person`, `AcopioCenter`, `Event`)
+- Cambia enums o el contrato de campos
+- Toca lógica de PII o hashing
+- Agrega o modifica reglas de deduplicación
+- Cambia la estructura de la BD
+- Agrega una fuente con datos sensibles o privados
 
 ---
 
 ## Definition of Done
-
-Una contribución está lista cuando:
 
 ```md
 - [ ] El código corre localmente.
@@ -333,41 +199,28 @@ Una contribución está lista cuando:
 - [ ] No hay datos reales en el PR.
 - [ ] No hay PII en logs, fixtures ni ejemplos.
 - [ ] El output cumple el contrato esperado.
-- [ ] Hay trazabilidad hacia la fuente.
+- [ ] Hay trazabilidad hacia la fuente original.
 - [ ] La documentación fue actualizada si hacía falta.
 - [ ] El PR fue revisado y aprobado.
 ```
 
 ---
 
-## Secretos y credenciales de CI/CD
+## Variables de entorno para desarrollo local
 
-Los tres workflows de GitHub Actions (`ci.yml`, `scrapers.yml`, `build_public_index.yml`)
-usan secretos del repositorio. **Ningún secreto va al repo bajo ninguna circunstancia.**
+El pipeline funciona sin credenciales de producción. Sin `PII_HMAC_SECRET`, `cedula_hmac` queda `null`, comportamiento esperado en CI offline.
 
-Los secretos deben configurarse en **Settings → Secrets and variables → Actions** del repo.
+Para correr los tests completos localmente:
+```bash
+cp .env.example .env   # valores dummy, no reales
+```
 
-| Secret | Usado por | Descripción |
-|--------|-----------|-------------|
-| `PII_SALT` | `scrapers.yml` | Salt para HMAC de PII en el pipeline de scrapers |
-| `PII_HMAC_SECRET` | `scrapers.yml`, `build_public_index.yml` | Mismo valor que `PII_SALT`; para lookup server-side de cédulas |
-| `SUPABASE_DB_URL` | `scrapers.yml`, `build_public_index.yml` | PostgreSQL connection string de Supabase |
-| `CLOUDFLARE_API_TOKEN` | `build_public_index.yml` | Token Cloudflare con permisos `D1:Edit` |
-| `CLOUDFLARE_ACCOUNT_ID` | `build_public_index.yml` | ID de la cuenta Cloudflare |
-| `D1_DATABASE_ID` | `build_public_index.yml` | UUID de la base D1 (`vzla_public`) |
-
-**Reglas:**
-
-- Estos secretos **nunca se imprimen en logs** (los workflows y el código solo reportan conteos y duraciones).
-- Las credenciales de Cloudflare se crean con mínimos permisos necesarios (solo `D1:Edit` para el token del build job).
-- `SUPABASE_DB_URL` del build job debe apuntar a un usuario de **solo lectura** sobre las vistas públicas.
-- Si crees que un secreto fue comprometido, rótalo inmediatamente en Cloudflare/Supabase y en GitHub Actions.
-- Ver ADR 0001 §8 (`docs/adr/0001-arquitectura-serving-publico.md`) para el contexto completo de seguridad.
+Las credenciales de producción (Supabase, Cloudflare, PII_HMAC_SECRET real) solo las configura el admin del repo en GitHub Settings → Secrets.  No las pidas por Telegram ni las pongas en ningún archivo del repo.
 
 ---
 
 ## ¿Dudas?
 
-Abre un Issue en el repo o escribe en el canal del equipo correspondiente.
+Abre un Issue o escribe en el canal del equipo correspondiente.
 
 Si algo puede poner en riesgo a una persona, no lo implementes por tu cuenta. Pide revisión.

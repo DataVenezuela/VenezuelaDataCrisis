@@ -1,436 +1,185 @@
 ---
-
 description: Base development rules for VZLA_DEDUP, applicable to all AI agents such as Claude, Cursor, Codex, Gemini, Copilot, and similar tools.
 alwaysApply: true
------------------
+---
 
 # VZLA_DEDUP — Base Agent Standards
 
 This document is the entry-point for AI agents working on VZLA_DEDUP.
 
-Agents must work fast, but never break project contracts, expose sensitive data, or introduce unnecessary coupling.
+Work fast, but never break project contracts, expose sensitive data, or introduce unnecessary coupling.
 
 ---
 
 ## 1. Core Principles
 
-* **Small tasks, one at a time**: make focused changes. Do not mix unrelated work.
-* **Test-backed changes**: new behavior must include tests. Prefer test-first when practical.
-* **Type safety**: all new Python code must use type hints.
-* **Clear naming**: use descriptive names for variables, functions, classes, modules, tests, and configs.
-* **Incremental changes**: avoid large rewrites unless explicitly requested.
-* **Question assumptions**: do not invent fields, contracts, folders, tools, or behavior.
-* **Pattern detection**: detect repeated logic and extract it only when the abstraction is stable.
-* **Safety first**: never expose PII or real crisis data.
+- **Small tasks, one at a time.** Make focused changes. Do not mix unrelated work.
+- **Test-backed changes.** New behavior must include tests. Prefer test-first when practical.
+- **Type safety.** All new Python code must use type hints.
+- **Clear naming.** Descriptive names for variables, functions, classes, modules, tests, configs.
+- **Incremental changes.** Avoid large rewrites unless explicitly requested.
+- **Question assumptions.** Do not invent fields, contracts, folders, tools, or behavior.
+- **Safety first.** Never expose PII or real crisis data.
 
 ---
 
-## 2. Required Context
+## 2. Architecture — read this first
 
-Before coding, agents must inspect the relevant docs:
+VZLA_DEDUP is split across two repos:
 
-```text
-docs/pipeline.md
-docs/source_config.md
-docs/scraper_contract.md
-docs/schema.md
-docs/base-standards.md
+- **`DataVenezuela/VZLA_DEDUP`** — Python scraping pipeline (this repo)
+- **`DataVenezuela/dataVenezuela`** — Next.js + Supabase (BD/API layer)
+
+The pipeline has four layers. Understand them before touching anything:
+
+```
+Adapters + Parsers + PII masking + Normalization
+      ↓
+Raw DB (Cloudflare R2 + Supabase metadata)    ←── Quarantine DB
+      ↓
+Staging (aportes table in Supabase)
+      ↓  consolidation job
+Canonical (persons / events / acopio_centers)
+      ↓  build job
+Cloudflare Worker + D1  →  Public API
 ```
 
-If documentation and code contradict each other, stop and surface the ambiguity.
+**The pipeline does not write JSONL to disk.** Output goes to staging via `POST /api/v1/dedup/*`.
 
-Do not silently choose a contract.
+**Records without a parser go to quarantine, not to a generic fallback.**
 
 ---
 
-## 3. Language Standards
+## 3. Required Context
+
+Before coding, read the relevant docs:
+
+```
+docs/pipeline.md          — full technical flow, implementation status per component
+docs/scrapper_contract.md — entity contract for parsers
+docs/source_config.md     — how to declare sources in YAML
+docs/schema.md            — entity schema and enums
+docs/adr/                 — architecture decision records
+```
+
+If documentation and code contradict each other, stop and surface the ambiguity. Do not silently choose a contract.
+
+---
+
+## 4. Language Standards
 
 Code identifiers must be in English:
 
-```text
-variables
-functions
-classes
-modules
-tables
-columns
-config keys
-test names
-error names
-log fields
+```
+variables · functions · classes · modules
+tables · columns · config keys
+test names · error names · log fields
 ```
 
-Good:
-
-```python
-def normalize_person_name(raw_name: str) -> str:
-    ...
-```
-
-Code comments should preferably be in Spanish.
-
-Comments must explain **why**, not repeat **what**.
+Code comments in Spanish. Comments explain **why**, not **what**.
 
 Good:
-
 ```python
-# Usamos HMAC para comparar cédulas sin guardar el valor original.
-cedula_hmac = generate_hmac_sha256(raw_cedula, secret)
+# We use HMAC so we can compare IDs without storing the original value.
+cedula_hmac = identity_token(raw_cedula, secret)
 ```
 
 Bad:
-
 ```python
-# Genera el HMAC.
-cedula_hmac = generate_hmac_sha256(raw_cedula, secret)
+# Generate the HMAC.
+cedula_hmac = identity_token(raw_cedula, secret)
 ```
 
-Documentation may be written in Spanish, but contract names must remain unchanged:
-
-```text
-person_record_id
-cedula_hmac
-source_url
-trust_tier
-verification_status
+Documentation may be in Spanish. Contract field names stay in English:
+```
+person_record_id · cedula_hmac · source_url · trust_tier · verification_status
 ```
 
 ---
 
-## 4. Python and Dependencies
+## 5. Python and Dependencies
 
-This project uses Python.
-
-Use `pip`.
-
-Do not introduce:
-
-```text
-uv
-poetry
-pipenv
-```
-
-unless explicitly approved.
-
-Expected setup:
+Use Python + `pip`. Do not introduce `uv`, `poetry`, or `pipenv` without explicit approval.
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
-```
-
-If a module has its own requirements file, use the existing one.
-
-All new code must be typed.
-
-Keep functions small and focused.
-
-Avoid hidden global state. Pass dependencies explicitly.
-
----
-
-## 5. Database Standards
-
-This project uses SQLAlchemy as ORM.
-
-Agents must:
-
-* Use SQLAlchemy for ORM models and normal database access.
-* Not introduce another ORM.
-* Avoid raw SQL for normal CRUD unless technically justified.
-* Keep database models aligned with `docs/schema.md`.
-
-Schema-related changes require:
-
-```text
-code change
-documentation update
-tests or validation coverage
-clear explanation
+pip install -r scrapers/requirements.txt
 ```
 
 ---
 
-## 6. Architecture Standards
+## 6. Non-Negotiable Contracts
 
-Avoid unnecessary coupling.
-
-Keep these responsibilities separated:
-
-```text
-fetching
-parsing
-PII sanitization
-normalization
-deduplication
-validation
-export
-database ingestion
-```
-
-Rules:
-
-* A scraper should not directly mutate production database tables.
-* A parser should not know database logic.
-* An exporter should not depend on a specific source.
-* Source-specific logic must stay close to that source.
-
-Prefer interfaces, protocols, or explicit contracts over concrete dependencies.
-
-Good:
-
-```python
-from typing import Protocol
-
-class PersonParser(Protocol):
-    def parse(self, raw_content: str) -> list[Person]:
-        ...
-```
+| Rule | Detail |
+|---|---|
+| `cedula_hmac` | Pure 64-char hex, **no prefix**. Never `hmac_sha256:...` |
+| `trust_tier` (scrapers) | Letters `A`/`B`/`C`/`D`, never integers |
+| `trust_tier` (DB) | Integers `1`/`2`/`3`. Conversion happens in the staging exporter |
+| `Person.status` | English: `missing`/`found`/`injured`/`deceased`/`unknown` |
+| `is_minor` | Always declare. `None` if unknown — never omit the field |
+| PII timing | HMAC before creating the entity, never after |
+| No JSONL on disk | Output goes to staging in Supabase, not local files |
+| No FallbackParser | No parser → quarantine, not discard |
+| No auto-merge on Person | The consolidation job generates candidates; a human decides |
 
 ---
 
-## 7. Shared/Common Utilities
+## 7. Issue Dependencies
 
-Use `shared/common` for small reusable utilities that enforce project-wide behavior.
+Before picking up an issue, check whether it is blocked:
 
-Good candidates:
-
-```text
-HMAC generation
-cedula masking
-UTC datetime parsing
-ISO 8601 validation
-text normalization
-unicode cleanup
-JSONL writing
-JSONL validation
-enum validation
-null handling
-UUID generation
-source config validation
+```
+#85  fix(models)          → unblocked
+  └── #81  staging exp.  → blocked by #85
+        └── #82  consol. → blocked by #81
 ```
 
-Do not put source-specific logic in `shared/common`.
-
-Each shared/common file should solve one clear problem.
-
-Prefer:
-
-```text
-shared/common/hmac_sha256.py
-shared/common/mask_cedula.py
-shared/common/normalize_text.py
-shared/common/parse_utc_datetime.py
-shared/common/validate_enum.py
-shared/common/write_jsonl.py
-```
-
-Avoid dumping-ground files:
-
-```text
-shared/common/utils.py
-shared/common/helpers.py
-shared/common/misc.py
-```
-
-A shared utility should expose one main public function whenever possible.
-
-Internal private helpers are allowed.
-
-Every shared utility requires tests.
+Do not implement a blocked issue without resolving its dependency first. Check the README for the full dependency tree.
 
 ---
 
-## 8. Testing Standards
+## 8. Testing
 
-New behavior requires tests.
-
-This includes:
-
-```text
-parsers
-normalizers
-PII sanitizers
-JSONL exporters
-schema validators
-source config validators
-database logic
-shared/common utilities
+```bash
+pytest scrapers/tests   # must pass before and after every change
 ```
 
-Tests must not depend on live websites, APIs, PDFs, or network calls.
-
-Use fixtures, mocks, or fake local samples.
-
-Never use real crisis data in tests, fixtures, logs, docs, or examples.
-
-Use obvious fake/demo data:
-
-```text
-JOSE LUIS PEREZ DEMO
-V-****0000
-https://example.org/demo
-Hospital Demo
-Centro de Acopio Demo
-```
+- All tests use synthetic fixtures. Never real data.
+- Mock external HTTP calls (`httpx.MockTransport`). Never real network in tests.
+- New behavior = new tests. No exceptions.
 
 ---
 
-## 9. Scraper and JSONL Standards
+## 9. Commits and PRs
 
-Scrapers must follow:
+Commit messages follow Conventional Commits:
 
-```text
-docs/pipeline.md
-docs/source_config.md
-docs/scraper_contract.md
-docs/schema.md
+```
+feat(parsers): add encuentralos parser → Person
+fix(models): add missing is_minor field to Person
+docs(pipeline): update flow to reflect 4-layer architecture
+test(parsers): add encuentralos fixture for unknown status
 ```
 
-Agents must not:
+One PR = one thing. Do not mix parser changes with schema changes or unrelated refactors.
 
-```text
-invent JSONL fields
-change enum values silently
-export raw PII
-discard incomplete records because optional fields are missing
-merge people automatically from a scraper
-```
-
-Unknown values must use:
-
-```json
-null
-```
-
-Do not use:
-
-```text
-""
-"N/A"
-"null"
-0
-```
-
-unless the schema explicitly defines that value.
+PR description must include: what changed, why, how to test, what risk it carries.
 
 ---
 
-## 10. PII and Safety
+## 10. Security
 
-Treat the following as sensitive:
-
-```text
-cedulas
-phone numbers
-exact addresses
-names associated with vulnerable persons
-photos
-medical status
-hospital information
-minor-related information
-private source URLs
-tokens
-cookies
-secrets
-```
-
-Never include PII in:
-
-```text
-commits
-tests
-fixtures
-logs
-error messages
-documentation examples
-generated JSONL examples
-```
-
-The schema currently defines:
-
-```text
-cedula_hmac
-cedula_masked
-```
-
-Do not export raw cedulas.
-
-Do not add phone fields unless `docs/schema.md` and `docs/scraper_contract.md` are updated first.
+- Never commit real data (names, IDs, phones, PDFs, CSVs, JSONL with real records).
+- Never log PII.
+- Never store `cedula` in clear text anywhere.
+- `runtime_output/` is git-ignored — never force-add it.
+- If you find a potential PII leak in the codebase, open an issue and flag it before fixing.
 
 ---
 
-## 11. Agent Workflow
+## 11. Architecture Exception
 
-Before coding:
+`base-standards.md §5` (Python only) applies to the entire pipeline and the internal BD layer.
 
-```text
-read relevant docs
-inspect existing code patterns
-identify the smallest useful change
-check existing tests
-surface ambiguity before inventing behavior
-```
-
-While coding:
-
-```text
-make the smallest useful change
-use type hints
-prefer interfaces
-avoid direct coupling
-use pip only
-use SQLAlchemy for ORM work
-avoid unrelated refactors
-keep source-specific logic out of shared/common
-```
-
-After coding:
-
-```text
-run or update tests
-verify JSONL contracts if scrapers changed
-verify no PII is exposed
-update docs if behavior changed
-mention pending ambiguities or risks
-```
-
----
-
-## 12. Stop Conditions
-
-Stop and ask before continuing if:
-
-```text
-a required field is missing from the schema
-a new JSONL field seems necessary
-a phone-related field is needed
-a deduplication decision would merge people
-a source appears private or sensitive
-a schema change is required
-the codebase contradicts the documentation
-the task requires changing multiple layers at once
-a new dependency manager would be needed
-shared/common would need source-specific logic
-```
-
----
-
-## 13. Final Rule
-
-```text
-Small steps.
-Typed code.
-Pip only.
-SQLAlchemy only.
-Tests required.
-Prefer interfaces.
-Use shared/common for focused reusable utilities.
-No dumping-ground utils.py files.
-No raw PII.
-No invented contracts.
-Comments explain why, preferably in Spanish.
-Docs and code must stay aligned.
-```
+The **public serving plane** (`serving/` directory, Cloudflare Worker) is implemented in TypeScript. This is an explicit exception documented in ADR 0001 (`docs/adr/0001-arquitectura-serving-publico.md`). This exception does not extend beyond `serving/`.
