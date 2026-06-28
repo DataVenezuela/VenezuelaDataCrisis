@@ -41,6 +41,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from scrapers.adapters.base import RawContent
+from scrapers.models import Person
 from scrapers.pipelines.run_pipeline import run_pipeline
 
 # ---------------------------------------------------------------------------
@@ -435,10 +436,32 @@ class TestApiJsonSourceMocked:
     sin hacer llamadas de red reales.
     """
 
+    @staticmethod
+    def _mock_parser() -> MagicMock:
+        """Mock de parser que devuelve Person con campos válidos."""
+        parser = MagicMock()
+        parser.parse.return_value = [
+            Person(
+                full_name="JUAN DEMO PEREZ",
+                status="missing",
+                fuente="encuentralos_tecnosoft",
+                age_range={"min": 30, "max": 40},
+                last_known_location="Lara, Venezuela",
+            ),
+            Person(
+                full_name="ANA DEMO GARCIA",
+                status="found",
+                fuente="encuentralos_tecnosoft",
+                age_range={"min": 25, "max": 35},
+                last_known_location="Zulia, Venezuela",
+            ),
+        ]
+        return parser
+
     def _mock_adapter(self) -> MagicMock:
         """Mock de ApiAdapter que devuelve páginas predefinidas."""
         adapter = MagicMock()
-        adapter._default_path = "/api/personas"
+        adapter.default_path = "/api/personas"
         adapter.fetch_all.return_value = iter([
             _encuentralos_raw(_SAMPLE_ENCUENTRALOS_RECORDS)
         ])
@@ -467,6 +490,9 @@ sources:
         with patch(
             "scrapers.pipelines.run_pipeline._get_adapter",
             return_value=mock_adapter,
+        ), patch(
+            "scrapers.pipelines.run_pipeline._get_parser",
+            return_value=self._mock_parser(),
         ):
             summary = run_pipeline(config_path=cfg, output_dir=tmp_path / "out")
 
@@ -495,6 +521,9 @@ sources:
         with patch(
             "scrapers.pipelines.run_pipeline._get_adapter",
             return_value=mock_adapter,
+        ), patch(
+            "scrapers.pipelines.run_pipeline._get_parser",
+            return_value=self._mock_parser(),
         ):
             run_pipeline(config_path=cfg, output_dir=out)
 
@@ -524,6 +553,9 @@ sources:
         with patch(
             "scrapers.pipelines.run_pipeline._get_adapter",
             return_value=mock_adapter,
+        ), patch(
+            "scrapers.pipelines.run_pipeline._get_parser",
+            return_value=self._mock_parser(),
         ):
             run_pipeline(config_path=cfg, output_dir=out)
 
