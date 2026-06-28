@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [master]
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: scrapers/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r scrapers/requirements.txt
+
+      - name: Run tests
+        run: python -m pytest scrapers/tests
+
+      - name: Block real data files
+        run: |
+          set -euo pipefail
+          FORBIDDEN=$(git diff --name-only --diff-filter=ACMR "origin/${{ github.base_ref }}...HEAD" | grep -iE '\.(csv|jsonl|pdf|db|sqlite|xlsx)$' || true)
+          if [ -n "$FORBIDDEN" ]; then
+            echo "::error::No se pueden subir archivos de datos reales (CONTRIBUTING.MD):"
+            echo "$FORBIDDEN"
+            exit 1
+          fi
+
+      - name: Security keyword scan (PII / secrets)
+        run: |
+          set -euo pipefail
+          # Archivos donde estas palabras son nombres de campo legitimos del
+          # propio pipeline de tokenizacion de PII, no datos filtrados.
+          ALLOWLIST='^(shared/hashing\.py|scrapers/sanitizers/pii_tokenizer\.py|scrapers/sanitizers/pii_redactor\.py|scrapers/normalizers/person\.py|scrapers/normalizers/text\.py|scrapers/normalizers/location\.py|scrapers/models/person\.py|scrapers/validators/quality\.py|scrapers/tests/test_pii_hmac_fields\.py|scrapers/tests/test_pii_hmac_unified\.py|scrapers/tests/test_person_hashing\.py|scrapers/tests/test_sanitizer\.py|scrapers/tests/test_entity_models\.py|scrapers/tests/test_quality\.py)$'
+          PATTERN='cedula|cédula|telefono|teléfono|password|secret|api_key|token'
+
+          FOUND=0
+          for f in $(git diff --name-only --diff-filter=ACMR "origin/${{ github.base_ref }}...HEAD" -- '*.py' '*.js' '*.ts' '*.json' '*.yaml' '*.yml'); do
+            if echo "$f" | grep -qE "$ALLOWLIST"; then
+              continue
+            fi
+            MATCHES=$(git diff "origin/${{ github.base_ref }}...HEAD" -- "$f" | grep -E '^\+' | grep -vE '^\+\+\+' | grep -inE "$PATTERN" || true)
+            if [ -n "$MATCHES" ]; then
+              echo "::error file=$f::Posible dato sensible o secreto detectado en lineas nuevas"
+              echo "$MATCHES"
+              FOUND=1
+            fi
+          done
+
+          if [ "$FOUND" -eq 1 ]; then
+            echo "Revisa CONTRIBUTING.MD (Reglas de seguridad obligatorias) antes de hacer commit."
+            exit 1
+          fi
