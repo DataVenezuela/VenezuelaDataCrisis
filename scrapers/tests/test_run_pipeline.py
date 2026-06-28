@@ -35,7 +35,6 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -469,7 +468,7 @@ class TestApiJsonSourceMocked:
         return adapter
 
     def test_api_json_source_produces_persons(self, tmp_path: Path, demo_config: Path) -> None:
-        dump = _make_synthetic_dump(tmp_path)  # no se usa, pero el yaml lo necesita como dummy
+        _make_synthetic_dump(tmp_path)  # no se usa, pero el yaml lo necesita como dummy
         cfg = _make_demo_config(tmp_path, """
 project:
   event_id: test

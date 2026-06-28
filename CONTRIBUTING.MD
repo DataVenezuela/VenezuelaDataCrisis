@@ -155,12 +155,21 @@ Esa carpeta debe permanecer ignorada por Git.
 Cada PR contra `master` corre automáticamente el workflow `.github/workflows/ci.yml` en GitHub Actions, que:
 
 1. Instala `scrapers/requirements.txt` y corre `python -m pytest scrapers/tests`.
-2. Bloquea el PR si agrega archivos `.csv`, `.jsonl`, `.pdf`, `.db`, `.sqlite` o `.xlsx`.
-3. Escanea las líneas **nuevas** del diff buscando `cedula`, `telefono`, `password`, `secret`, `api_key`, `token` (la misma búsqueda de la sección de abajo, normalizando tildes antes de comparar), con una allowlist para los archivos donde esas palabras son nombres de campo legítimos del pipeline de tokenización de PII (`shared/hashing.py`, `scrapers/sanitizers/pii_tokenizer.py`, tests de PII, etc.). El log del check solo muestra qué palabra clave hizo match y en qué archivo, nunca el valor real de la línea, para no exponer datos sensibles si el match es real.
+2. Corre `ruff check .` (config en `pyproject.toml`). **Bloqueante**: un import sin usar, una variable sin usar u otro error de `ruff` falla el build.
+3. Bloquea el PR si agrega archivos `.csv`, `.jsonl`, `.pdf`, `.db`, `.sqlite` o `.xlsx`.
+4. Escanea las líneas **nuevas** del diff buscando `cedula`, `telefono`, `password`, `secret`, `api_key`, `token` (la misma búsqueda de la sección de abajo, normalizando tildes antes de comparar), con una allowlist para los archivos donde esas palabras son nombres de campo legítimos del pipeline de tokenización de PII (`shared/hashing.py`, `scrapers/sanitizers/pii_tokenizer.py`, tests de PII, etc.). El log del check solo muestra qué palabra clave hizo match y en qué archivo, nunca el valor real de la línea, para no exponer datos sensibles si el match es real.
+5. Corre `gitleaks` (`gitleaks/gitleaks-action`) buscando secretos por patrón/entropía en el diff del PR. **No bloqueante** por ahora (`continue-on-error: true`): reporta hallazgos en el log pero no impide el merge, mientras se valida que no haya falsos positivos con los fixtures/ejemplos del repo.
 
-El check `ci` es requerido para mergear a `master`: si falla, el PR no se puede mergear hasta corregirlo.
+El check `ci` es requerido para mergear a `master`: si falla `pytest`, `ruff` o el bloqueo de archivos/keywords, el PR no se puede mergear hasta corregirlo. `gitleaks` es informativo por ahora.
 
-Esto **no reemplaza** la revisión manual de abajo: el grep del CI es léxico (busca palabras, no entiende contexto), así que puede dar falsos positivos o falsos negativos. Sigue corriendo la revisión local antes de hacer push.
+Esto **no reemplaza** la revisión manual de abajo: el grep del CI y `gitleaks` son léxicos/heurísticos (no entienden contexto), así que pueden dar falsos positivos o falsos negativos. Sigue corriendo la revisión local antes de hacer push.
+
+Corre el lint localmente antes de hacer push:
+
+```bash
+pip install ruff
+ruff check .
+```
 
 ---
 

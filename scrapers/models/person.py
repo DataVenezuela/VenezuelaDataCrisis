@@ -22,6 +22,7 @@ class Person(BaseModel):
     confidence_score: float = 0.0
     nota: str | None = None
     foto: str | None = None
+    deterministic_id: str | None = None
     fuente: str
 
     @field_validator("full_name", "fuente")

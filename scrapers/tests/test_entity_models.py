@@ -136,6 +136,7 @@ def test_serialization_round_trip():
         "confidence_score",
         "nota",
         "foto",
+        "deterministic_id",
         "fuente",
     }
     assert Person.model_validate(p.model_dump()) == p

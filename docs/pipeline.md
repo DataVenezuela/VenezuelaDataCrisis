@@ -571,6 +571,22 @@ Ejemplo:
 }
 ```
 
+### Diccionario de sinónimos de ubicaciones
+
+Antes de la geocodificación vía OpenStreetMap, el normalizador consulta
+`shared/common/locations.yml`, un diccionario de sinónimos que mapea
+variantes coloquiales, abreviaturas y typos comunes venezolanos a
+nombres canónicos compatibles con OSM.
+
+Ejemplos:
+
+- `"ccs"` → `"Caracas"`
+- `"ptocabello"` → `"Puerto Cabello"`
+- `"maracaivo"` → `"Maracaibo"`
+
+Si una ubicación no está en el diccionario, se usa el texto original.
+El diccionario se carga en memoria una sola vez (lazy-load).
+
 Si la geocodificación falla:
 
 ```json

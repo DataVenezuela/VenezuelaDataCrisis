@@ -1,0 +1,70 @@
+{
+  "data": [
+    {
+      "id": 1001,
+      "nombre": "JOSE LUIS PEREZ DEMO",
+      "cedula": "V-12345000",
+      "edad": 35,
+      "estado": "Zulia",
+      "municipio": "Maracaibo",
+      "status": "desaparecido",
+      "observaciones": "Visto por última vez en el mercado central",
+      "foto": null,
+      "fecha_reporte": "2026-06-24",
+      "telefono_contacto": "0414-0000000"
+    },
+    {
+      "id": 1002,
+      "nombre": "MARIA DEMO GONZALEZ",
+      "cedula": "V-98760000",
+      "edad": 28,
+      "estado": "Caracas",
+      "municipio": null,
+      "status": "encontrado",
+      "observaciones": null,
+      "foto": null,
+      "fecha_reporte": "2026-06-25",
+      "telefono_contacto": null
+    },
+    {
+      "id": 1003,
+      "nombre": "CARLOS DEMO SIN CEDULA",
+      "cedula": null,
+      "edad": null,
+      "estado": "Lara",
+      "municipio": "Iribarren",
+      "status": "herido",
+      "observaciones": "Hospital central demo",
+      "foto": null,
+      "fecha_reporte": "2026-06-24",
+      "telefono_contacto": null
+    },
+    {
+      "id": 1004,
+      "nombre": "ANA DEMO FALLECIDA",
+      "cedula": "E-5550000",
+      "edad": 65,
+      "estado": "Miranda",
+      "municipio": "Baruta",
+      "status": "fallecido",
+      "observaciones": null,
+      "foto": null,
+      "fecha_reporte": "2026-06-24",
+      "telefono_contacto": null
+    },
+    {
+      "id": 1005,
+      "nombre": "PEDRO DEMO STATUS UNKNOWN",
+      "cedula": "V-77770000",
+      "edad": 42,
+      "estado": null,
+      "municipio": null,
+      "status": "sin_informacion",
+      "observaciones": null,
+      "foto": null,
+      "fecha_reporte": null,
+      "telefono_contacto": null
+    }
+  ],
+  "total": 5
+}

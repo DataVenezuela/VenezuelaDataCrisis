@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
+from pathlib import Path
 from typing import TypeAlias
 
 import requests
+import yaml
 
 from scrapers.normalizers.text import expand_abbreviations, normalize_for_match, normalize_text
 
@@ -72,6 +75,32 @@ _MUNICIPALITY_ENTRIES = [
 ]
 
 
+_LOCATIONS_YML = Path(__file__).resolve().parent.parent.parent / "shared" / "common" / "locations.yml"
+_location_synonyms: dict[str, str] | None = None
+
+
+def _load_location_synonyms() -> dict[str, str]:
+    """Lazy-load location synonyms from YAML. Returns empty dict on failure."""
+    global _location_synonyms
+    if _location_synonyms is not None:
+        return _location_synonyms
+    try:
+        with open(_LOCATIONS_YML) as f:
+            data = yaml.safe_load(f)
+        synonyms: dict[str, str] = {}
+        for canonical, variants in data.get("canonical", {}).items():
+            canonical_normalized = normalize_for_match(canonical)
+            for v in variants:
+                synonyms[normalize_for_match(v)] = canonical_normalized
+            synonyms[canonical_normalized] = canonical_normalized
+        _location_synonyms = synonyms
+        return synonyms
+    except (FileNotFoundError, yaml.YAMLError) as e:
+        logging.getLogger(__name__).warning(f"Could not load locations.yml: {e}")
+        _location_synonyms = {}
+        return {}
+
+
 def normalize_location(
     location: str | None,
     default_country: str | None = DEFAULT_COUNTRY,
@@ -90,6 +119,12 @@ def normalize_location(
     raw = normalize_text(location)
     expanded = expand_abbreviations(raw)
     match_text = normalize_for_match(expanded)
+
+    # Synonym dictionary lookup — map coloquial variants to canonical OSM-compatible names
+    synonyms = _load_location_synonyms()
+    if match_text in synonyms:
+        expanded = synonyms[match_text]
+        match_text = normalize_for_match(expanded)
 
     estado = _find_state(match_text)
     municipio = _find_municipality(match_text, estado)
