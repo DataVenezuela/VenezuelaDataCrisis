@@ -1,7 +1,6 @@
 project:
-  event_id: venezuela_earthquake_demo
+  event_id: 8f14e45f-ceea-467e-bd5d-0a4f2e0c1a3a
   default_country: Venezuela
-  output_mode: sanitized_jsonl
 
 sources:
   - id: demo_manual_synthetic

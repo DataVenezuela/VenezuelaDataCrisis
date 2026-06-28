@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from scrapers.normalizers.person import name_key, normalize_person_name
+from scrapers.normalizers.person import derive_is_minor, name_key, normalize_person_name
 from shared.hashing import identity_token, sha256_hex
 
 
@@ -68,3 +68,21 @@ def test_name_key_is_order_invariant():
 
 def test_name_key_blocks_same_person_with_honorific():
     assert name_key("Sr. Jose Perez") == name_key("perez jose")
+
+
+def test_derive_is_minor_true_under_18():
+    assert derive_is_minor({"min": 15, "max": 15}) is True
+
+
+def test_derive_is_minor_false_at_18_and_above():
+    assert derive_is_minor({"min": 18, "max": 18}) is False
+    assert derive_is_minor({"min": 35, "max": 35}) is False
+
+
+def test_derive_is_minor_none_without_age():
+    assert derive_is_minor(None) is None
+
+
+def test_derive_is_minor_uses_lower_bound_of_estimated_range():
+    """Un rango estimado debe proteger al menor aunque el extremo superior sea mayor de edad."""
+    assert derive_is_minor({"min": 10, "max": 60}) is True

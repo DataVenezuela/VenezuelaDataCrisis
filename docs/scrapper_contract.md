@@ -140,14 +140,47 @@ Event(
 
 ## 5. Convenciones globales
 
-| Decisión | Valor |
-|---|---|
-| Fechas | ISO 8601 UTC con `Z` |
-| Nulos | `None` en Python, `null` en JSON. Nunca `""`, `"N/A"`, `0` |
-| IDs | UUID v4 |
-| `trust_tier` | Letras `A`/`B`/`C`/`D` — nunca enteros en el scraper |
-| `cedula_hmac` | Hex puro 64 chars — nunca con prefijo `hmac_sha256:` |
-| Booleanos | `True`/`False` — nunca `1`/`0`/`"Si"` |
+### 7.5 Protección de menores (`is_minor`)
+
+Si `is_minor=true`, antes de exportar este archivo se reduce información
+identificable (ver `docs/pipeline.md`, sección "Protección de menores"):
+
+* `foto` viaja como `null`.
+* `cedula_masked` viaja como `null` (`cedula_hmac` se conserva).
+* `last_known_location` se acota a nivel estado.
+
+`is_minor=null`/`false` no activa esta reducción.
+
+### 7.6 Ejemplo
+
+```json
+{
+  "person_record_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "event_id": "f0e1d2c3-b4a5-6789-0fed-cba987654321",
+  "full_name": "JOSE LUIS PEREZ MARIN",
+  "alternate_names": ["JOSE PEREZ", "JOSELO PEREZ MARIN"],
+  "cedula_hmac": "3b4c9e2a1fd82f6a0bc347e1a9f2c8d5e047b3a12f9c6d71e8b405a3c2d1f9e0",
+  "cedula_masked": "V-****5821",
+  "age_range": {
+    "min": 30,
+    "max": 40
+  },
+  "sex": "M",
+  "is_minor": false,
+  "last_known_location": {
+    "raw": "El Tocuyo, Lara",
+    "estado": "Lara",
+    "municipio": "Morán",
+    "parroquia": null,
+    "lat": 9.7834,
+    "lng": -69.7921
+  },
+  "status": "missing",
+  "verification_status": "unverified",
+  "confidence_score": 0.420,
+  "source_url": "https://encuentralos.org/registro/12345"
+}
+```
 
 ---
 

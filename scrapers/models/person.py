@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
+from scrapers.models._validators import validate_score_range, validate_uuid_str
+
 _PERSON_STATUS = {"missing", "found", "injured", "deceased", "unknown"}
 _TRUST_TIERS = {"A", "B", "C", "D"}
 
@@ -12,9 +14,11 @@ class Person(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     full_name: str
+    event_id: str
     cedula_hmac: str | None = None
     cedula_masked: str | None = None
     age_range: dict[str, int] | None = None
+    is_minor: bool | None = None
     last_known_location: str | None = None
     status: str = "missing"
     verification_status: str = "unverified"
@@ -31,6 +35,11 @@ class Person(BaseModel):
         if not v or not v.strip():
             raise ValueError("must be a non-empty string")
         return v
+
+    @field_validator("event_id")
+    @classmethod
+    def _valid_event_id(cls, v: str) -> str:
+        return validate_uuid_str(v)
 
     @field_validator("status")
     @classmethod
@@ -57,9 +66,7 @@ class Person(BaseModel):
     @field_validator("confidence_score")
     @classmethod
     def _score_range(cls, v: float) -> float:
-        if not 0.0 <= v <= 1.0:
-            raise ValueError("confidence_score must be in [0.0, 1.0]")
-        return v
+        return validate_score_range(v)
 
     @field_validator("cedula_masked")
     @classmethod

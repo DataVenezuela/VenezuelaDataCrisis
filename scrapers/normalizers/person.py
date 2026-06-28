@@ -29,3 +29,15 @@ def name_key(name: str | None) -> str:
     if not normalized:
         return ""
     return " ".join(sorted(normalized.split()))
+
+
+def derive_is_minor(age_range: dict[str, int] | None) -> bool | None:
+    """True/False si la edad permite determinarlo; None si no se conoce.
+
+    Usa ``min`` (el extremo más bajo del rango) para que un rango estimado
+    (ej. {"min": 10, "max": 60}) no deje de proteger a un posible menor solo
+    porque el extremo superior del rango es mayor de edad.
+    """
+    if age_range is None:
+        return None
+    return age_range["min"] < 18

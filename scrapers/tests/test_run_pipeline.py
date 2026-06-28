@@ -51,8 +51,10 @@ from scrapers.pipelines.run_pipeline import _get_adapter, run_pipeline
 # Campos que todo registro exportado debe tener (Person mínimo)
 _REQUIRED_PERSON_KEYS = {
     "full_name", "fuente", "status", "trust_tier",
-    "confidence_score", "verification_status",
+    "confidence_score", "verification_status", "event_id",
 }
+
+_EVENT_ID = "8f14e45f-ceea-467e-bd5d-0a4f2e0c1a3a"
 
 
 def _read_jsonl(path: Path) -> list[dict]:
@@ -99,9 +101,8 @@ def demo_config(tmp_path: Path) -> Path:
     cfg = tmp_path / "sources.demo.yaml"
     cfg.write_text(
         f"""project:
-  event_id: venezuela_earthquake_demo
+  event_id: 8f14e45f-ceea-467e-bd5d-0a4f2e0c1a3a
   default_country: Venezuela
-  output_mode: sanitized_jsonl
 sources:
   - id: demo_manual_synthetic
     name: Demo manual sintético
@@ -273,9 +274,8 @@ class TestDisabledSource:
         dump = _make_synthetic_dump(tmp_path)
         cfg = _make_demo_config(tmp_path, f"""
 project:
-  event_id: test
+  event_id: 8f14e45f-ceea-467e-bd5d-0a4f2e0c1a3a
   default_country: Venezuela
-  output_mode: sanitized_jsonl
 sources:
   - id: fuente_deshabilitada
     name: Fuente deshabilitada
@@ -294,9 +294,8 @@ sources:
         dump = _make_synthetic_dump(tmp_path)
         cfg = _make_demo_config(tmp_path, f"""
 project:
-  event_id: test
+  event_id: 8f14e45f-ceea-467e-bd5d-0a4f2e0c1a3a
   default_country: Venezuela
-  output_mode: sanitized_jsonl
 sources:
   - id: habilitada
     name: Habilitada
@@ -329,9 +328,8 @@ class TestResilience:
         dump = _make_synthetic_dump(tmp_path)
         cfg = _make_demo_config(tmp_path, f"""
 project:
-  event_id: test
+  event_id: 8f14e45f-ceea-467e-bd5d-0a4f2e0c1a3a
   default_country: Venezuela
-  output_mode: sanitized_jsonl
 sources:
   - id: fuente_rota
     name: Fuente rota
@@ -358,9 +356,8 @@ sources:
     def test_errors_list_non_empty_on_failure(self, tmp_path: Path, demo_config: Path) -> None:
         cfg = _make_demo_config(tmp_path, """
 project:
-  event_id: test
+  event_id: 8f14e45f-ceea-467e-bd5d-0a4f2e0c1a3a
   default_country: Venezuela
-  output_mode: sanitized_jsonl
 sources:
   - id: fuente_rota
     name: Fuente rota
@@ -437,6 +434,7 @@ class TestApiJsonSourceMocked:
         parser.parse.return_value = [
             Person(
                 full_name="JUAN DEMO PEREZ",
+                event_id=_EVENT_ID,
                 status="missing",
                 fuente="encuentralos_tecnosoft",
                 age_range={"min": 30, "max": 40},
@@ -444,6 +442,7 @@ class TestApiJsonSourceMocked:
             ),
             Person(
                 full_name="ANA DEMO GARCIA",
+                event_id=_EVENT_ID,
                 status="found",
                 fuente="encuentralos_tecnosoft",
                 age_range={"min": 25, "max": 35},
@@ -466,9 +465,8 @@ class TestApiJsonSourceMocked:
         _make_synthetic_dump(tmp_path)  # no se usa, pero el yaml lo necesita como dummy
         cfg = _make_demo_config(tmp_path, """
 project:
-  event_id: test
+  event_id: 8f14e45f-ceea-467e-bd5d-0a4f2e0c1a3a
   default_country: Venezuela
-  output_mode: sanitized_jsonl
 sources:
   - id: encuentralos_tecnosoft
     name: Encuentralos tecnosoft
@@ -496,9 +494,8 @@ sources:
     def test_api_json_persons_have_correct_status(self, tmp_path: Path, demo_config: Path) -> None:
         cfg = _make_demo_config(tmp_path, """
 project:
-  event_id: test
+  event_id: 8f14e45f-ceea-467e-bd5d-0a4f2e0c1a3a
   default_country: Venezuela
-  output_mode: sanitized_jsonl
 sources:
   - id: encuentralos_tecnosoft
     name: Encuentralos tecnosoft
@@ -528,9 +525,8 @@ sources:
     def test_api_json_no_entity_type_in_export(self, tmp_path: Path, demo_config: Path) -> None:
         cfg = _make_demo_config(tmp_path, """
 project:
-  event_id: test
+  event_id: 8f14e45f-ceea-467e-bd5d-0a4f2e0c1a3a
   default_country: Venezuela
-  output_mode: sanitized_jsonl
 sources:
   - id: encuentralos_tecnosoft
     name: Encuentralos tecnosoft
@@ -563,9 +559,8 @@ sources:
         quedar huerfano si fetch_all() falla — close() debe correr en finally."""
         cfg = _make_demo_config(tmp_path, """
 project:
-  event_id: test
+  event_id: 8f14e45f-ceea-467e-bd5d-0a4f2e0c1a3a
   default_country: Venezuela
-  output_mode: sanitized_jsonl
 sources:
   - id: encuentralos_tecnosoft
     name: Encuentralos tecnosoft
@@ -591,6 +586,133 @@ sources:
         mock_adapter.close.assert_called_once()
         assert summary["sources_processed"] == 0
         assert len(summary["errors"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# Tests: protección de menores end-to-end
+# ---------------------------------------------------------------------------
+
+class TestMinorProtectionEndToEnd:
+    """Un Person con is_minor=True debe llegar a persons.jsonl con foto y
+    cedula_masked anulados, y la ubicación acotada a estado."""
+
+    def _cfg(self, tmp_path: Path) -> Path:
+        return _make_demo_config(tmp_path, """
+project:
+  event_id: 8f14e45f-ceea-467e-bd5d-0a4f2e0c1a3a
+  default_country: Venezuela
+sources:
+  - id: encuentralos_tecnosoft
+    name: Encuentralos tecnosoft
+    type: api_json
+    enabled: true
+    trust_tier: C
+    url: "https://encuentralos.tecnosoft.dev/api/personas"
+    refresh_minutes: 30
+    parser_asignado: encuentralos
+""")
+
+    def _mock_adapter(self) -> MagicMock:
+        adapter = MagicMock()
+        adapter.default_path = "/api/personas"
+        adapter.fetch_all.return_value = iter([_encuentralos_raw([{"id": 1}])])
+        adapter.close = MagicMock()
+        return adapter
+
+    def test_minor_fields_redacted_in_export(self, tmp_path: Path) -> None:
+        parser = MagicMock()
+        parser.parse.return_value = [
+            Person(
+                full_name="NIÑO DEMO PEREZ",
+                event_id=_EVENT_ID,
+                is_minor=True,
+                foto="https://example.org/foto.jpg",
+                cedula_masked="V-****1234",
+                last_known_location="Iribarren, Lara",
+                fuente="encuentralos_tecnosoft",
+            )
+        ]
+        out = tmp_path / "out"
+
+        with patch(
+            "scrapers.pipelines.run_pipeline._get_adapter",
+            return_value=self._mock_adapter(),
+        ), patch(
+            "scrapers.pipelines.run_pipeline._get_parser",
+            return_value=parser,
+        ):
+            run_pipeline(config_path=self._cfg(tmp_path), output_dir=out)
+
+        records = _read_jsonl(out / "persons.jsonl")
+        assert len(records) == 1
+        rec = records[0]
+        assert rec["foto"] is None
+        assert rec["cedula_masked"] is None
+        assert rec["last_known_location"] == "Lara"
+
+    def test_non_minor_fields_untouched_in_export(self, tmp_path: Path) -> None:
+        parser = MagicMock()
+        parser.parse.return_value = [
+            Person(
+                full_name="ADULTO DEMO PEREZ",
+                event_id=_EVENT_ID,
+                is_minor=False,
+                foto="https://example.org/foto.jpg",
+                cedula_masked="V-****1234",
+                last_known_location="Iribarren, Lara",
+                fuente="encuentralos_tecnosoft",
+            )
+        ]
+        out = tmp_path / "out"
+
+        with patch(
+            "scrapers.pipelines.run_pipeline._get_adapter",
+            return_value=self._mock_adapter(),
+        ), patch(
+            "scrapers.pipelines.run_pipeline._get_parser",
+            return_value=parser,
+        ):
+            run_pipeline(config_path=self._cfg(tmp_path), output_dir=out)
+
+        records = _read_jsonl(out / "persons.jsonl")
+        assert len(records) == 1
+        rec = records[0]
+        assert rec["foto"] == "https://example.org/foto.jpg"
+        assert rec["cedula_masked"] == "V-****1234"
+        assert rec["last_known_location"] == "Iribarren, Lara"
+
+    def test_minor_record_omitted_when_protection_raises(self, tmp_path: Path) -> None:
+        """Fail-closed: si protect_minor_fields lanza, el registro de un menor
+        no debe exportarse sin redactar (ver PR #102)."""
+        parser = MagicMock()
+        parser.parse.return_value = [
+            Person(
+                full_name="NIÑO DEMO PEREZ",
+                event_id=_EVENT_ID,
+                is_minor=True,
+                foto="https://example.org/foto.jpg",
+                cedula_masked="V-****1234",
+                last_known_location="Iribarren, Lara",
+                fuente="encuentralos_tecnosoft",
+            )
+        ]
+        out = tmp_path / "out"
+
+        with patch(
+            "scrapers.pipelines.run_pipeline._get_adapter",
+            return_value=self._mock_adapter(),
+        ), patch(
+            "scrapers.pipelines.run_pipeline._get_parser",
+            return_value=parser,
+        ), patch(
+            "scrapers.pipelines.run_pipeline.protect_minor_fields",
+            side_effect=ValueError("boom"),
+        ):
+            summary = run_pipeline(config_path=self._cfg(tmp_path), output_dir=out)
+
+        records = _read_jsonl(out / "persons.jsonl")
+        assert records == []
+        assert any("registro omitido" in e for e in summary["errors"])
 
 
 # ---------------------------------------------------------------------------
@@ -632,9 +754,8 @@ class TestMultipleSources:
 
         cfg = _make_demo_config(tmp_path, f"""
 project:
-  event_id: test
+  event_id: 8f14e45f-ceea-467e-bd5d-0a4f2e0c1a3a
   default_country: Venezuela
-  output_mode: sanitized_jsonl
 sources:
   - id: fuente_uno
     name: Fuente uno
@@ -661,9 +782,8 @@ sources:
         dump_ok = _make_synthetic_dump(tmp_path)
         cfg = _make_demo_config(tmp_path, f"""
 project:
-  event_id: test
+  event_id: 8f14e45f-ceea-467e-bd5d-0a4f2e0c1a3a
   default_country: Venezuela
-  output_mode: sanitized_jsonl
 sources:
   - id: fuente_ok
     name: Fuente ok

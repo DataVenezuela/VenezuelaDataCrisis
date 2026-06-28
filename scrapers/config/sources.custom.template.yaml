@@ -15,18 +15,20 @@
 #   D - Unverified crowd/public source; requires manual review.
 #
 # DB/API schema note:
-#   The final database spec represents source trust as numeric tiers:
-#     1 = official/high trust, 2 = verified organization, 3 = social/anonymous.
-#   Scraper configs keep A/B/C/D for readability. Import code can map:
-#     A -> 1, B -> 2, C -> 3, D -> 3 plus manual-review handling.
+#   The final database spec represents source trust as numeric tiers
+#   (person_sources.trust_tier SMALLINT). Scraper configs keep A/B/C/D for
+#   readability; the canonical A/B/C/D -> 1/2/3 mapping is documented in
+#   docs/pipeline.md (section "Conversión de trust_tier").
 #
 # Required per source:
 #   id, name, type, enabled, trust_tier, url, refresh_minutes, parser_asignado
+#
+# project.event_id must be a valid UUID — it is injected into every Person
+# exported by the pipeline (persons.event_id is NOT NULL in the DB schema).
 
 project:
-  event_id: venezuela_earthquake
+  event_id: 8f14e45f-ceea-467e-bd5d-0a4f2e0c1a3a
   default_country: Venezuela
-  output_mode: sanitized_jsonl
 
 sources:
   - id: ejemplo_pagina_html

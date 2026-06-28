@@ -501,6 +501,17 @@ person_sources
 3 = social/anónimo
 ```
 
+### Protección de menores
+
+`person_sources` no tiene hoy un campo `is_minor` propio ni modelo Python
+implementado en este repo (lo construye Stage 1, #81). Cuando se
+implemente: cualquier exposición/export de `person_sources` para un
+`person_record_id` cuyo `persons.is_minor=true` debe respetar la misma
+reducción de campos que aplica el scraper a `persons.jsonl` (ver
+`docs/pipeline.md`, sección "Protección de menores") — en particular,
+`source_url` no debe filtrar información más identificable que la que ya
+fue reducida en el `Person` asociado.
+
 ---
 
 ## 10. Entidad: `ACOPIO_CENTER`

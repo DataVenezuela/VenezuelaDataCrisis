@@ -1,7 +1,6 @@
 project:
-  event_id: venezuela_earthquake
+  event_id: 8f14e45f-ceea-467e-bd5d-0a4f2e0c1a3a
   default_country: Venezuela
-  output_mode: sanitized_jsonl  # TODO: campo eliminado en #85
 
 # Starter config.
 # Recomendación: revisar legalidad, robots.txt, tasa de consulta y autorización antes de activar nuevas fuentes.

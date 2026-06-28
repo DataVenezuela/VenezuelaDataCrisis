@@ -11,7 +11,9 @@ Flujo por fuente habilitada
 4. **Dedup**     — ``deduplicate_typed_entities`` para Event/AcopioCenter;
                    Person se pasa sin dedup global (sensible, requiere revisión)
 5. **Score**     — ``confidence_score`` sobre cada entidad
-6. **Export**    — ``write_jsonl`` → persons.jsonl / acopio.jsonl / events.jsonl
+6. **Minor protection** — ``protect_minor_fields`` reduce campos identificables
+                   cuando is_minor=True (foto, cedula_masked, ubicación exacta)
+7. **Export**    — ``write_jsonl`` → persons.jsonl / acopio.jsonl / events.jsonl
 
 Principios de resiliencia
 --------------------------
@@ -40,9 +42,11 @@ from scrapers.adapters._shared import now_utc, sha256_hex
 from scrapers.adapters.base import RawContent
 from scrapers.dedup.deduplicator import deduplicate_typed_entities
 from scrapers.models import AcopioCenter, Event, Person
+from scrapers.models._validators import validate_uuid_str
 from scrapers.models.source import SourceConfig
 from scrapers.normalizers import normalize_date, normalize_location
 from scrapers.outputs.jsonl_writer import write_jsonl
+from scrapers.sanitizers.minor_protection import protect_minor_fields
 from scrapers.sanitizers.pii_tokenizer import tokenize_pii_fields
 from scrapers.sources.loader import load_sources
 from scrapers.validators.quality import confidence_score
@@ -120,7 +124,7 @@ def _get_adapter(source: SourceConfig) -> Any:
     return None
 
 
-def _get_parser(source: SourceConfig) -> Any:
+def _get_parser(source: SourceConfig, event_id: str) -> Any:
     """
     Devuelve la instancia del parser asignado según ``parser_asignado``.
 
@@ -133,16 +137,21 @@ def _get_parser(source: SourceConfig) -> Any:
 
     Si ``parser_asignado`` no tiene implementación registrada, se usa el
     fallback genérico para no perder datos.
+
+    ``event_id`` viene validado (UUID) desde ``run_pipeline`` y se inyecta
+    en el parser para que lo propague a cada ``Person`` — los parsers no
+    lo derivan ni lo conocen más allá de propagarlo, igual que ``fuente``
+    o ``trust_tier``.
     """
     pa = (source.parser_asignado or "").lower().strip()
 
     if pa == "encuentralos":
         from scrapers.parsers.encuentralos_parser import EncuentralosParser
         secret = os.getenv("PII_HMAC_SECRET")
-        return EncuentralosParser(secret=secret)
+        return EncuentralosParser(event_id=event_id, secret=secret)
 
     # Fallback genérico para parsers aún no implementados
-    return _TextFallbackParser(source=source)
+    return _TextFallbackParser(source=source, event_id=event_id)
 
 
 # ---------------------------------------------------------------------------
@@ -190,10 +199,11 @@ class _TextFallbackParser:
     El registro se crea como status=unknown, confianza mínima.
     """
 
-    def __init__(self, source: SourceConfig) -> None:
+    def __init__(self, source: SourceConfig, event_id: str) -> None:
         self.source_key = source.id
         self._trust_tier = source.trust_tier
         self._fuente = source.name
+        self._event_id = event_id
 
     def parse(self, raw: RawContent, **_: Any) -> list[Person]:
         content = raw.get("raw_content", "")
@@ -215,6 +225,7 @@ class _TextFallbackParser:
             return [
                 Person(
                     full_name=f"[registro sin parser] {self._fuente}",
+                    event_id=self._event_id,
                     nota=content.strip() or None,
                     trust_tier=self._trust_tier,
                     confidence_score=0.0,
@@ -457,6 +468,26 @@ def _apply_confidence(
     return result
 
 
+def _apply_minor_protection(
+    records: list[dict],
+    errors: list[str],
+) -> list[dict]:
+    """Reduce campos identificables en registros con is_minor=True antes de exportar.
+
+    No afecta a Event/AcopioCenter (no tienen is_minor) ni a Person con
+    is_minor en None/False — ver scrapers/sanitizers/minor_protection.py.
+    """
+    result: list[dict] = []
+    for rec in records:
+        try:
+            result.append(protect_minor_fields(rec))
+        except Exception as exc:
+            log.error("Error en protección de menores, registro omitido: %s", exc)
+            errors.append(f"Error en protección de menores (registro omitido): {exc}")
+            # Fail-closed: no se agrega el registro sin redactar.
+    return result
+
+
 def _export(
     records: list[dict],
     output_dir: Path,
@@ -512,6 +543,7 @@ def _run_source(
     output_dir: Path,
     limit: int | None,
     all_errors: list[str],
+    event_id: str,
 ) -> tuple[int, int]:
     """
     Ejecuta el pipeline completo para una fuente.
@@ -528,7 +560,7 @@ def _run_source(
         return 0, 0
 
     # 2. Parser
-    parser = _get_parser(source)
+    parser = _get_parser(source, event_id)
 
     # 3. Fetch
     # El close() va en finally: si fetch_all() lanza (ej. PlaywrightAdapter
@@ -566,7 +598,10 @@ def _run_source(
     # 8. Confidence score
     records = _apply_confidence(records, source_errors)
 
-    # 9. Export
+    # 9. Protección de menores (is_minor=True reduce campos identificables)
+    records = _apply_minor_protection(records, source_errors)
+
+    # 10. Export
     n_exported = _export(records, output_dir, source_errors)
 
     all_errors.extend([f"[{source.id}] {e}" for e in source_errors])
@@ -621,6 +656,23 @@ def run_pipeline(
             "errors": [f"Error cargando config: {exc}"],
         }
 
+    # event_id es obligatorio en cada Person/AcopioCenter exportado (FK NOT NULL
+    # en la DB) — se valida una sola vez aquí en vez de dejar que cada registro
+    # falle su propia validación y generar ruido masivo en los logs.
+    raw_event_id = project.get("event_id")
+    try:
+        event_id = validate_uuid_str(str(raw_event_id))
+    except ValueError:
+        msg = f"project.event_id inválido o ausente en config: {raw_event_id!r}"
+        log.error(msg)
+        return {
+            "sources_processed": 0,
+            "documents_exported": 0,
+            "claims_exported": 0,
+            "claims_deduplicated": 0,
+            "errors": [msg],
+        }
+
     enabled = [s for s in sources if s.enabled]
     log.info("%d fuentes habilitadas de %d totales", len(enabled), len(sources))
 
@@ -631,7 +683,7 @@ def run_pipeline(
 
     for source in enabled:
         try:
-            n_exp, n_dup = _run_source(source, output_dir, limit, all_errors)
+            n_exp, n_dup = _run_source(source, output_dir, limit, all_errors, event_id)
             total_exported += n_exp
             total_deduped += n_dup
             sources_processed += 1
