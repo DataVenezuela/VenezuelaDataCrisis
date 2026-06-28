@@ -263,13 +263,13 @@ Tres workflows de GitHub Actions automatizan el flujo de datos de punta a punta:
 
 | Workflow | Disparo | Qué hace |
 |----------|---------|----------|
-| [`ci.yml`](.github/workflows/ci.yml) | Todo PR a `master` | Tests (`scrapers/` + `tools/`), `ruff`, gitleaks, bloqueo de datos reales, scan de PII/secretos |
+| [`ci.yml`](.github/workflows/ci.yml) | Todo PR a `master` | Tests (`scrapers/`), `ruff`, gitleaks, bandit, pip-audit, bloqueo de datos reales, scan de PII/secretos |
 | [`scrapers.yml`](.github/workflows/scrapers.yml) | Cron horario + manual | Valida config → corre pipeline → ingesta JSONL sanitizado a Supabase |
 | [`build_public_index.yml`](.github/workflows/build_public_index.yml) | Cada 30 min + manual | Lee vistas públicas de Supabase → publica a Cloudflare D1 con swap atómico |
 
 Los tests corren localmente con:
 ```bash
-pytest scrapers/tests tools/
+pytest scrapers/tests
 ```
 
 ---
@@ -279,7 +279,7 @@ pytest scrapers/tests tools/
 Lee [CONTRIBUTING.md](./CONTRIBUTING.MD) antes de empezar. La versión corta:
 
 1. Crea una rama desde main: `git checkout -b scrapers/lo-que-vas-a-hacer`
-2. Haz tus cambios y corre `pytest scrapers/tests tools/`
+2. Haz tus cambios y corre `pytest scrapers/tests`
 3. Abre un Pull Request — **requiere aprobación explícita del dueño del repo antes de mergear a main**
 4. No commitees datos reales, dumps ni archivos con PII
 

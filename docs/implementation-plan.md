@@ -8,6 +8,11 @@ Principio rector (de `docs/base-standards.md §1`): **pasos pequeños, una cosa 
 vez, con tests**. Cada fase es mergeable por separado y deja el sistema en un
 estado coherente.
 
+> **Nota (jun 2026):** El diseño de `tools/ingest_supabase/` descrito en este plan
+> fue reemplazado en #81. La ingesta a Supabase ahora vive en
+> `scrapers/exporters/staging_exporter.py` via `POST /api/aportes`. Las Fases 2–5
+> siguen siendo válidas como referencia de arquitectura objetivo.
+
 ---
 
 ## Estructura objetivo del repo

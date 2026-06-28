@@ -11,7 +11,6 @@ concurrency:
 
 permissions:
   contents: read
-  pull-requests: write   # necesario para que dependency-review-action comente en el PR
 
 jobs:
   ci:
@@ -63,17 +62,9 @@ jobs:
 
       - name: SAST (bandit)
         if: always()
-        continue-on-error: true
         run: |
           pip install bandit
-          bandit -r scrapers/ tools/ shared/ --skip B101 -f json -o /tmp/bandit-report.json || true
-          bandit -r scrapers/ tools/ shared/ --skip B101
-
-      - name: Dependency review (new deps in this PR)
-        if: always()
-        uses: actions/dependency-review-action@v4
-        with:
-          fail-on-severity: high
+          bandit -r scrapers/ shared/ --skip B101
 
       - name: Security keyword scan (PII / secrets)
         run: |
@@ -102,3 +93,17 @@ jobs:
             echo "Revisa CONTRIBUTING.MD (Reglas de seguridad obligatorias) antes de hacer commit."
             exit 1
           fi
+
+  # Job separado para que pull-requests: write no contamine el job ci
+  # (gitleaks, bandit, pip-audit no necesitan ese permiso).
+  dependency-review:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high

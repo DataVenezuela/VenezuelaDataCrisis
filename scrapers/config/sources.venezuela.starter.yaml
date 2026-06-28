@@ -1,7 +1,7 @@
 project:
   event_id: venezuela_earthquake
   default_country: Venezuela
-  output_mode: sanitized_jsonl
+  output_mode: sanitized_jsonl  # TODO: campo eliminado en #85
 
 # Starter config.
 # Recomendación: revisar legalidad, robots.txt, tasa de consulta y autorización antes de activar nuevas fuentes.
@@ -11,7 +11,7 @@ sources:
     type: api_json
     enabled: true
     trust_tier: A
-    url: "https://earthquake.usgs.gov/fdsnws/event/1/query?format=geojson&starttime=2026-06-24&endtime=2026-06-30&minmagnitude=4&latitude=10.5&longitude=-66.9&maxradiuskm=800"
+    url: "https://earthquake.usgs.gov/fdsnws/event/1/query?format=geojson&starttime=2026-06-24&minmagnitude=4&latitude=10.5&longitude=-66.9&maxradiuskm=800"
     refresh_minutes: 30
     parser_asignado: geojson_earthquake
     required_keywords:
