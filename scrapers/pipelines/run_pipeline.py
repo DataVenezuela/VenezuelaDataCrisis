@@ -66,7 +66,7 @@ def _get_adapter(source: SourceConfig) -> Any:
 
     Tipos soportados:
       api_json    → ApiAdapter (httpx, paginación automática)
-      html_static → fetch_url de http_client (requests, devuelve str)
+      html_static → HtmlAdapter (requests + BeautifulSoup, devuelve texto limpio)
       manual_file / text → local_file (lectura local)
       pdf         → PdfAdapter (pdfplumber, texto por página)
       rss         → fetch_url (el RSS es HTML/XML estático)
@@ -91,7 +91,11 @@ def _get_adapter(source: SourceConfig) -> Any:
         )
         return adapter
 
-    if stype in ("html_static", "rss"):
+    if stype == "html_static":
+        from scrapers.adapters.html_adapter import HtmlAdapter
+        return HtmlAdapter.from_source_config(source)
+
+    if stype == "rss":
         from scrapers.adapters.http_client import fetch_url
         return _StaticHttpAdapter(source_key=source.id, fetch_fn=fetch_url)
 
