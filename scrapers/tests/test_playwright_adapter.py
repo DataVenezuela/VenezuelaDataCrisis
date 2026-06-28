@@ -150,6 +150,11 @@ def test_from_source_config_uses_defaults_when_not_set() -> None:
     assert adapter.max_retries == 5
 
 
+def test_rejects_max_retries_below_one() -> None:
+    with pytest.raises(ValueError, match="max_retries debe ser >= 1"):
+        PlaywrightAdapter(max_retries=0, page_factory=_FakePage)
+
+
 def test_rejects_non_webapp_source_config() -> None:
     config = _source_config(source_type="pdf")
 

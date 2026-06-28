@@ -155,6 +155,9 @@ class PlaywrightAdapter:
         browser_type: str = "chromium",
         page_factory: PageFactory | None = None,
     ) -> None:
+        if max_retries < 1:
+            raise ValueError(f"max_retries debe ser >= 1 (recibido: {max_retries})")
+
         self.source_key = source_key
         self.timeout = timeout
         self.max_retries = max_retries

@@ -76,9 +76,10 @@ def _validate_optional_fields(source: dict, label: str) -> None:
 
     max_retries = source.get("max_retries")
     if max_retries is not None:
-        if isinstance(max_retries, bool) or not isinstance(max_retries, int) or max_retries < 0:
+        if isinstance(max_retries, bool) or not isinstance(max_retries, int) or max_retries < 1:
             raise ValueError(
-                f"{label} debe tener 'max_retries' como entero no negativo."
+                f"{label} debe tener 'max_retries' como entero positivo (representa el numero "
+                f"total de intentos; 0 dejaria el adapter sin ningun intento)."
             )
 
 
