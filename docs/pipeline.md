@@ -36,6 +36,62 @@ Verification humana / externa
 
 ---
 
+## Estado de implementación
+
+El orquestador del pipeline está implementado en `scrapers/pipelines/run_pipeline.py`.
+
+### Flujo ejecutable
+
+```text
+SourceConfig (YAML)
+  → adapter (api_json / html_static / manual_file)
+    → parser (encuentralos / fallback genérico)
+      → PII tokenizer (HMAC o strip)
+        → normalización (fechas, ubicaciones)
+          → dedup (Event / AcopioCenter; Person excluido intencionalmente)
+            → confidence_score
+              → JSONL export (persons.jsonl / acopio.jsonl / events.jsonl)
+```
+
+### Adapters implementados
+
+| Tipo | Módulo | Estado |
+|------|--------|--------|
+| `api_json` | `scrapers/adapters/api_adapter.py` | ✅ Implementado (httpx, paginación, retry) |
+| `html_static` / `rss` | `scrapers/adapters/http_client.py` | ✅ Implementado (fetch wrapper) |
+| `manual_file` / `text` | `scrapers/adapters/local_file.py` | ✅ Implementado (lectura local) |
+| `webapp` / `pdf` | — | ⏳ Pendiente (se omite con warning) |
+
+### Parsers implementados
+
+| Parser | Módulo | Estado |
+|--------|--------|--------|
+| `encuentralos` | `scrapers/parsers/encuentralos_parser.py` | ⏳ Pendiente |
+| Fallback genérico | `_TextFallbackParser` (interno) | ✅ Para text/html/rss |
+
+### Ejecución
+
+```bash
+# Pipeline completo con fuentes del config
+python -m scrapers.cli run --config scrapers/config/sources.yaml --output scrapers/runtime_output
+
+# Limitar a N registros por fuente
+python -m scrapers.cli run --config scrapers/config/sources.yaml --output scrapers/runtime_output --limit 50
+```
+
+### Diseño de resiliencia
+
+- Un error en un registro individual no tumba el pipeline.
+- Un error en una fuente entera se loguea y se continúa con la siguiente.
+- `PII_SALT` es opcional en CI: sin salt, los campos PII crudos se eliminan antes de exportar.
+- La deduplicación de Person se excluye intencionalmente del orquestador (requiere revisión humana).
+
+### Tests
+
+28 tests de integración offline en `scrapers/tests/test_run_pipeline.py`.
+
+---
+
 ## Principios del pipeline
 
 El pipeline sigue estos principios:
@@ -367,6 +423,40 @@ No se debe exportar:
 ## Regla crítica sobre PII
 
 El parser puede tocar PII en memoria para transformarla, pero la PII cruda no debe persistirse ni aparecer en logs, fixtures, outputs o commits.
+
+---
+
+## Política de normalización de `cedula_hmac`
+
+`cedula_hmac` se calcula sobre el valor normalizado de la cédula
+(`shared.hashing.identity_token` / `hmac_hex`, usados también por
+`scrapers.sanitizers.pii_tokenizer.mask_cedula`). Esa normalización:
+
+* Quita puntuación, espacios y acentos.
+* **Conserva** la letra de nacionalidad (V/E) si la fuente la trae.
+
+Decisión explícita: la letra de nacionalidad SÍ forma parte del
+identificador canónico. `"V12345678"` y `"12345678"` (mismos dígitos, sin
+prefijo) producen `cedula_hmac` **distintos**.
+
+Por qué: los rangos de cédula V (venezolano) y E (extranjero) se asignan de
+forma independiente, así que los mismos 8 dígitos pueden pertenecer a dos
+personas reales distintas según el prefijo. Ignorar el prefijo arriesga un
+falso merge entre esas dos personas, que es justo el daño que busca evitar
+la "Regla crítica de deduplicación" (ver sección 8): *fusionar mal puede
+ser peligroso*, *duplicar es tolerable*.
+
+Costo aceptado: si una fuente reporta la cédula sin el prefijo de
+nacionalidad (error de captura o formato), ese registro no va a coincidir
+por `cedula_hmac` con el mismo dato sí-prefijado. Mitigación: `cedula_hmac`
+es una señal de blocking/similarity, no la única — el scoring de Personas
+(ver "Similarity scoring") debe poder generar candidatos por nombre, edad y
+ubicación aunque `cedula_hmac` no coincida; la revisión humana decide el
+merge final.
+
+Si en el futuro se decide ignorar el prefijo de nacionalidad, ese cambio
+debe documentarse explícitamente aquí y migrar/recalcular los
+`cedula_hmac` ya exportados — no son compatibles entre políticas distintas.
 
 ---
 

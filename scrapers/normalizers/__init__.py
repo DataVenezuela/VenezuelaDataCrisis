@@ -7,6 +7,7 @@ from scrapers.normalizers.text import (
 )
 from scrapers.normalizers.date import normalize_date
 from scrapers.normalizers.location import geocode_osm, normalize_location
+from scrapers.normalizers.nlp_extractor import extract_entities
 
 __all__ = [
     "normalize_text",
@@ -17,4 +18,5 @@ __all__ = [
     "normalize_date",
     "normalize_location",
     "geocode_osm",
+    "extract_entities",
 ]
