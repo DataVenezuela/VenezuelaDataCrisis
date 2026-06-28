@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
-from scrapers.models._validators import validate_uuid_str
+from scrapers.models._validators import validate_score_range, validate_uuid_str
 
 _PERSON_STATUS = {"missing", "found", "injured", "deceased", "unknown"}
 _TRUST_TIERS = {"A", "B", "C", "D"}
@@ -66,9 +66,7 @@ class Person(BaseModel):
     @field_validator("confidence_score")
     @classmethod
     def _score_range(cls, v: float) -> float:
-        if not 0.0 <= v <= 1.0:
-            raise ValueError("confidence_score must be in [0.0, 1.0]")
-        return v
+        return validate_score_range(v)
 
     @field_validator("cedula_masked")
     @classmethod

@@ -52,6 +52,13 @@ def test_person_rejects_bool_confidence_score():
         Person(full_name="A", event_id=_EVENT_ID, fuente="s", confidence_score=True)  # type: ignore[arg-type]
 
 
+def test_person_confidence_score_tolerates_float_imprecision_at_bounds():
+    p = Person(full_name="A", event_id=_EVENT_ID, fuente="s", confidence_score=1.0000000000000002)
+    assert p.confidence_score == 1.0
+    p = Person(full_name="A", event_id=_EVENT_ID, fuente="s", confidence_score=-1e-16)
+    assert p.confidence_score == 0.0
+
+
 def test_person_rejects_empty_required_strings():
     with pytest.raises(ValidationError):
         Person(full_name="   ", event_id=_EVENT_ID, fuente="s")

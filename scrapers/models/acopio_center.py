@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from scrapers.models._validators import validate_uuid_str
+from scrapers.models._validators import validate_score_range, validate_uuid_str
 
 _TRUST_TIERS = {"A", "B", "C", "D"}
 _ACOPIO_STATUSES = {"active", "full", "closed", "unverified"}
@@ -61,9 +61,7 @@ class AcopioCenter(BaseModel):
     @field_validator("confidence_score")
     @classmethod
     def _score_range(cls, v: float) -> float:
-        if not 0.0 <= v <= 1.0:
-            raise ValueError("confidence_score must be in [0.0, 1.0]")
-        return v
+        return validate_score_range(v)
 
     @field_validator("coordinates")
     @classmethod

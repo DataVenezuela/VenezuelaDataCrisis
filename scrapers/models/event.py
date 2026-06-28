@@ -4,6 +4,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
+from scrapers.models._validators import validate_score_range
+
 _TRUST_TIERS = {"A", "B", "C", "D"}
 _EVENT_TYPES = {"earthquake", "flood", "landslide", "other"}
 
@@ -54,9 +56,7 @@ class Event(BaseModel):
     @field_validator("confidence_score")
     @classmethod
     def _score_range(cls, v: float) -> float:
-        if not 0.0 <= v <= 1.0:
-            raise ValueError("confidence_score must be in [0.0, 1.0]")
-        return v
+        return validate_score_range(v)
 
     @field_validator("date_iso")
     @classmethod
