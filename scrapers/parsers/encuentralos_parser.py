@@ -56,7 +56,7 @@ from typing import Any
 
 from scrapers.adapters.base import RawContent
 from scrapers.models import Person
-from scrapers.normalizers import normalize_location, normalize_proper_name
+from scrapers.normalizers import derive_is_minor, normalize_location, normalize_proper_name
 from scrapers.sanitizers.pii_tokenizer import _masked_last4
 from shared.hashing import identity_token
 
@@ -135,13 +135,6 @@ def _age_range(edad: Any) -> dict[str, int] | None:
         return {"min": age, "max": age}
     except (TypeError, ValueError):
         return None
-
-
-def _derive_is_minor(age_range: dict[str, int] | None) -> bool | None:
-    """True/False si la edad puntual permite determinarlo; None si no se conoce."""
-    if age_range is None:
-        return None
-    return age_range["max"] < 18
 
 
 def _build_nota(record: dict[str, Any]) -> str | None:
@@ -297,7 +290,7 @@ class EncuentralosParser:
 
         # ── edad → age_range / is_minor ─────────────────────────────────
         age_range = _age_range(rec.get("edad"))
-        is_minor = _derive_is_minor(age_range)
+        is_minor = derive_is_minor(age_range)
 
         # ── nota (id externo + observaciones) ─────────────────────────
         nota = _build_nota(rec)

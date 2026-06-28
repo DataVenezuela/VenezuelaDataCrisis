@@ -36,8 +36,17 @@ def protect_minor_fields(record: Mapping[str, Any]) -> dict[str, Any]:
 
     location = sanitized.get("last_known_location")
     if isinstance(location, str) and "," in location:
-        # "Municipio, Estado" -> "Estado": se acota a nivel estado para no
-        # facilitar la localización exacta de un menor.
-        sanitized["last_known_location"] = location.rsplit(",", 1)[-1].strip()
+        # Solo el formato exacto "Municipio, Estado" (dos partes, ambas no
+        # vacías) se acota de forma segura a "Estado". Cualquier otro
+        # formato con coma (texto libre con más de un separador, o con coma
+        # final) no garantiza que el último segmento sea el estado — por
+        # ejemplo "Maracaibo, Zulia, Venezuela" daría "Venezuela", no el
+        # estado. Ante esa ambigüedad se redacta del todo (fail-closed) en
+        # vez de exponer una ubicación mal acotada.
+        parts = [p.strip() for p in location.split(",")]
+        if len(parts) == 2 and all(parts):
+            sanitized["last_known_location"] = parts[1]
+        else:
+            sanitized["last_known_location"] = None
 
     return sanitized

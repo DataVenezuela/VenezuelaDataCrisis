@@ -41,7 +41,6 @@ from scrapers.parsers.encuentralos_parser import (
     _map_status,
     _mask_cedula,
     _age_range,
-    _derive_is_minor,
     _location_str,
     _build_nota,
 )
@@ -396,16 +395,6 @@ class TestAgeRange:
     def test_edad_cero(self) -> None:
         # Edad 0 (bebé) es válida
         assert _age_range(0) == {"min": 0, "max": 0}
-
-    def test_derive_is_minor_true_under_18(self) -> None:
-        assert _derive_is_minor(_age_range(15)) is True
-
-    def test_derive_is_minor_false_at_18_and_above(self) -> None:
-        assert _derive_is_minor(_age_range(18)) is False
-        assert _derive_is_minor(_age_range(35)) is False
-
-    def test_derive_is_minor_none_without_age(self) -> None:
-        assert _derive_is_minor(_age_range(None)) is None
 
     def test_no_edad_en_fixture(self) -> None:
         """Registro con edad=None produce age_range=None."""

@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from scrapers.sanitizers.minor_protection import protect_minor_fields
+from scrapers.models import Person
+from scrapers.sanitizers.minor_protection import (
+    _MINOR_REDACTED_FIELDS,
+    protect_minor_fields,
+)
 
 
 def _record(**overrides: object) -> dict:
@@ -42,6 +46,21 @@ def test_minor_record_with_none_location_is_unchanged():
     assert sanitized["last_known_location"] is None
 
 
+def test_minor_record_multi_comma_location_is_fully_redacted():
+    """Texto libre con más de un separador no garantiza que el último
+    segmento sea el estado (ej. "Municipio, Estado, País") — se redacta
+    del todo en vez de exponer una ubicación mal acotada."""
+    sanitized = protect_minor_fields(
+        _record(last_known_location="Maracaibo, Zulia, Venezuela")
+    )
+    assert sanitized["last_known_location"] is None
+
+
+def test_minor_record_trailing_comma_location_is_fully_redacted():
+    sanitized = protect_minor_fields(_record(last_known_location="Maracaibo,"))
+    assert sanitized["last_known_location"] is None
+
+
 def test_non_minor_record_is_untouched():
     for is_minor in (False, None):
         record = _record(is_minor=is_minor)
@@ -59,3 +78,14 @@ def test_returns_copy_not_same_object():
     record = _record(is_minor=False)
     sanitized = protect_minor_fields(record)
     assert sanitized is not record
+
+
+def test_redacted_field_names_still_exist_on_person():
+    """protect_minor_fields lee el dict por nombre de campo, desacoplado del
+    modelo Person. Si alguno de estos campos (incluido last_known_location,
+    que la función trata por separado) se renombra en Person sin actualizar
+    este módulo, la protección de menores deja de aplicar en silencio —
+    este test debe fallar primero."""
+    person_fields = set(Person.model_fields)
+    for field in (*_MINOR_REDACTED_FIELDS, "is_minor", "last_known_location"):
+        assert field in person_fields, f"{field!r} ya no existe en Person"
