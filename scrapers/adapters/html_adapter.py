@@ -70,6 +70,10 @@ class HtmlAdapter:
             source_key=source_key,
             source_url=url,
             fetched_at=_now_utc(),
+            # fetch_url() hace raise_for_status(): si llegamos aquí, la respuesta
+            # fue 2xx, así que 200 es seguro. http_client no expone el código real;
+            # si cambia su contrato (ver #60), surfacing el status real aquí en vez
+            # de hardcodearlo.
             http_status=200,
             content_type=content_type,
             content_hash=_sha256_text(text),

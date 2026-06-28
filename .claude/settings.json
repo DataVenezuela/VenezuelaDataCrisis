@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git fetch origin --prune)",
+      "Bash(gh auth status)",
+      "Bash(gh api repos/DataVenezuela/VZLA_DEDUP --jq .permissions.push)",
+      "Bash(gh issue view *)",
+      "Bash(git branch --list *)",
+      "Bash(git branch -r --list origin/*)",
+      "Bash(gh pr list *)",
+      "Bash(git log --oneline *)",
+      "Bash(python -m pytest scrapers/tests)",
+      "Bash(ruff check .)",
+      "Bash(git diff master...HEAD)",
+      "Bash(gh pr view *)",
+      "Bash(gh pr checks *)",
+      "Bash(gh run view * --log-failed)"
+    ]
+  }
+}
