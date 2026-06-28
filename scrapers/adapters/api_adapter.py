@@ -41,7 +41,7 @@ from typing import Any, Iterator
 
 import httpx
 
-from .base import AdapterProtocol, RawContent
+from .base import RawContent
 from scrapers.adapters.http_client import USER_AGENT
 
 log = logging.getLogger(__name__)

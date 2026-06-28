@@ -236,6 +236,7 @@ persons
 | `verification_status` | `VARCHAR(30)`    | `string`        |       no | Enum definido                                             |
 | `confidence_score`    | `NUMERIC(4,3)`   | `number`        |       no | Default `0.000` si no hay datos                           |
 | `source_url`          | `TEXT`           | `string`        |       sí | URL primaria del registro                                 |
+| `deterministic_id`    | `VARCHAR(16)`    | `string`        |       sí | ID determinístico basado en hash fonético y ubicación     |
 
 ### Enums
 

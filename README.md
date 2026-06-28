@@ -147,7 +147,8 @@ Todas las fechas en **UTC estricto** (ISO 8601 con `Z`). Nulos siempre como `nul
   "status": "missing",
   "verification_status": "unverified",
   "confidence_score": 0.420,
-  "source_url": "https://encuentralos.org/registro/12345"
+  "source_url": "https://encuentralos.org/registro/12345",
+  "deterministic_id": "a1b2c3d4e5f67890"
 }
 ```
 

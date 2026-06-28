@@ -22,10 +22,20 @@ jobs:
           cache-dependency-path: scrapers/requirements.txt
 
       - name: Install dependencies
-        run: pip install -r scrapers/requirements.txt
+        run: pip install -r scrapers/requirements.txt ruff==0.15.20
 
       - name: Run tests
         run: python -m pytest scrapers/tests
+
+      - name: Lint (ruff)
+        run: ruff check .
+
+      - name: Secret scan (gitleaks)
+        if: always()
+        uses: gitleaks/gitleaks-action@v2
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Block real data files
         run: |
