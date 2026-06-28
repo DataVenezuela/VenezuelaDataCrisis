@@ -5,7 +5,7 @@ import re
 import pytest
 
 from scrapers.adapters import AdapterProtocol
-from scrapers.adapters.rss_adapter import RssAdapter
+from scrapers.adapters.rss_adapter import RssAdapter, _safe_extract_items
 from scrapers.models.source import SourceConfig
 
 RSS_SAMPLE = """<?xml version="1.0" encoding="UTF-8"?>
@@ -156,6 +156,42 @@ def test_malformed_xml_degrades_to_raw_text_without_raising() -> None:
     assert len(results) == 1
     # No se descarta el feed: el texto crudo (normalizado) queda como item único.
     assert results[0]["raw_content"] == "esto no es xml <<< roto"
+
+
+# --- #116: defusedxml (forbid_entities=True) rechaza CUALQUIER declaración de
+# entidad con DefusedXmlException (subclase de ValueError, NO de ParseError) —
+# incluso entidades benignas como <!ENTITY copy "(c)"> usadas para escapar
+# símbolos. _safe_extract_items debe degradar a texto crudo, no propagar. ---
+
+_FEED_ENTIDAD_COPY = (
+    '<?xml version="1.0"?><!DOCTYPE rss [<!ENTITY copy "(c)">]>'
+    "<rss><channel><item><title>Reporte &copy; 2026</title></item></channel></rss>"
+)
+_FEED_ENTIDAD_NBSP = (
+    '<?xml version="1.0"?><!DOCTYPE rss [<!ENTITY nbsp "&#160;">]>'
+    "<rss><channel><item><description>Lara&nbsp;Zulia</description></item></channel></rss>"
+)
+
+
+@pytest.mark.parametrize("feed", [_FEED_ENTIDAD_COPY, _FEED_ENTIDAD_NBSP])
+def test_entity_declaration_feed_degrades_without_raising(feed: str) -> None:
+    fetcher, _calls = _fake_fetcher(raw=feed)
+    adapter = RssAdapter(source_key="rss_demo", fetcher=fetcher)
+
+    # Antes propagaba EntitiesForbidden y se perdía la fuente entera.
+    results = list(adapter.fetch_all("https://example.test/feed.xml"))
+
+    assert len(results) == 1
+    assert results[0]["rss_title"] is None
+    # Degradó a texto crudo SIN parsear ni expandir la entidad.
+    assert results[0]["raw_content"] == " ".join(feed.split())
+
+
+@pytest.mark.parametrize("feed", [_FEED_ENTIDAD_COPY, _FEED_ENTIDAD_NBSP])
+def test_safe_extract_items_catches_defusedxml_exception(feed: str) -> None:
+    items = _safe_extract_items(feed)
+
+    assert items == [(None, " ".join(feed.split()))]
 
 
 def test_fetch_all_propagates_fetcher_errors() -> None:

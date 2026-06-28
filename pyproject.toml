@@ -13,5 +13,8 @@ module = [
     "spacy",
     "playwright.sync_api",
     "pdfplumber",
+    "defusedxml",
+    "defusedxml.common",
+    "defusedxml.ElementTree",
 ]
 ignore_missing_imports = true

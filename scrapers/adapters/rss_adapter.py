@@ -18,10 +18,12 @@ de todos los items unidos.  En ambos casos ``raw_content`` es texto (``str``).
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Iterator
 from typing import Any
 from urllib.parse import urlparse
 
+from defusedxml.common import DefusedXmlException
 from defusedxml.ElementTree import ParseError
 
 from scrapers.adapters._shared import now_utc, sha256_hex
@@ -29,6 +31,8 @@ from scrapers.adapters.base import RawContent
 from scrapers.adapters.http_client import fetch_url
 from scrapers.models.source import SourceConfig
 from scrapers.parsers.rss_extractor import extract_rss_items
+
+log = logging.getLogger(__name__)
 
 RssFetcher = Callable[[str, int], tuple[str, str]]
 
@@ -174,14 +178,32 @@ def _raw_content(
 def _safe_extract_items(raw: str) -> list[tuple[str | None, str]]:
     """``extract_rss_items`` con degradación.
 
-    Si el XML está mal formado no se descarta el feed (en una crisis cada
-    registro cuenta): se devuelve su texto crudo, normalizado, como un único
-    item sin título.
+    No se descarta el feed (en una crisis cada registro cuenta): se devuelve su
+    texto crudo, normalizado, como un único item sin título. Cubre dos casos:
+
+    - ``ParseError``: XML mal formado.
+    - ``DefusedXmlException``: XML que defusedxml rechaza por seguridad. Con la
+      config por defecto (``forbid_entities=True``) el caso típico es
+      ``EntitiesForbidden`` —p.ej. un feed legítimo con ``<!ENTITY copy "(c)">``—
+      y ``ExternalReferenceForbidden``; capturamos la clase base para tolerar
+      también otras (``DTDForbidden``, etc.) si en el futuro se endurece la
+      config. El payload nunca se parsea ni se expande; solo se conserva su texto
+      plano. Se loguea como señal de seguridad.
     """
     try:
         return extract_rss_items(raw)
     except ParseError:
-        return [(None, " ".join(raw.split()))]
+        return _raw_text_fallback(raw)
+    except DefusedXmlException as exc:
+        log.warning(
+            "Feed rechazado por defusedxml (%s) — degradando a texto crudo sin parsear",
+            type(exc).__name__,
+        )
+        return _raw_text_fallback(raw)
+
+
+def _raw_text_fallback(raw: str) -> list[tuple[str | None, str]]:
+    return [(None, " ".join(raw.split()))]
 
 
 def _validate_rss(source_config: SourceConfig) -> None:
