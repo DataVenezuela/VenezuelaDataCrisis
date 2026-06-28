@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git fetch *)",
+      "Bash(gh auth status)",
+      "Bash(gh api repos/*/permissions)",
+      "Bash(gh issue view *)",
+      "Bash(git branch --list *)",
+      "Bash(git branch -r --list *)",
+      "Bash(gh pr list *)",
+      "Bash(git checkout master)",
+      "Bash(git pull origin master)",
+      "Bash(git log --oneline *)",
+      "Bash(python -m pytest *)",
+      "Bash(ruff check *)",
+      "Bash(git diff master...HEAD)",
+      "Bash(gh pr view *)",
+      "Bash(gh pr checks *)",
+      "Bash(gh run view *)"
+    ]
+  }
+}
