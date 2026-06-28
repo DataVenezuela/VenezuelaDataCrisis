@@ -23,7 +23,7 @@ def test_custom_template_config_is_valid():
     payload = validate_sources_config(path)
 
     assert len(payload["sources"]) == 5
-    assert {source["type"] for source in payload["sources"]} >= {"webapp", "pdf"}
+    assert {source["type"] for source in payload["sources"]} >= {"webapp_js", "pdf"}
 
 
 def test_missing_required_field_is_rejected(tmp_path):

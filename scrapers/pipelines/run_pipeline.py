@@ -70,8 +70,9 @@ def _get_adapter(source: SourceConfig) -> Any:
       manual_file / text → local_file (lectura local)
       pdf         → PdfAdapter (pdfplumber, texto por página)
       rss         → fetch_url (el RSS es HTML/XML estático)
+      webapp_js   → PlaywrightAdapter (browser headless, paginas con JS)
 
-    Tipos no implementados (webapp) devuelven None y la fuente se omite.
+    Tipos sin adapter registrado devuelven None y la fuente se omite.
     """
     stype = source.type
 
@@ -102,6 +103,10 @@ def _get_adapter(source: SourceConfig) -> Any:
     if stype == "pdf":
         from scrapers.adapters.pdf_adapter import PdfAdapter
         return PdfAdapter.from_source_config(source)
+
+    if stype == "webapp_js":
+        from scrapers.adapters.playwright_adapter import PlaywrightAdapter
+        return PlaywrightAdapter.from_source_config(source)
 
     log.warning(
         "Adapter para type=%r no implementado (fuente=%s) — omitida",

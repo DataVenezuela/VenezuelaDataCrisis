@@ -60,7 +60,8 @@ SourceConfig (YAML)
 | `api_json` | `scrapers/adapters/api_adapter.py` | ✅ Implementado (httpx, paginación, retry) |
 | `html_static` / `rss` | `scrapers/adapters/http_client.py` | ✅ Implementado (fetch wrapper) |
 | `manual_file` / `text` | `scrapers/adapters/local_file.py` | ✅ Implementado (lectura local) |
-| `webapp` / `pdf` | — | ⏳ Pendiente (se omite con warning) |
+| `pdf` | `scrapers/adapters/pdf_adapter.py` | ✅ Implementado (pdfplumber) |
+| `webapp_js` | `scrapers/adapters/playwright_adapter.py` | ✅ Implementado (Playwright headless, timeout/retries configurables) |
 
 ### Parsers implementados
 

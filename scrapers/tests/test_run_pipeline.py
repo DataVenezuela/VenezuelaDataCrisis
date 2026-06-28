@@ -19,7 +19,7 @@ Cobertura
 - documents_exported refleja registros reales en JSONL
 - Pipeline con fuente deshabilitada (enabled=false) la omite
 - Error en una fuente no tumba las demás
-- Adapter no implementado (webapp) no cuenta como error fatal
+- Adapter no implementado para un type desconocido no cuenta como error fatal
 - Límite por fuente (limit=N) se respeta
 - JSONL producido es parseable como JSON línea a línea
 - Campos obligatorios presentes en cada registro exportado
@@ -41,7 +41,8 @@ import pytest
 
 from scrapers.adapters.base import RawContent
 from scrapers.models import Person
-from scrapers.pipelines.run_pipeline import run_pipeline
+from scrapers.models.source import SourceConfig
+from scrapers.pipelines.run_pipeline import _get_adapter, run_pipeline
 
 # ---------------------------------------------------------------------------
 # Constantes y helpers
@@ -380,26 +381,20 @@ sources:
         assert summary["sources_processed"] == 0
         assert len(summary["errors"]) >= 1
 
-    def test_unimplemented_adapter_type_skipped(self, tmp_path: Path, demo_config: Path) -> None:
-        """Fuente webapp (sin adapter) debe omitirse sin error fatal."""
-        cfg = _make_demo_config(tmp_path, """
-project:
-  event_id: test
-  default_country: Venezuela
-  output_mode: sanitized_jsonl
-sources:
-  - id: webapp_sin_adapter
-    name: WebApp sin adapter
-    type: webapp
-    enabled: true
-    trust_tier: C
-    url: "https://example.org/app"
-    refresh_minutes: 60
-    parser_asignado: html
-""")
-        # No debe lanzar excepción
-        summary = run_pipeline(config_path=cfg, output_dir=tmp_path / "out")
-        assert isinstance(summary, dict)
+    def test_unimplemented_adapter_type_skipped(self) -> None:
+        """Un type sin adapter registrado en `_get_adapter` debe omitirse (None), no lanzar."""
+        source = SourceConfig(
+            id="fuente_futura",
+            name="Fuente con type aun no soportado",
+            type="not_yet_implemented",
+            enabled=True,
+            trust_tier="C",
+            url="https://example.org/app",
+            refresh_minutes=60,
+            parser_asignado="html",
+        )
+
+        assert _get_adapter(source) is None
 
 
 # ---------------------------------------------------------------------------

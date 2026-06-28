@@ -207,6 +207,15 @@ Adapter esperado:
 Playwright
 ```
 
+El adapter de Playwright (`scrapers/adapters/playwright_adapter.py`) acepta
+dos campos opcionales en la configuración real (`SourceConfig`) para
+controlar su comportamiento:
+
+```yaml
+timeout_seconds: 30   # timeout de navegacion en segundos (default: 30)
+max_retries: 3        # intentos ante errores transitorios (default: 5)
+```
+
 ---
 
 ### 10.2 HTML estático

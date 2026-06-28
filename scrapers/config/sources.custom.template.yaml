@@ -2,7 +2,7 @@
 #
 # Valid source types:
 #   html_static  - Static HTML page fetched with a simple HTTP client.
-#   webapp       - Dynamic JavaScript page that needs a browser adapter.
+#   webapp_js    - Dynamic JavaScript page rendered with Playwright.
 #   api_json     - JSON API endpoint.
 #   rss          - RSS/Atom feed.
 #   pdf          - Remote or local PDF file.
@@ -56,7 +56,7 @@ sources:
 
   - id: ejemplo_webapp
     name: WebApp dinamica de ejemplo
-    type: webapp
+    type: webapp_js
     enabled: false
     trust_tier: C
     url: "https://example.org/app/reemplazar"
@@ -64,7 +64,9 @@ sources:
     parser_asignado: html
     required_keywords:
       - ayuda
-    notes: "Usar adapter de navegador si el contenido depende de JavaScript."
+    timeout_seconds: 30
+    max_retries: 3
+    notes: "Usa Playwright porque el contenido depende de JavaScript."
 
   - id: ejemplo_pdf
     name: PDF de ejemplo
