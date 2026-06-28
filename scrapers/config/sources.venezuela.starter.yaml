@@ -55,3 +55,15 @@ sources:
       - Venezuela
       - earthquake
       - activation
+
+
+  - id: encuentralos_tecnosoft
+    name: Encuentralos - personas desaparecidas
+    type: api_json
+    enabled: true
+    trust_tier: C
+    url: "https://encuentralos.tecnosoft.dev/api/personas"
+    refresh_minutes: 30
+    parser_asignado: encuentralos
+    required_keywords: []
+    notes: "API paginada (limit/offset, ~290 registros). Usa ApiAdapter con page_size=20."
