@@ -51,13 +51,13 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 from typing import Any
 
 from scrapers.adapters.base import RawContent
 from scrapers.models import Person
 from scrapers.normalizers import normalize_location, normalize_proper_name
 from scrapers.parsers.base import ParserProtocol
+from scrapers.sanitizers.pii_tokenizer import _masked_last4
 
 log = logging.getLogger(__name__)
 
@@ -83,8 +83,6 @@ _STATUS_MAP: dict[str, str] = {
     "muerta":        "deceased",
 }
 
-_DIGITS_RE = re.compile(r"\D+")
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -100,10 +98,10 @@ def _map_status(raw_status: str | None) -> str:
 
 def _mask_cedula(raw: str) -> str:
     """Devuelve "****XXXX" con los últimos 4 dígitos de la cédula."""
-    digits = _DIGITS_RE.sub("", raw)
-    if not digits:
+    try:
+        return _masked_last4(raw)
+    except ValueError:
         return "****????"
-    return f"****{digits[-4:]}"
 
 
 def _location_str(location_obj: dict[str, Any]) -> str | None:
@@ -311,9 +309,3 @@ class EncuentralosParser:
                 SOURCE_KEY, rec_id, exc,
             )
             return None
-
-
-# Verificar en tiempo de import que EncuentralosParser satisface el Protocol.
-assert isinstance(EncuentralosParser(), ParserProtocol), (
-    "EncuentralosParser no satisface ParserProtocol"
-)
