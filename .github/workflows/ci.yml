@@ -55,7 +55,7 @@ jobs:
             ADDED_LINES=$(git diff "origin/${{ github.base_ref }}...HEAD" -- "$f" \
               | grep -E '^\+' | grep -vE '^\+\+\+' \
               | iconv -f UTF-8 -t ASCII//TRANSLIT 2>/dev/null || true)
-            KEYWORDS=$(printf '%s\n' "$ADDED_LINES" | grep -ioE "$PATTERN" | sort -u | paste -sd ',' -)
+            KEYWORDS=$(printf '%s\n' "$ADDED_LINES" | grep -ioE "$PATTERN" | sort -u | paste -sd ',' -) || true
             if [ -n "$KEYWORDS" ]; then
               echo "::error file=$f::Posible dato sensible o secreto detectado en lineas nuevas (palabras clave: $KEYWORDS). El valor no se imprime en el log; revisa el archivo manualmente."
               FOUND=1
