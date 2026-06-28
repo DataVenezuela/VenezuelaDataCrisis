@@ -253,3 +253,8 @@ CODEX.md
 GEMINI.md
 repomix-output.xml
 repomix-output.txt
+# agent-harness-kit
+.harness/harness.db
+.harness/harness.db-shm
+.harness/harness.db-wal
+.harness/current.md

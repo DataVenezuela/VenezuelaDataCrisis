@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: scrapers/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r scrapers/requirements.txt
+
+      - name: Run tests
+        run: python -m pytest scrapers/tests
+
+      - name: Block real data files
+        run: |
+          set -euo pipefail
+          FORBIDDEN=$(git diff --name-only --diff-filter=ACMR "origin/${{ github.base_ref }}...HEAD" | grep -iE '\.(csv|jsonl|pdf|db|sqlite|xlsx)$' || true)
+          if [ -n "$FORBIDDEN" ]; then
+            echo "::error::No se pueden subir archivos de datos reales (CONTRIBUTING.MD):"
+            echo "$FORBIDDEN"
+            exit 1
+          fi
+
+      - name: Security keyword scan (PII / secrets)
+        run: |
+          set -euo pipefail
+          # Archivos donde estas palabras son nombres de campo legitimos del
+          # propio pipeline de tokenizacion de PII, no datos filtrados.
+          ALLOWLIST='^(shared/hashing\.py|scrapers/sanitizers/pii_tokenizer\.py|scrapers/sanitizers/pii_redactor\.py|scrapers/normalizers/person\.py|scrapers/normalizers/text\.py|scrapers/normalizers/location\.py|scrapers/models/person\.py|scrapers/validators/quality\.py|scrapers/tests/test_pii_hmac_fields\.py|scrapers/tests/test_pii_hmac_unified\.py|scrapers/tests/test_person_hashing\.py|scrapers/tests/test_sanitizer\.py|scrapers/tests/test_entity_models\.py|scrapers/tests/test_quality\.py|scrapers/tests/test_run_pipeline\.py|scrapers/pipelines/run_pipeline\.py|\.github/workflows/ci\.yml)$'
+          # Patron solo ASCII; las lineas del diff se normalizan (tildes -> ASCII)
+          # antes de comparar, asi tambien se detecta "cedula", "telefono", etc.
+          PATTERN='cedula|telefono|password|secret|api_key|token'
+
+          FOUND=0
+          for f in $(git diff --name-only --diff-filter=ACMR "origin/${{ github.base_ref }}...HEAD" -- '*.py' '*.js' '*.ts' '*.json' '*.yaml' '*.yml'); do
+            if echo "$f" | grep -qE "$ALLOWLIST"; then
+              continue
+            fi
+            ADDED_LINES=$(git diff "origin/${{ github.base_ref }}...HEAD" -- "$f" \
+              | grep -E '^\+' | grep -vE '^\+\+\+' \
+              | iconv -f UTF-8 -t ASCII//TRANSLIT 2>/dev/null || true)
+            KEYWORDS=$(printf '%s\n' "$ADDED_LINES" | grep -ioE "$PATTERN" | sort -u | paste -sd ',' -) || true
+            if [ -n "$KEYWORDS" ]; then
+              echo "::error file=$f::Posible dato sensible o secreto detectado en lineas nuevas (palabras clave: $KEYWORDS). El valor no se imprime en el log; revisa el archivo manualmente."
+              FOUND=1
+            fi
+          done
+
+          if [ "$FOUND" -eq 1 ]; then
+            echo "Revisa CONTRIBUTING.MD (Reglas de seguridad obligatorias) antes de hacer commit."
+            exit 1
+          fi
