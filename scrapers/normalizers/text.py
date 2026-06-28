@@ -5,6 +5,7 @@ import re
 import unicodedata
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal, cast
 
 
 def normalize_text(text: str | None) -> str:
@@ -117,5 +118,5 @@ def normalize_unicode(text: str | None, form: str = "NFKC") -> str:
     """
     if not text:
         return ""
-    text = unicodedata.normalize(form, text)
-    return re.sub(r"\s+", " ", text).strip()
+    normalized = unicodedata.normalize(cast(Literal["NFC", "NFD", "NFKC", "NFKD"], form), text)
+    return re.sub(r"\s+", " ", normalized).strip()
