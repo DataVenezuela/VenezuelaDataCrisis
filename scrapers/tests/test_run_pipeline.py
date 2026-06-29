@@ -538,6 +538,41 @@ sources:
         assert summary["staging_sent"] == 0
         assert transport.posts == []
 
+    def test_unimplemented_parser_visible_in_summary(self, tmp_path: Path) -> None:
+        """Una fuente con parser no registrado aparece VISIBLE en el resumen.
+
+        No basta con el log.warning silencioso: la omision se contabiliza en
+        summary["errors"] (con el slug, el parser_asignado y la palabra
+        omitida) para que el operador la vea en el resumen del run.
+        """
+        dump = _make_synthetic_dump(tmp_path)
+        cfg = _make_demo_config(tmp_path, f"""
+project:
+  event_id: 8f14e45f-ceea-467e-bd5d-0a4f2e0c1a3a
+  default_country: Venezuela
+sources:
+  - id: fuente_sin_parser
+    name: Fuente sin parser concreto
+    type: manual_file
+    enabled: true
+    trust_tier: C
+    url: "{_yaml_url(dump)}"
+    refresh_minutes: 60
+    parser_asignado: parser_inexistente
+""")
+        transport = _StagingTransport()
+        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport):
+            summary = run_pipeline(config_path=cfg, output_dir=tmp_path / "out")
+        omissions = [
+            e for e in summary["errors"]
+            if "parser no implementado" in e and "omitida" in e
+        ]
+        assert len(omissions) == 1
+        assert "parser_inexistente" in omissions[0]
+        assert "fuente_sin_parser" in omissions[0]
+        # La omision tambien cuenta como error de staging (visibilidad numerica).
+        assert summary["staging_errors"] >= 1
+
     def test_fetch_error_does_not_crash_pipeline(self, tmp_path: Path, demo_config: Path) -> None:
         adapter = _mock_adapter()
         adapter.fetch_all.side_effect = RuntimeError("fetch agotado tras reintentos")

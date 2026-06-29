@@ -18,6 +18,7 @@ from unittest.mock import patch
 
 import httpx
 
+from scrapers.dedup import specs
 from scrapers.exporters.staging_exporter import (
     ExportResult,
     StagingConfig,
@@ -71,6 +72,27 @@ def _person(name: str, hmac: str | None = None, det: str | None = "detid123") ->
     }
 
 
+def _event() -> dict[str, Any]:
+    return {
+        "_entity_type": "Event",
+        "event_type": "earthquake",
+        "location_text": "Ciudad Demo, Estado Demo",
+        "date_iso": "2026-06-24T14:32:00Z",
+        "description": "Sismo demo reportado",
+        "fuente": "x",
+    }
+
+
+def _acopio() -> dict[str, Any]:
+    return {
+        "_entity_type": "AcopioCenter",
+        "name": "Centro de Acopio Demo",
+        "event_id": _EVENT_ID,
+        "location_text": "Ciudad Demo, Estado Demo",
+        "fuente": "x",
+    }
+
+
 # --- payload ----------------------------------------------------------------
 
 class TestPayload:
@@ -119,6 +141,57 @@ class TestPayload:
         )
         # dedup_hash None se serializa como JSON null.
         assert t.posts[0]["dedup_hash"] is None
+
+
+# --- fingerprint compartido Event/AcopioCenter (eficiencia, issue #125) ------
+
+class TestSharedFingerprint:
+    """Event/AcopioCenter: external_id y dedup_hash derivan del mismo fingerprint.
+
+    El fingerprint se calcula una sola vez en _build_payload; estos tests
+    verifican que los valores resultantes no cambian (siguen siendo el
+    fingerprint v1) y que ambas keys coinciden entre si.
+    """
+
+    def test_event_external_id_equals_dedup_hash(self) -> None:
+        t = _RecordingTransport()
+        _exporter(t).export_source([_event()], source_fetched_ats=["2026-06-24T15:00:00Z"])
+        body = t.posts[0]
+        assert body["external_id"] == body["dedup_hash"]
+
+    def test_event_external_id_is_fingerprint_v1(self) -> None:
+        rec = _event()
+        t = _RecordingTransport()
+        _exporter(t).export_source([rec], source_fetched_ats=["2026-06-24T15:00:00Z"])
+        body = t.posts[0]
+        expected = specs.event_dedup_key(rec)
+        assert body["external_id"] == expected
+        assert body["dedup_hash"] == expected
+
+    def test_acopio_external_id_equals_dedup_hash(self) -> None:
+        t = _RecordingTransport()
+        _exporter(t).export_source([_acopio()], source_fetched_ats=["2026-06-24T15:00:00Z"])
+        body = t.posts[0]
+        assert body["external_id"] == body["dedup_hash"]
+
+    def test_acopio_external_id_is_fingerprint_v1(self) -> None:
+        rec = _acopio()
+        t = _RecordingTransport()
+        _exporter(t).export_source([rec], source_fetched_ats=["2026-06-24T15:00:00Z"])
+        body = t.posts[0]
+        expected = specs.acopio_dedup_key(rec)
+        assert body["external_id"] == expected
+        assert body["dedup_hash"] == expected
+
+    def test_values_match_legacy_separate_computation(self) -> None:
+        """Equivalencia exacta con el computo separado previo (sin cambios)."""
+        for rec in (_event(), _acopio()):
+            entity_type = rec["_entity_type"]
+            t = _RecordingTransport()
+            _exporter(t).export_source([rec], source_fetched_ats=["2026-06-24T15:00:00Z"])
+            body = t.posts[0]
+            assert body["external_id"] == compute_external_id(rec, entity_type)
+            assert body["dedup_hash"] == specs.dedup_key(rec, entity_type)
 
 
 # --- idempotencia -----------------------------------------------------------

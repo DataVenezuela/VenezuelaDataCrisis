@@ -8,7 +8,7 @@ sources:
   - id: usgs_geojson_venezuela_region
     name: USGS GeoJSON región Venezuela
     type: api_json
-    enabled: true
+    enabled: false
     trust_tier: A
     url: "https://earthquake.usgs.gov/fdsnws/event/1/query?format=geojson&starttime=2026-06-24&minmagnitude=4&latitude=10.5&longitude=-66.9&maxradiuskm=800"
     refresh_minutes: 30
@@ -16,6 +16,7 @@ sources:
     required_keywords:
       - Venezuela
       - earthquake
+    notes: "Disabled until the geojson_earthquake parser is registered (see _get_parser)."
 
   - id: reliefweb_reports_venezuela_earthquake
     name: ReliefWeb reports Venezuela earthquake

@@ -434,7 +434,16 @@ def _run_source(
         # cada corrida (fuentes con parser_asignado no registrado).
         if hasattr(adapter, "close"):
             adapter.close()
-        return ExportResult()
+        # La omision queda VISIBLE en el summary del run (no solo en un
+        # log.warning silencioso): se contabiliza como error de fuente y
+        # fluye a summary["errors"] via all_errors, igual que el resto de
+        # errores no fatales de la fuente.
+        msg = (
+            f"parser no implementado: {source.parser_asignado} "
+            f"(fuente {source.id} omitida)"
+        )
+        all_errors.append(f"[{source.id}] {msg}")
+        return ExportResult(errors=[msg])
 
     # 3. Fetch
     # El close() va en finally: si fetch_all() lanza (ej. PlaywrightAdapter

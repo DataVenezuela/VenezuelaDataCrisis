@@ -160,11 +160,30 @@ class StagingExporter:
         clean = {k: v for k, v in rec.items() if not k.startswith("_")}
         spec = specs.spec_for_entity_type(entity_type)
         source_slug = self.config.source_slug if self.config is not None else ""
+
+        # Event/AcopioCenter: external_id y dedup_hash derivan ambos del mismo
+        # fingerprint v1, asi que se calcula UNA sola vez y se reusa (evita el
+        # doble computo: compute_external_id + specs.dedup_key). Person no
+        # comparte: external_id tiene fallbacks (cedula_hmac/content_hash) que
+        # no coinciden con dedup_key (deterministic_id), asi que se calcula por
+        # separado. Los valores resultantes no cambian.
+        if entity_type == "Event":
+            fingerprint = specs.event_dedup_key(rec)
+            external_id: str = fingerprint
+            dedup_hash: str | None = fingerprint
+        elif entity_type == "AcopioCenter":
+            fingerprint = specs.acopio_dedup_key(rec)
+            external_id = fingerprint
+            dedup_hash = fingerprint
+        else:
+            external_id = compute_external_id(rec, entity_type)
+            dedup_hash = specs.dedup_key(rec, entity_type)
+
         return {
             "run_id": self.run_id,
             "entity_type": _entity_type_slug(entity_type),
-            "external_id": compute_external_id(rec, entity_type),
-            "dedup_hash": specs.dedup_key(rec, entity_type),
+            "external_id": external_id,
+            "dedup_hash": dedup_hash,
             "dedup_version": spec.version,
             "block_keys": specs.block_keys(rec, entity_type),
             "content_hash": _content_hash(clean),
