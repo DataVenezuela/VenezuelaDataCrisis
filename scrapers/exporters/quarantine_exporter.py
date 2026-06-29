@@ -196,7 +196,9 @@ class QuarantineExporter:
             self._client = httpx.Client(
                 base_url=config.base_url,
                 headers={
-                    "Authorization": f"Bearer {config.api_key}",
+                    # El backend dataVenezuela autentica al scraper con x-api-key
+                    # (authenticatePartner), no con Bearer. Ver POST /api/quarantine.
+                    "x-api-key": config.api_key,
                     "User-Agent": USER_AGENT,
                     "Accept": "application/json",
                     "Content-Type": "application/json",

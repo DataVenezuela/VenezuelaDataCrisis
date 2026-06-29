@@ -71,6 +71,21 @@ def _exporter(transport: httpx.BaseTransport) -> QuarantineExporter:
     return QuarantineExporter(cfg, client=client, run_id="run-1")
 
 
+class TestAuthHeader:
+    def test_uses_x_api_key_not_bearer(self) -> None:
+        # El backend dataVenezuela autentica con x-api-key (authenticatePartner),
+        # no con Authorization: Bearer. El exporter debe enviarlo cuando construye
+        # su propio cliente (config presente, sin client inyectado).
+        cfg = QuarantineConfig(api_key="secret-key", base_url="https://backend.test")
+        exp = QuarantineExporter(cfg, run_id="run-1")
+        try:
+            assert exp._client is not None
+            assert exp._client.headers.get("x-api-key") == "secret-key"
+            assert "authorization" not in exp._client.headers
+        finally:
+            exp.close()
+
+
 def _record(
     reason_code: str = "invalid_schema",
     risk_level: str = "medium",
