@@ -44,7 +44,7 @@ class _RecordingTransport(httpx.BaseTransport):
         if path == "/api/aportes":
             self.posts.append(json.loads(request.content))
             return httpx.Response(self.aportes_status, json={"ok": True})
-        if path.startswith("/api/source_watermarks"):
+        if path.startswith("/api/source-watermarks"):
             if request.method == "GET":
                 self.watermark_gets.append(path)
                 return httpx.Response(404)
@@ -101,38 +101,38 @@ class TestPayload:
         _exporter(t).export_source([_person("Juan")], source_fetched_ats=["2026-06-24T15:00:00Z"])
         body = t.posts[0]
         required = {
-            "run_id", "entity_type", "external_id", "dedup_hash", "dedup_version",
-            "block_keys", "content_hash", "source_slug", "source_record_id",
-            "source_url", "parser_version", "normalizer_version", "data",
+            "runId", "entityType", "externalId", "dedupHash", "dedupVersion",
+            "blockKeys", "contentHash", "sourceSlug", "sourceRecordId",
+            "sourceUrl", "parserVersion", "normalizerVersion", "rawJson",
         }
         assert required.issubset(body.keys())
 
     def test_data_strips_internal_keys(self) -> None:
         t = _RecordingTransport()
         _exporter(t).export_source([_person("Juan")], source_fetched_ats=["2026-06-24T15:00:00Z"])
-        data = t.posts[0]["data"]
+        data = t.posts[0]["rawJson"]
         assert all(not k.startswith("_") for k in data)
         assert "full_name" in data
 
     def test_entity_type_is_slug(self) -> None:
         t = _RecordingTransport()
         _exporter(t).export_source([_person("Juan")], source_fetched_ats=["2026-06-24T15:00:00Z"])
-        assert t.posts[0]["entity_type"] == "person"
+        assert t.posts[0]["entityType"] == "person"
 
     def test_run_id_propagated(self) -> None:
         t = _RecordingTransport()
         _exporter(t).export_source([_person("Juan")], source_fetched_ats=["2026-06-24T15:00:00Z"])
-        assert t.posts[0]["run_id"] == "run-1"
+        assert t.posts[0]["runId"] == "run-1"
 
     def test_dedup_version_person(self) -> None:
         t = _RecordingTransport()
         _exporter(t).export_source([_person("Juan")], source_fetched_ats=["2026-06-24T15:00:00Z"])
-        assert t.posts[0]["dedup_version"] == "person-detid-v1"
+        assert t.posts[0]["dedupVersion"] == "person-detid-v1"
 
     def test_content_hash_has_sha256_prefix(self) -> None:
         t = _RecordingTransport()
         _exporter(t).export_source([_person("Juan")], source_fetched_ats=["2026-06-24T15:00:00Z"])
-        assert t.posts[0]["content_hash"].startswith("sha256:")
+        assert t.posts[0]["contentHash"].startswith("sha256:")
 
     def test_dedup_hash_null_when_no_deterministic_id(self) -> None:
         t = _RecordingTransport()
@@ -140,7 +140,14 @@ class TestPayload:
             [_person("Juan", det=None)], source_fetched_ats=["2026-06-24T15:00:00Z"]
         )
         # dedup_hash None se serializa como JSON null.
-        assert t.posts[0]["dedup_hash"] is None
+        assert t.posts[0]["dedupHash"] is None
+
+    def test_entity_type_acopio_uses_acopio_slug(self) -> None:
+        # Verifica que AcopioCenter mapea a "acopio" (no "acopio_center")
+        # porque el Zod schema de dataVenezuela espera "event"|"acopio"|"person"
+        t = _RecordingTransport()
+        _exporter(t).export_source([_acopio()], source_fetched_ats=["2026-06-24T15:00:00Z"])
+        assert t.posts[0]["entityType"] == "acopio"
 
 
 # --- fingerprint compartido Event/AcopioCenter (eficiencia, issue #125) ------
@@ -157,7 +164,7 @@ class TestSharedFingerprint:
         t = _RecordingTransport()
         _exporter(t).export_source([_event()], source_fetched_ats=["2026-06-24T15:00:00Z"])
         body = t.posts[0]
-        assert body["external_id"] == body["dedup_hash"]
+        assert body["externalId"] == body["dedupHash"]
 
     def test_event_external_id_is_fingerprint_v1(self) -> None:
         rec = _event()
@@ -165,14 +172,14 @@ class TestSharedFingerprint:
         _exporter(t).export_source([rec], source_fetched_ats=["2026-06-24T15:00:00Z"])
         body = t.posts[0]
         expected = specs.event_dedup_key(rec)
-        assert body["external_id"] == expected
-        assert body["dedup_hash"] == expected
+        assert body["externalId"] == expected
+        assert body["dedupHash"] == expected
 
     def test_acopio_external_id_equals_dedup_hash(self) -> None:
         t = _RecordingTransport()
         _exporter(t).export_source([_acopio()], source_fetched_ats=["2026-06-24T15:00:00Z"])
         body = t.posts[0]
-        assert body["external_id"] == body["dedup_hash"]
+        assert body["externalId"] == body["dedupHash"]
 
     def test_acopio_external_id_is_fingerprint_v1(self) -> None:
         rec = _acopio()
@@ -180,8 +187,8 @@ class TestSharedFingerprint:
         _exporter(t).export_source([rec], source_fetched_ats=["2026-06-24T15:00:00Z"])
         body = t.posts[0]
         expected = specs.acopio_dedup_key(rec)
-        assert body["external_id"] == expected
-        assert body["dedup_hash"] == expected
+        assert body["externalId"] == expected
+        assert body["dedupHash"] == expected
 
     def test_values_match_legacy_separate_computation(self) -> None:
         """Equivalencia exacta con el computo separado previo (sin cambios)."""
@@ -190,8 +197,8 @@ class TestSharedFingerprint:
             t = _RecordingTransport()
             _exporter(t).export_source([rec], source_fetched_ats=["2026-06-24T15:00:00Z"])
             body = t.posts[0]
-            assert body["external_id"] == compute_external_id(rec, entity_type)
-            assert body["dedup_hash"] == specs.dedup_key(rec, entity_type)
+            assert body["externalId"] == compute_external_id(rec, entity_type)
+            assert body["dedupHash"] == specs.dedup_key(rec, entity_type)
 
 
 # --- idempotencia -----------------------------------------------------------
@@ -201,7 +208,7 @@ class TestIdempotency:
         t1, t2 = _RecordingTransport(), _RecordingTransport()
         _exporter(t1).export_source([_person("Juan")], source_fetched_ats=["2026-06-24T15:00:00Z"])
         _exporter(t2).export_source([_person("Juan")], source_fetched_ats=["2026-06-24T15:00:00Z"])
-        assert t1.posts[0]["external_id"] == t2.posts[0]["external_id"]
+        assert t1.posts[0]["externalId"] == t2.posts[0]["externalId"]
 
     def test_person_external_id_is_deterministic_id(self) -> None:
         rec = _person("Juan", det="abc999")
@@ -226,13 +233,13 @@ class TestBlockKeys:
     def test_person_with_hmac_has_ced_block_key(self) -> None:
         t = _RecordingTransport()
         _exporter(t).export_source([_person("Juan", hmac="abc")], source_fetched_ats=["2026-06-24T15:00:00Z"])
-        keys = t.posts[0]["block_keys"]
+        keys = t.posts[0]["blockKeys"]
         assert any(k.startswith(f"ced:{_EVENT_ID}:abc") for k in keys)
 
     def test_person_without_hmac_only_phonetic_block_key(self) -> None:
         t = _RecordingTransport()
         _exporter(t).export_source([_person("Juan")], source_fetched_ats=["2026-06-24T15:00:00Z"])
-        keys = t.posts[0]["block_keys"]
+        keys = t.posts[0]["blockKeys"]
         assert all(not k.startswith("ced:") for k in keys)
         assert any(k.startswith("phon:") for k in keys)
 
@@ -247,8 +254,7 @@ class TestWatermark:
             source_fetched_ats=["2026-06-24T15:00:00Z", "2026-06-24T16:00:00Z"],
         )
         assert t.watermark_puts
-        assert t.watermark_puts[-1]["watermark_at"] == "2026-06-24T16:00:00Z"
-        assert t.watermark_puts[-1]["source_slug"] == "demo"
+        assert t.watermark_puts[-1]["watermarkAt"] == "2026-06-24T16:00:00Z"
 
     def test_watermark_not_set_on_post_failure(self) -> None:
         t = _RecordingTransport(aportes_status=500)
@@ -301,7 +307,7 @@ class _FlakyTransport(httpx.BaseTransport):
             status = self.aportes_sequence[idx]
             self.attempts += 1
             return httpx.Response(status, json={"ok": True})
-        if path.startswith("/api/source_watermarks"):
+        if path.startswith("/api/source-watermarks"):
             if request.method == "GET":
                 return httpx.Response(404)
             self.watermark_puts.append(json.loads(request.content))
@@ -359,7 +365,7 @@ class TestSourceErrorsWatermark:
             source_errors=[],
         )
         assert t.watermark_puts
-        assert t.watermark_puts[-1]["watermark_at"] == "2026-06-24T16:00:00Z"
+        assert t.watermark_puts[-1]["watermarkAt"] == "2026-06-24T16:00:00Z"
 
 
 # --- dry-run ----------------------------------------------------------------

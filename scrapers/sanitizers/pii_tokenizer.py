@@ -16,17 +16,16 @@ CONTRATO DE CAMPOS (no malinterpretar):
 from __future__ import annotations
 
 import os
-import re
 from collections.abc import Mapping
 from typing import Any
 
 from shared.hashing import hmac_hex
+from shared.helpers import mask_last4
 
 
 HMAC_PREFIX = "hmac_sha256:"
 DEFAULT_EXPORT_SALT_ENV = "PII_SALT"
 
-_DIGITS_RE = re.compile(r"\D+")
 _CEDULA_INPUT_KEYS = ("cedula", "cédula", "identity_document", "documento_identidad")
 _TELEFONO_INPUT_KEYS = ("telefono", "teléfono", "phone", "mobile", "celular")
 
@@ -67,17 +66,6 @@ def _required_salt(secret_env: str = DEFAULT_EXPORT_SALT_ENV) -> str:
     return salt
 
 
-def _digits_only(value: str) -> str:
-    return _DIGITS_RE.sub("", value)
-
-
-def _masked_last4(value: str) -> str:
-    digits = _digits_only(value)
-    if not digits:
-        raise ValueError("No hay dígitos para generar máscara PII")
-    return f"****{digits[-4:]}"
-
-
 def mask_cedula(cedula: str, salt: str) -> tuple[str, str]:
     """Devuelve (`cedula_hmac`, `cedula_masked`) sin conservar cédula cruda.
 
@@ -88,7 +76,7 @@ def mask_cedula(cedula: str, salt: str) -> tuple[str, str]:
     digest = hmac_hex(cedula, salt)
     if digest is None:
         raise ValueError("No hay dígitos de cédula para tokenizar")
-    return digest, _masked_last4(cedula)
+    return digest, mask_last4(cedula)
 
 
 def mask_telefono(telefono: str, salt: str) -> tuple[str, str]:
@@ -99,7 +87,7 @@ def mask_telefono(telefono: str, salt: str) -> tuple[str, str]:
     digest = hmac_hex(telefono, salt)
     if digest is None:
         raise ValueError("No hay dígitos de teléfono para tokenizar")
-    return digest, _masked_last4(telefono)
+    return digest, mask_last4(telefono)
 
 
 def tokenize_pii_fields(

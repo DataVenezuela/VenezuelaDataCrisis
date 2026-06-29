@@ -31,7 +31,7 @@ log = logging.getLogger(__name__)
 
 _DEFAULT_WATERMARK = "1970-01-01T00:00:00Z"
 _APORTES_PATH = "/api/aportes"
-_WATERMARKS_PATH = "/api/source_watermarks"
+_WATERMARKS_PATH = "/api/source-watermarks"
 
 # Status HTTP transitorios que ameritan reintento del POST a /api/aportes.
 # Definido localmente (no se mueve a _shared para no chocar con PR #61).
@@ -144,7 +144,7 @@ class StagingExporter:
             self._client = httpx.Client(
                 base_url=config.base_url,
                 headers={
-                    "Authorization": f"Bearer {config.api_key}",
+                    "x-api-key": config.api_key,
                     "User-Agent": USER_AGENT,
                     "Accept": "application/json",
                     "Content-Type": "application/json",
@@ -180,19 +180,19 @@ class StagingExporter:
             dedup_hash = specs.dedup_key(rec, entity_type)
 
         return {
-            "run_id": self.run_id,
-            "entity_type": _entity_type_slug(entity_type),
-            "external_id": external_id,
-            "dedup_hash": dedup_hash,
-            "dedup_version": spec.version,
-            "block_keys": specs.block_keys(rec, entity_type),
-            "content_hash": _content_hash(clean),
-            "source_slug": source_slug,
-            "source_record_id": _opt_str(rec.get("_source_record_id")),
-            "source_url": _opt_str(rec.get("_source_url")),
-            "parser_version": _opt_str(rec.get("_parser_version")),
-            "normalizer_version": _opt_str(rec.get("_normalizer_version")),
-            "data": clean,
+            "runId": self.run_id,
+            "entityType": _entity_type_slug(entity_type),
+            "externalId": external_id,
+            "dedupHash": dedup_hash,
+            "dedupVersion": spec.version,
+            "blockKeys": specs.block_keys(rec, entity_type),
+            "contentHash": _content_hash(clean),
+            "sourceSlug": source_slug,
+            "sourceRecordId": _opt_str(rec.get("_source_record_id")),
+            "sourceUrl": _opt_str(rec.get("_source_url")),
+            "parserVersion": _opt_str(rec.get("_parser_version")),
+            "normalizerVersion": _opt_str(rec.get("_normalizer_version")),
+            "rawJson": clean,
         }
 
     # -- watermark ------------------------------------------------------------
@@ -204,16 +204,13 @@ class StagingExporter:
             return _DEFAULT_WATERMARK
         resp.raise_for_status()
         payload = resp.json()
-        return str(payload.get("watermark_at", _DEFAULT_WATERMARK))
+        return str(payload.get("watermarkAt", _DEFAULT_WATERMARK))
 
     def _set_watermark(self, watermark_at: str) -> bool:
         assert self._client is not None and self.config is not None
         resp = self._client.put(
-            _WATERMARKS_PATH,
-            json={
-                "source_slug": self.config.source_slug,
-                "watermark_at": watermark_at,
-            },
+            f"{_WATERMARKS_PATH}/{self.config.source_slug}",
+            json={"watermarkAt": watermark_at},
         )
         return resp.status_code in (200, 201)
 
@@ -277,9 +274,9 @@ class StagingExporter:
             for rec in records:
                 payload = self._build_payload(rec)
                 log.info(
-                    "DRY-RUN staging_exporter: enviaria entity_type=%s external_id=%s",
-                    payload["entity_type"],
-                    payload["external_id"],
+                    "DRY-RUN staging_exporter: enviaria entityType=%s externalId=%s",
+                    payload["entityType"],
+                    payload["externalId"],
                 )
             return result
 
@@ -303,7 +300,7 @@ class StagingExporter:
             else:
                 result.errors.append(
                     f"{_APORTES_PATH} status {resp.status_code} "
-                    f"para external_id={payload['external_id']}"
+                    f"para externalId={payload['externalId']}"
                 )
 
         # El watermark solo avanza si no hubo NINGUN error: ni de POST/PUT ni
@@ -344,10 +341,9 @@ def _opt_str(value: object) -> str | None:
 # aportes.entity_type.
 _ENTITY_TYPE_SLUGS = {
     "Event": "event",
-    "AcopioCenter": "acopio_center",
+    "AcopioCenter": "acopio",   # Zod enum: "event" | "acopio" | "person"
     "Person": "person",
 }
-
 
 def _entity_type_slug(entity_type: str) -> str:
     return _ENTITY_TYPE_SLUGS.get(entity_type, entity_type.lower())

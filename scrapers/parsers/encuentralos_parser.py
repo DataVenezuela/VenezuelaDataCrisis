@@ -57,8 +57,8 @@ from typing import Any
 from scrapers.adapters.base import RawContent
 from scrapers.models import Person
 from scrapers.normalizers import derive_is_minor, normalize_location, normalize_proper_name
-from scrapers.sanitizers.pii_tokenizer import _masked_last4
 from shared.hashing import identity_token
+from shared.helpers import mask_last4
 
 log = logging.getLogger(__name__)
 
@@ -100,7 +100,7 @@ def _map_status(raw_status: str | None) -> str:
 def _mask_cedula(raw: str) -> str:
     """Devuelve "****XXXX" con los últimos 4 dígitos de la cédula."""
     try:
-        return _masked_last4(raw)
+        return mask_last4(raw)
     except ValueError:
         return "****????"
 
