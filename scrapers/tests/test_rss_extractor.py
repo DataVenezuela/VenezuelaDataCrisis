@@ -127,6 +127,22 @@ def test_atom_link_skips_href_less_alternate() -> None:
     assert items[0][1].endswith("https://example.test/atom/self")
 
 
+def test_atom_without_namespace_is_parsed_as_fallback() -> None:
+    # Feed Atom no-estándar (sin xmlns); se acepta como red de seguridad (#120).
+    atom = (
+        "<feed>"
+        "<entry>"
+        "<title>Sin ns</title>"
+        "<summary>Persona en Táchira</summary>"
+        '<link href="https://example.test/nons/1"/>'
+        "</entry></feed>"
+    )
+
+    items = extract_rss_items(atom)
+
+    assert items == [("Sin ns", "Sin ns Persona en Táchira https://example.test/nons/1")]
+
+
 def test_unknown_format_falls_back_to_full_text() -> None:
     other = '<feed xmlns="http://example.com/otro"><node>hola mundo</node></feed>'
 
