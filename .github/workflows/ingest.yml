@@ -80,6 +80,9 @@ jobs:
         env:
           PII_SALT: ${{ secrets.PII_HMAC_SECRET }}
           PII_HMAC_SECRET: ${{ secrets.PII_HMAC_SECRET }}
+          STAGING_API_KEY: ${{ secrets.STAGING_API_KEY }}
+          STAGING_BASE_URL: ${{ secrets.STAGING_BASE_URL }}
+          STAGING_SOURCE_SLUG: ${{ secrets.STAGING_SOURCE_SLUG }}
         run: |
           CONFIG="${{ inputs.config || 'scrapers/config/sources.venezuela.starter.yaml' }}"
           python -m scrapers.cli ingest \
