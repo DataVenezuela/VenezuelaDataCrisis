@@ -64,7 +64,7 @@ class _StagingTransport(httpx.BaseTransport):
         if path == "/api/aportes":
             body = json.loads(request.content)
             self.posts.append(body)
-            external_id = body.get("external_id")
+            external_id = body.get("externalId")
             if external_id in self._seen_external_ids:
                 return httpx.Response(409, json={"duplicate": True})
             # Solo se marca como visto si el envio fue exitoso: un status de
@@ -72,7 +72,7 @@ class _StagingTransport(httpx.BaseTransport):
             if self.aportes_status in (200, 201):
                 self._seen_external_ids.add(external_id)
             return httpx.Response(self.aportes_status, json={"ok": True})
-        if path.startswith("/api/source_watermarks"):
+        if path.startswith("/api/source-watermarks"):
             if request.method == "GET":
                 return httpx.Response(404)
             self.watermark_puts.append(json.loads(request.content))
@@ -157,7 +157,7 @@ def _encuentralos_raw(records: list[dict]) -> RawContent:
         http_status=200,
         content_type="application/json",
         content_hash="sha256:abc",
-        raw_content={"data": records, "total": len(records)},
+        raw_content={"rawJson": records, "total": len(records)},
         page=1,
         total_pages=1,
         offset=0,
@@ -306,7 +306,7 @@ class TestStagingSend:
         ):
             run_pipeline(config_path=demo_config, output_dir=tmp_path / "out")
         for post in transport.posts:
-            assert "_entity_type" not in post["data"]
+            assert "_entity_type" not in post["rawJson"]
 
     def test_confidence_score_in_range(self, tmp_path: Path, demo_config: Path) -> None:
         transport = _StagingTransport()
@@ -317,7 +317,7 @@ class TestStagingSend:
         ):
             run_pipeline(config_path=demo_config, output_dir=tmp_path / "out")
         for post in transport.posts:
-            score = post["data"].get("confidence_score", -1)
+            score = post["rawJson"].get("confidence_score", -1)
             assert 0.0 <= score <= 1.0
 
 
@@ -336,7 +336,7 @@ class TestIdempotency:
             ):
                 run_pipeline(config_path=demo_config, output_dir=tmp_path / "out")
         # Cuatro POSTs en total (2 por corrida) pero solo 2 external_id unicos.
-        unique = {p["external_id"] for p in transport.posts}
+        unique = {p["externalId"] for p in transport.posts}
         assert len(transport.posts) == 4
         assert len(unique) == 2
 
@@ -390,9 +390,9 @@ class TestPersonBlockKeysEndToEnd:
             "scrapers.pipelines.run_pipeline._get_parser", return_value=_mock_parser(persons)
         ):
             run_pipeline(config_path=demo_config, output_dir=tmp_path / "out")
-        by_name = {p["data"]["full_name"]: p for p in transport.posts}
-        juan_keys = by_name["JUAN DEMO PEREZ"]["block_keys"]
-        ana_keys = by_name["ANA DEMO GARCIA"]["block_keys"]
+        by_name = {p["rawJson"]["full_name"]: p for p in transport.posts}
+        juan_keys = by_name["JUAN DEMO PEREZ"]["blockKeys"]
+        ana_keys = by_name["ANA DEMO GARCIA"]["blockKeys"]
         assert any(k.startswith(f"ced:{_EVENT_ID}:hmac-abc") for k in juan_keys)
         assert all(not k.startswith("ced:") for k in ana_keys)
 
@@ -433,7 +433,7 @@ class TestWatermarkEndToEnd:
         ):
             run_pipeline(config_path=demo_config, output_dir=tmp_path / "out")
         assert transport.watermark_puts
-        assert transport.watermark_puts[-1]["watermark_at"] == "2026-06-24T15:30:00Z"
+        assert transport.watermark_puts[-1]["watermarkAt"] == "2026-06-24T15:30:00Z"
 
     def test_watermark_not_advanced_on_failure(self, tmp_path: Path, demo_config: Path) -> None:
         transport = _StagingTransport(aportes_status=500)
@@ -639,7 +639,7 @@ class TestMinorProtectionEndToEnd:
         ):
             run_pipeline(config_path=demo_config, output_dir=tmp_path / "out")
         assert len(transport.posts) == 1
-        data = transport.posts[0]["data"]
+        data = transport.posts[0]["rawJson"]
         assert data["foto"] is None
         assert data["cedula_masked"] is None
         assert data["last_known_location"] == "Lara"
