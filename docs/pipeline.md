@@ -27,7 +27,7 @@ Claves de dedup pre-calculadas (dedup_hash, block_keys)
 │  inmutable, trazable        │     │  no redactable, etc.  │
 └─────────────────────────────┘     └──────────────────────┘
       ↓
-Staging exporter → POST /api/v1/dedup/* → aportes (Supabase)
+Staging exporter → POST /api/aportes → aportes (Supabase)
       ↓  consolidation job (cada 20 min)
 Canonical: persons / events / acopio_centers
       ↓  build job (cada 30 min)
@@ -57,8 +57,11 @@ contenido para `content_hash`, backoff exponencial con jitter) viven en
 
 | Parser | Módulo | Estado |
 |--------|--------|--------|
-| `encuentralos` | `scrapers/parsers/encuentralos_parser.py` | ⏳ Pendiente |
-| Fallback genérico | `_TextFallbackParser` (interno) | ✅ Para text/html/rss |
+| `encuentralos` | `scrapers/parsers/encuentralos_parser.py` | ✅ Implementado |
+
+Si una fuente no tiene parser concreto asignado, `_get_parser` loguea un
+warning y la fuente se omite (devuelve `None`). No hay parser de fallback
+genérico: el `_TextFallbackParser` fue eliminado en #81.
 
 ### Ejecución
 
@@ -83,7 +86,9 @@ python -m scrapers.cli run --config scrapers/config/sources.yaml --output scrape
 
 ### Tests
 
-28 tests de integración offline en `scrapers/tests/test_run_pipeline.py`.
+Tests de integración offline en `scrapers/tests/test_run_pipeline.py`. Ninguno
+hace red real: el destino staging (`/api/aportes`) se intercepta con
+`httpx.BaseTransport` inyectado en el `StagingExporter`.
 
 ---
 
@@ -114,11 +119,11 @@ flowchart TD
     D --> E[Entidades tipadas]
     E --> F[PII Sanitizer]
     F --> G[Normalizer]
-    G --> H[Dedup Engine]
+    G --> H[Claves de dedup precalculadas]
     H --> I[Technical Validator]
-    I --> J[JSONL Export]
-    J --> K[DB / API]
-    K --> L[Verification]
+    I --> J[Staging exporter POST /api/aportes]
+    J --> K[aportes Supabase]
+    K --> L[Consolidation / Verification]
 ```
 
 ---
@@ -465,9 +470,9 @@ Solo el valor explícito `true` activa protección — `None`/`false` no
 disparan ninguna reducción, porque ausencia de edad no implica minoría de
 edad.
 
-Cuando `is_minor=true`, antes de exportar a `persons.jsonl`
+Cuando `is_minor=true`, antes de enviar el aporte a staging
 (`scrapers.sanitizers.minor_protection.protect_minor_fields`, ejecutado como
-etapa propia del pipeline justo antes del export):
+etapa propia del pipeline justo antes del staging exporter):
 
 * `foto` se anula (`null`) — una foto es directamente identificable.
 * `cedula_masked` se anula (`null`) — deja de mostrarse la cédula parcial en
@@ -616,15 +621,32 @@ El matching necesita texto uniforme. `"JOSE LUIS"` y `"José Luis"` deben ser el
 
 ## Capa 4 — Staging exporter (Issue #81)
 
-Lee las entidades procesadas y hace `POST /api/v1/dedup/*` a `dataVenezuela`.
+`scrapers/exporters/staging_exporter.py` lee las entidades procesadas (un dict
+por registro, post-PII, post-score, post-protección de menores) y hace un
+`POST /api/aportes` por registro a `dataVenezuela`.
 
 Responsabilidades del exporter:
-- Convertir `trust_tier` A/B/C/D → 1/2/3 (la BD usa enteros)
-- Enviar primero el Event si la entidad es Person o AcopioCenter (FK obligatoria)
-- Manejar reintentos y backoff en caso de error de red
-- Avanzar el watermark por fuente solo cuando todos los registros de esa fuente llegaron exitosamente
+- Construir el payload del aporte usando los contratos de
+  `scrapers/dedup/specs.py`: `entity_type`, `external_id`, `dedup_hash`,
+  `dedup_version`, `block_keys`, `content_hash`, `run_id`, `source_slug` y
+  `data` (el record de negocio sin claves internas con prefijo `_`).
+- `external_id` es determinista (fingerprint v1 para Event/AcopioCenter,
+  `deterministic_id` para Person). El backend hace upsert por `external_id`,
+  así que re-correr la misma fuente no duplica (idempotencia).
+- Clasificar la respuesta: 200/201 → enviado, 409 → duplicado, cualquier otro
+  status o error de red → error acumulado (nunca relanza, resiliencia por
+  registro).
+- Avanzar el watermark de la fuente (`PUT /api/source_watermarks`) a
+  `max(fetched_at)` solo cuando todos los POST de esa fuente terminaron en
+  200/201. Si cualquiera falla, el watermark no cambia.
 
-El exporter no toma decisiones de dedup. Su única responsabilidad es persistir en staging.
+Modo dry-run silencioso: si falta cualquiera de `STAGING_API_KEY`,
+`STAGING_BASE_URL` o `STAGING_SOURCE_SLUG`, el exporter queda deshabilitado, no
+abre cliente HTTP (cero red), loguea a INFO lo que enviaría y termina con
+`staging_sent=0` sin error.
+
+El exporter no toma decisiones de dedup. Su única responsabilidad es persistir
+en staging; el dedup vive en el consolidation job (#82).
 
 ---
 
@@ -735,67 +757,45 @@ Son responsabilidades distintas.
 
 ---
 
-## 10. Export JSONL
+## 10. Staging (POST /api/aportes)
 
-El export genera archivos JSONL listos para DB/API.
+El export a JSONL en disco fue eliminado en #81. El destino final es la tabla
+`aportes` de dataVenezuela vía `POST /api/aportes` (ver "Capa 4 — Staging
+exporter"). Cada aporte es un objeto JSON con `external_id` determinista para
+idempotencia.
 
-Cada línea debe ser un JSON válido.
-
-Ejemplo:
-
-```json
-{"person_record_id":"uuid-v4","event_id":"uuid-v4","full_name":"JOSE PEREZ"}
-{"person_record_id":"uuid-v4","event_id":"uuid-v4","full_name":"MARIA GOMEZ"}
-```
-
-No se debe exportar un array completo.
-
-Incorrecto:
+Ejemplo de payload (un POST por registro):
 
 ```json
-[
-  {"person_record_id": "uuid-v4"},
-  {"person_record_id": "uuid-v4"}
-]
-```
-
-Correcto:
-
-```json
-{"person_record_id": "uuid-v4"}
-{"person_record_id": "uuid-v4"}
+{
+  "run_id": "uuid-v4",
+  "entity_type": "person",
+  "external_id": "deterministico-16-hex-o-sha256",
+  "dedup_hash": "deterministico",
+  "dedup_version": "person-detid-v1",
+  "block_keys": ["ced:uuid-v4:hmac", "phon:uuid-v4:lara:JN"],
+  "content_hash": "sha256-hex",
+  "source_slug": "encuentralos",
+  "data": {"full_name": "JOSE PEREZ", "event_id": "uuid-v4"}
+}
 ```
 
 ---
 
-## Archivos de salida recomendados
+## Reglas del aporte enviado a staging
 
-```text
-events.jsonl
-persons.jsonl
-person_notes.jsonl
-person_sources.jsonl
-person_photos.jsonl
-acopio_centers.jsonl
-dedup_candidates.jsonl
-```
+Cada aporte debe cumplir:
 
----
-
-## Reglas del export
-
-Cada export debe cumplir:
-
-1. UTF-8.
-2. Una entidad por línea.
-3. JSON válido por línea.
+1. UTF-8, JSON válido.
+2. Un POST por registro.
+3. `external_id` determinista (idempotencia por upsert).
 4. Campos requeridos presentes.
 5. Campos desconocidos como `null`.
 6. Fechas en UTC ISO 8601.
 7. IDs como UUID v4.
 8. Enums controlados.
-9. Sin PII en claro.
-10. Trazabilidad hacia fuente.
+9. Sin PII en claro (`data` ya viene redactado).
+10. Trazabilidad hacia fuente (`source_slug`).
 
 ---
 
@@ -1040,7 +1040,8 @@ python -m scrapers.cli validate --config scrapers/config/sources.demo.yaml
 | PII HMAC (`shared/hashing.py`) | ✅ |
 | Normalización (texto, fechas, ubicaciones, NLP) | ✅ |
 | Modelos Pydantic (Person/AcopioCenter/Event) | ⏳ fix #85 pendiente |
-| Staging exporter | ❌ Issue #81 |
+| Staging exporter (`POST /api/aportes`) | ✅ Issue #81 |
+| Dedup specs + fingerprint v1 | ✅ Issue #81 |
 | Raw artifact store (R2) | ❌ bloqueado por #81 |
 | Quarantine DB | ❌ bloqueado por #81 |
 | Watermark por fuente | ❌ Issue #57, bloqueado por #81 |

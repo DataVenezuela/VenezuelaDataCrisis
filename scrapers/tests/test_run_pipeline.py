@@ -1,33 +1,22 @@
 """
 scrapers/tests/test_run_pipeline.py
 =====================================
-Tests de integración offline del orquestador ``run_pipeline``.
+Tests de integracion offline del orquestador ``run_pipeline``.
 
 Estrategia
 ----------
 Todos los tests son 100% offline: ninguno hace llamadas de red.
-Las fuentes de red (api_json, html_static) se mockean inyectando adapters
-falsos en el registry del pipeline vía monkeypatch.  La fuente demo (manual_file)
-se construye íntegramente en ``tmp_path`` mediante el fixture ``demo_config``
-— sin leer ningún archivo del repo.
+- Las fuentes de red (api_json) se mockean inyectando adapters/parsers
+  falsos en el registry del pipeline via monkeypatch.
+- La fuente demo (manual_file) se construye en ``tmp_path``.
+- El destino staging (/api/aportes) se intercepta con un
+  ``_StagingTransport`` (httpx.BaseTransport) inyectado en el StagingExporter
+  que construye run_pipeline, parcheando ``StagingExporter`` por una factory
+  de test y exportando las STAGING_* via patch.dict(os.environ).
 
-Cobertura
-----------
-- Pipeline completo con fuente demo (manual_file → text parser)
-- Summary dict tiene las keys que espera cli.py
-- sources_processed se incrementa por fuente exitosa
-- documents_exported refleja registros reales en JSONL
-- Pipeline con fuente deshabilitada (enabled=false) la omite
-- Error en una fuente no tumba las demás
-- Adapter no implementado para un type desconocido no cuenta como error fatal
-- Límite por fuente (limit=N) se respeta
-- JSONL producido es parseable como JSON línea a línea
-- Campos obligatorios presentes en cada registro exportado
-- confidence_score entre 0.0 y 1.0
-- _entity_type nunca aparece en el JSONL exportado
-- Con PII_SALT configurado, tokenize_pii_fields se aplica (integración)
-- fuente api_json con ApiAdapter mockeado produce Person via EncuentralosParser
-- Fuente con error fatal en fetch no rompe el pipeline completo
+El JSONL en disco desaparecio: ya no se leen persons.jsonl ni se asserta
+documents_exported. Se asserta sobre los POSTs capturados y sobre
+summary['staging_sent'].
 """
 
 from __future__ import annotations
@@ -35,49 +24,103 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 
 from scrapers.adapters.base import RawContent
+from scrapers.exporters.staging_exporter import StagingConfig, StagingExporter
 from scrapers.models import Person
 from scrapers.models.source import SourceConfig
+from scrapers.pipelines import run_pipeline as rp
 from scrapers.pipelines.run_pipeline import _get_adapter, run_pipeline
 
 # ---------------------------------------------------------------------------
 # Constantes y helpers
 # ---------------------------------------------------------------------------
 
-# Campos que todo registro exportado debe tener (Person mínimo)
-_REQUIRED_PERSON_KEYS = {
-    "full_name", "fuente", "status", "trust_tier",
-    "confidence_score", "verification_status", "event_id",
-}
-
 _EVENT_ID = "8f14e45f-ceea-467e-bd5d-0a4f2e0c1a3a"
 
+_STAGING_ENV = {
+    "STAGING_API_KEY": "test-key",
+    "STAGING_BASE_URL": "https://staging.test",
+    "STAGING_SOURCE_SLUG": "demo-source",
+}
 
-def _read_jsonl(path: Path) -> list[dict]:
-    if not path.exists():
-        return []
-    lines = path.read_text(encoding="utf-8").strip().splitlines()
-    return [json.loads(line) for line in lines if line.strip()]
+
+class _StagingTransport(httpx.BaseTransport):
+    """Intercepta POSTs a /api/aportes y el watermark, idempotente por external_id."""
+
+    def __init__(self, aportes_status: int = 201) -> None:
+        self.aportes_status = aportes_status
+        self.posts: list[dict[str, Any]] = []
+        self._seen_external_ids: set[str] = set()
+        self.watermark_puts: list[dict[str, Any]] = []
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/api/aportes":
+            body = json.loads(request.content)
+            self.posts.append(body)
+            external_id = body.get("external_id")
+            if external_id in self._seen_external_ids:
+                return httpx.Response(409, json={"duplicate": True})
+            # Solo se marca como visto si el envio fue exitoso: un status de
+            # error (p.ej. 500) puede reintentarse y debe seguir fallando.
+            if self.aportes_status in (200, 201):
+                self._seen_external_ids.add(external_id)
+            return httpx.Response(self.aportes_status, json={"ok": True})
+        if path.startswith("/api/source_watermarks"):
+            if request.method == "GET":
+                return httpx.Response(404)
+            self.watermark_puts.append(json.loads(request.content))
+            return httpx.Response(200, json={"ok": True})
+        return httpx.Response(404)
+
+
+class _NoRealNetworkTransport(httpx.BaseTransport):
+    """Guard: cualquier request real falla el test."""
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"red real prohibida en tests: {request.url}")
+
+
+def _patch_exporter(transport: httpx.BaseTransport) -> Any:
+    """Factory que reemplaza StagingExporter por uno con client mockeado.
+
+    run_pipeline llama ``StagingExporter(StagingConfig.from_env(), run_id=...)``.
+    La factory ignora el config recibido (que viene de las STAGING_* del
+    entorno) y construye un exporter con un httpx.Client(transport=...) para
+    que ningun POST salga a la red.
+    """
+    def _factory(config: StagingConfig | None, *, run_id: str | None = None) -> StagingExporter:
+        if config is None:
+            return StagingExporter(None, run_id=run_id)
+        client = httpx.Client(base_url=config.base_url, transport=transport)
+        return StagingExporter(config, client=client, run_id=run_id)
+
+    return patch.object(rp, "StagingExporter", side_effect=_factory)
 
 
 def _make_demo_config(tmp_path: Path, sources_yaml: str) -> Path:
-    """Crea un YAML de config temporal con el contenido dado."""
     cfg = tmp_path / "test_sources.yaml"
     cfg.write_text(sources_yaml, encoding="utf-8")
     return cfg
 
 
+def _yaml_url(path: Path) -> str:
+    """Path como URL segura para YAML en Windows (evita escapes \\U)."""
+    return path.as_posix()
+
+
 def _make_synthetic_dump(tmp_path: Path) -> Path:
-    """Crea un archivo de texto sintético para fuentes manual_file."""
     dump = tmp_path / "synthetic_dump.txt"
     dump.write_text(
-        "Datos sintéticos de prueba.\n"
+        "Datos sinteticos de prueba.\n"
         "Se necesita ayuda en Barquisimeto tras el terremoto.\n"
-        "Familia Demo busca a Juan Demo, 35 años, Lara.\n",
+        "Familia Demo busca a Juan Demo, 35 anios, Lara.\n",
         encoding="utf-8",
     )
     return dump
@@ -85,35 +128,21 @@ def _make_synthetic_dump(tmp_path: Path) -> Path:
 
 @pytest.fixture()
 def demo_config(tmp_path: Path) -> Path:
-    """
-    Config YAML + dump de texto creados en tmp_path para cada test.
-
-    No depende de ningún archivo del repo (``synthetic_dump.txt`` no existe
-    en master), así que el stack completo pasa en CI y en checkout limpio.
-    """
-    dump = tmp_path / "synthetic_dump.txt"
-    dump.write_text(
-        "Datos sintéticos de prueba.\n"
-        "Se necesita ayuda en Barquisimeto tras el terremoto.\n"
-        "Familia Demo busca a Juan Demo, 35 años, Lara.\n",
-        encoding="utf-8",
-    )
+    """Config YAML de una fuente api_json (parser encuentralos mockeado)."""
     cfg = tmp_path / "sources.demo.yaml"
     cfg.write_text(
-        f"""project:
+        """project:
   event_id: 8f14e45f-ceea-467e-bd5d-0a4f2e0c1a3a
   default_country: Venezuela
 sources:
-  - id: demo_manual_synthetic
-    name: Demo manual sintético
-    type: manual_file
+  - id: encuentralos_tecnosoft
+    name: Encuentralos tecnosoft
+    type: api_json
     enabled: true
     trust_tier: C
-    url: "{dump}"
-    refresh_minutes: 60
-    required_keywords: []
-    parser_asignado: text
-    notes: "Datos 100% sintéticos para pruebas offline."
+    url: "https://encuentralos.tecnosoft.dev/api/personas"
+    refresh_minutes: 30
+    parser_asignado: encuentralos
 """,
         encoding="utf-8",
     )
@@ -121,7 +150,6 @@ sources:
 
 
 def _encuentralos_raw(records: list[dict]) -> RawContent:
-    """Construye un RawContent del estilo de la API de encuentralos."""
     return RawContent(
         source_key="encuentralos_tecnosoft",
         source_url="https://encuentralos.tecnosoft.dev/api/personas?limit=20&offset=0",
@@ -138,139 +166,295 @@ def _encuentralos_raw(records: list[dict]) -> RawContent:
     )
 
 
-_SAMPLE_ENCUENTRALOS_RECORDS = [
-    {
-        "id": 1001,
-        "nombre": "JUAN DEMO PEREZ",
-        "cedula": None,
-        "edad": 35,
-        "estado": "Lara",
-        "municipio": "Iribarren",
-        "status": "desaparecido",
-        "observaciones": "Visto en Barquisimeto",
-        "foto": None,
-        "fecha_reporte": "2026-06-24",
-        "telefono_contacto": None,
-    },
-    {
-        "id": 1002,
-        "nombre": "ANA DEMO GARCIA",
-        "cedula": None,
-        "edad": 28,
-        "estado": "Zulia",
-        "municipio": None,
-        "status": "encontrado",
-        "observaciones": None,
-        "foto": None,
-        "fecha_reporte": "2026-06-24",
-        "telefono_contacto": None,
-    },
-]
+def _mock_parser(persons: list[Person] | None = None) -> MagicMock:
+    parser = MagicMock()
+    parser.parse.return_value = persons if persons is not None else [
+        Person(
+            full_name="JUAN DEMO PEREZ",
+            event_id=_EVENT_ID,
+            status="missing",
+            fuente="encuentralos_tecnosoft",
+            age_range={"min": 30, "max": 40},
+            last_known_location="Lara, Venezuela",
+        ),
+        Person(
+            full_name="ANA DEMO GARCIA",
+            event_id=_EVENT_ID,
+            status="found",
+            fuente="encuentralos_tecnosoft",
+            age_range={"min": 25, "max": 35},
+            last_known_location="Zulia, Venezuela",
+        ),
+    ]
+    return parser
+
+
+def _mock_adapter(records: list[dict] | None = None) -> MagicMock:
+    adapter = MagicMock()
+    adapter.default_path = "/api/personas"
+    adapter.fetch_all.return_value = iter([_encuentralos_raw(records or [{"id": 1}])])
+    adapter.close = MagicMock()
+    return adapter
 
 
 # ---------------------------------------------------------------------------
-# Tests: fuente demo (manual_file → text parser) — sin red
+# Test: limpieza de recursos del adapter
 # ---------------------------------------------------------------------------
 
-class TestDemoSourceOffline:
-    """Pipeline completo con la fuente demo que existe en el repo."""
+class TestAdapterCleanup:
+    def test_adapter_closed_when_parser_missing(
+        self, tmp_path: Path, demo_config: Path
+    ) -> None:
+        """Fuente con parser no registrado: el adapter se cierra igual, no se filtra."""
+        adapter = _mock_adapter()
+        transport = _StagingTransport()
+        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport), patch(
+            "scrapers.pipelines.run_pipeline._get_adapter", return_value=adapter
+        ), patch(
+            "scrapers.pipelines.run_pipeline._get_parser", return_value=None
+        ):
+            run_pipeline(config_path=demo_config, output_dir=tmp_path / "out")
+        adapter.close.assert_called()
 
+
+# ---------------------------------------------------------------------------
+# Tests: summary y wiring basico
+# ---------------------------------------------------------------------------
+
+class TestSummaryShape:
     def test_returns_summary_dict(self, tmp_path: Path, demo_config: Path) -> None:
-        summary = run_pipeline(
-            config_path=demo_config,
-            output_dir=tmp_path / "out",
-        )
+        transport = _StagingTransport()
+        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport), patch(
+            "scrapers.pipelines.run_pipeline._get_adapter", return_value=_mock_adapter()
+        ), patch(
+            "scrapers.pipelines.run_pipeline._get_parser", return_value=_mock_parser()
+        ):
+            summary = run_pipeline(config_path=demo_config, output_dir=tmp_path / "out")
         assert isinstance(summary, dict)
 
     def test_summary_has_required_keys(self, tmp_path: Path, demo_config: Path) -> None:
-        summary = run_pipeline(
-            config_path=demo_config,
-            output_dir=tmp_path / "out",
-        )
+        transport = _StagingTransport()
+        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport), patch(
+            "scrapers.pipelines.run_pipeline._get_adapter", return_value=_mock_adapter()
+        ), patch(
+            "scrapers.pipelines.run_pipeline._get_parser", return_value=_mock_parser()
+        ):
+            summary = run_pipeline(config_path=demo_config, output_dir=tmp_path / "out")
         required = {
             "sources_processed",
-            "documents_exported",
-            "claims_exported",
-            "claims_deduplicated",
+            "staging_sent",
+            "staging_duplicates",
+            "staging_errors",
             "errors",
         }
         assert required.issubset(summary.keys())
 
-    def test_sources_processed_is_one(self, tmp_path: Path, demo_config: Path) -> None:
-        summary = run_pipeline(
-            config_path=demo_config,
-            output_dir=tmp_path / "out",
-        )
-        assert summary["sources_processed"] == 1
-
-    def test_documents_exported_positive(self, tmp_path: Path, demo_config: Path) -> None:
-        summary = run_pipeline(
-            config_path=demo_config,
-            output_dir=tmp_path / "out",
-        )
-        assert summary["documents_exported"] >= 1
-
-    def test_claims_exported_equals_documents(self, tmp_path: Path, demo_config: Path) -> None:
-        """claims_exported es alias legacy de documents_exported."""
-        summary = run_pipeline(
-            config_path=demo_config,
-            output_dir=tmp_path / "out",
-        )
-        assert summary["claims_exported"] == summary["documents_exported"]
-
     def test_errors_is_list(self, tmp_path: Path, demo_config: Path) -> None:
-        summary = run_pipeline(
-            config_path=demo_config,
-            output_dir=tmp_path / "out",
-        )
+        transport = _StagingTransport()
+        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport), patch(
+            "scrapers.pipelines.run_pipeline._get_adapter", return_value=_mock_adapter()
+        ), patch(
+            "scrapers.pipelines.run_pipeline._get_parser", return_value=_mock_parser()
+        ):
+            summary = run_pipeline(config_path=demo_config, output_dir=tmp_path / "out")
         assert isinstance(summary["errors"], list)
-
-    def test_persons_jsonl_created(self, tmp_path: Path, demo_config: Path) -> None:
-        out = tmp_path / "out"
-        run_pipeline(config_path=demo_config, output_dir=out)
-        assert (out / "persons.jsonl").exists()
-
-    def test_jsonl_is_valid_json_per_line(self, tmp_path: Path, demo_config: Path) -> None:
-        out = tmp_path / "out"
-        run_pipeline(config_path=demo_config, output_dir=out)
-        records = _read_jsonl(out / "persons.jsonl")
-        assert len(records) >= 1
-        for rec in records:
-            assert isinstance(rec, dict)
-
-    def test_entity_type_not_in_export(self, tmp_path: Path, demo_config: Path) -> None:
-        """_entity_type es campo interno — nunca debe aparecer en JSONL."""
-        out = tmp_path / "out"
-        run_pipeline(config_path=demo_config, output_dir=out)
-        for rec in _read_jsonl(out / "persons.jsonl"):
-            assert "_entity_type" not in rec
-
-    def test_required_person_fields_present(self, tmp_path: Path, demo_config: Path) -> None:
-        out = tmp_path / "out"
-        run_pipeline(config_path=demo_config, output_dir=out)
-        for rec in _read_jsonl(out / "persons.jsonl"):
-            missing = _REQUIRED_PERSON_KEYS - rec.keys()
-            assert not missing, f"Campos faltantes: {missing}"
-
-    def test_confidence_score_in_range(self, tmp_path: Path, demo_config: Path) -> None:
-        out = tmp_path / "out"
-        run_pipeline(config_path=demo_config, output_dir=out)
-        for rec in _read_jsonl(out / "persons.jsonl"):
-            score = rec.get("confidence_score", -1)
-            assert 0.0 <= score <= 1.0, f"score fuera de rango: {score}"
 
     def test_output_dir_created(self, tmp_path: Path, demo_config: Path) -> None:
         out = tmp_path / "nested" / "output"
-        run_pipeline(config_path=demo_config, output_dir=out)
+        transport = _StagingTransport()
+        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport), patch(
+            "scrapers.pipelines.run_pipeline._get_adapter", return_value=_mock_adapter()
+        ), patch(
+            "scrapers.pipelines.run_pipeline._get_parser", return_value=_mock_parser()
+        ):
+            run_pipeline(config_path=demo_config, output_dir=out)
         assert out.exists()
 
 
 # ---------------------------------------------------------------------------
-# Tests: fuente deshabilitada se omite
+# Tests: staging recibe los aportes
+# ---------------------------------------------------------------------------
+
+class TestStagingSend:
+    def test_sources_processed_is_one(self, tmp_path: Path, demo_config: Path) -> None:
+        transport = _StagingTransport()
+        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport), patch(
+            "scrapers.pipelines.run_pipeline._get_adapter", return_value=_mock_adapter()
+        ), patch(
+            "scrapers.pipelines.run_pipeline._get_parser", return_value=_mock_parser()
+        ):
+            summary = run_pipeline(config_path=demo_config, output_dir=tmp_path / "out")
+        assert summary["sources_processed"] == 1
+
+    def test_staging_sent_matches_records(self, tmp_path: Path, demo_config: Path) -> None:
+        transport = _StagingTransport()
+        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport), patch(
+            "scrapers.pipelines.run_pipeline._get_adapter", return_value=_mock_adapter()
+        ), patch(
+            "scrapers.pipelines.run_pipeline._get_parser", return_value=_mock_parser()
+        ):
+            summary = run_pipeline(config_path=demo_config, output_dir=tmp_path / "out")
+        assert summary["staging_sent"] == 2
+        assert len(transport.posts) == 2
+
+    def test_no_entity_type_in_payload_data(self, tmp_path: Path, demo_config: Path) -> None:
+        transport = _StagingTransport()
+        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport), patch(
+            "scrapers.pipelines.run_pipeline._get_adapter", return_value=_mock_adapter()
+        ), patch(
+            "scrapers.pipelines.run_pipeline._get_parser", return_value=_mock_parser()
+        ):
+            run_pipeline(config_path=demo_config, output_dir=tmp_path / "out")
+        for post in transport.posts:
+            assert "_entity_type" not in post["data"]
+
+    def test_confidence_score_in_range(self, tmp_path: Path, demo_config: Path) -> None:
+        transport = _StagingTransport()
+        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport), patch(
+            "scrapers.pipelines.run_pipeline._get_adapter", return_value=_mock_adapter()
+        ), patch(
+            "scrapers.pipelines.run_pipeline._get_parser", return_value=_mock_parser()
+        ):
+            run_pipeline(config_path=demo_config, output_dir=tmp_path / "out")
+        for post in transport.posts:
+            score = post["data"].get("confidence_score", -1)
+            assert 0.0 <= score <= 1.0
+
+
+# ---------------------------------------------------------------------------
+# Tests: idempotencia
+# ---------------------------------------------------------------------------
+
+class TestIdempotency:
+    def test_rerun_same_external_ids(self, tmp_path: Path, demo_config: Path) -> None:
+        transport = _StagingTransport()
+        for _ in range(2):
+            with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport), patch(
+                "scrapers.pipelines.run_pipeline._get_adapter", return_value=_mock_adapter()
+            ), patch(
+                "scrapers.pipelines.run_pipeline._get_parser", return_value=_mock_parser()
+            ):
+                run_pipeline(config_path=demo_config, output_dir=tmp_path / "out")
+        # Cuatro POSTs en total (2 por corrida) pero solo 2 external_id unicos.
+        unique = {p["external_id"] for p in transport.posts}
+        assert len(transport.posts) == 4
+        assert len(unique) == 2
+
+    def test_second_run_all_duplicates(self, tmp_path: Path, demo_config: Path) -> None:
+        transport = _StagingTransport()
+        # Primera corrida: todos nuevos.
+        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport), patch(
+            "scrapers.pipelines.run_pipeline._get_adapter", return_value=_mock_adapter()
+        ), patch(
+            "scrapers.pipelines.run_pipeline._get_parser", return_value=_mock_parser()
+        ):
+            run_pipeline(config_path=demo_config, output_dir=tmp_path / "out")
+        # Segunda corrida: el transport responde 409 a los external_id ya vistos.
+        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport), patch(
+            "scrapers.pipelines.run_pipeline._get_adapter", return_value=_mock_adapter()
+        ), patch(
+            "scrapers.pipelines.run_pipeline._get_parser", return_value=_mock_parser()
+        ):
+            summary = run_pipeline(config_path=demo_config, output_dir=tmp_path / "out")
+        assert summary["staging_sent"] == 0
+        assert summary["staging_duplicates"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Tests: block keys de Person (con / sin cedula_hmac)
+# ---------------------------------------------------------------------------
+
+class TestPersonBlockKeysEndToEnd:
+    def test_person_with_and_without_hmac(self, tmp_path: Path, demo_config: Path) -> None:
+        persons = [
+            Person(
+                full_name="JUAN DEMO PEREZ",
+                event_id=_EVENT_ID,
+                cedula_hmac="hmac-abc",
+                status="missing",
+                fuente="encuentralos_tecnosoft",
+                last_known_location="Lara",
+            ),
+            Person(
+                full_name="ANA DEMO GARCIA",
+                event_id=_EVENT_ID,
+                status="missing",
+                fuente="encuentralos_tecnosoft",
+                last_known_location="Zulia",
+            ),
+        ]
+        transport = _StagingTransport()
+        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport), patch(
+            "scrapers.pipelines.run_pipeline._get_adapter", return_value=_mock_adapter()
+        ), patch(
+            "scrapers.pipelines.run_pipeline._get_parser", return_value=_mock_parser(persons)
+        ):
+            run_pipeline(config_path=demo_config, output_dir=tmp_path / "out")
+        by_name = {p["data"]["full_name"]: p for p in transport.posts}
+        juan_keys = by_name["JUAN DEMO PEREZ"]["block_keys"]
+        ana_keys = by_name["ANA DEMO GARCIA"]["block_keys"]
+        assert any(k.startswith(f"ced:{_EVENT_ID}:hmac-abc") for k in juan_keys)
+        assert all(not k.startswith("ced:") for k in ana_keys)
+
+
+# ---------------------------------------------------------------------------
+# Tests: dry-run sin env vars de staging
+# ---------------------------------------------------------------------------
+
+class TestStagingDisabled:
+    def test_no_env_vars_dry_run(self, tmp_path: Path, demo_config: Path) -> None:
+        transport = _StagingTransport()
+        # Sin STAGING_*: el exporter entra en dry-run; el transport no debe
+        # recibir ningun POST aunque la factory este parcheada.
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("STAGING_API_KEY", "STAGING_BASE_URL", "STAGING_SOURCE_SLUG")}
+        with patch.dict(os.environ, env, clear=True), _patch_exporter(transport), patch(
+            "scrapers.pipelines.run_pipeline._get_adapter", return_value=_mock_adapter()
+        ), patch(
+            "scrapers.pipelines.run_pipeline._get_parser", return_value=_mock_parser()
+        ):
+            summary = run_pipeline(config_path=demo_config, output_dir=tmp_path / "out")
+        assert summary["staging_sent"] == 0
+        assert summary["errors"] == []
+        assert transport.posts == []
+
+
+# ---------------------------------------------------------------------------
+# Tests: watermark
+# ---------------------------------------------------------------------------
+
+class TestWatermarkEndToEnd:
+    def test_watermark_advances_on_success(self, tmp_path: Path, demo_config: Path) -> None:
+        transport = _StagingTransport(aportes_status=201)
+        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport), patch(
+            "scrapers.pipelines.run_pipeline._get_adapter", return_value=_mock_adapter()
+        ), patch(
+            "scrapers.pipelines.run_pipeline._get_parser", return_value=_mock_parser()
+        ):
+            run_pipeline(config_path=demo_config, output_dir=tmp_path / "out")
+        assert transport.watermark_puts
+        assert transport.watermark_puts[-1]["watermark_at"] == "2026-06-24T15:30:00Z"
+
+    def test_watermark_not_advanced_on_failure(self, tmp_path: Path, demo_config: Path) -> None:
+        transport = _StagingTransport(aportes_status=500)
+        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport), patch(
+            "scrapers.exporters.staging_exporter.time.sleep", lambda *_: None
+        ), patch(
+            "scrapers.pipelines.run_pipeline._get_adapter", return_value=_mock_adapter()
+        ), patch(
+            "scrapers.pipelines.run_pipeline._get_parser", return_value=_mock_parser()
+        ):
+            summary = run_pipeline(config_path=demo_config, output_dir=tmp_path / "out")
+        assert transport.watermark_puts == []
+        assert summary["staging_errors"] >= 1
+
+
+# ---------------------------------------------------------------------------
+# Tests: fuente deshabilitada
 # ---------------------------------------------------------------------------
 
 class TestDisabledSource:
-    def test_disabled_source_not_processed(self, tmp_path: Path, demo_config: Path) -> None:
+    def test_disabled_source_not_processed(self, tmp_path: Path) -> None:
         dump = _make_synthetic_dump(tmp_path)
         cfg = _make_demo_config(tmp_path, f"""
 project:
@@ -282,104 +466,42 @@ sources:
     type: manual_file
     enabled: false
     trust_tier: C
-    url: "{dump}"
+    url: "{_yaml_url(dump)}"
     refresh_minutes: 60
-    parser_asignado: text
+    parser_asignado: encuentralos
 """)
-        summary = run_pipeline(config_path=cfg, output_dir=tmp_path / "out")
+        transport = _StagingTransport()
+        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport):
+            summary = run_pipeline(config_path=cfg, output_dir=tmp_path / "out")
         assert summary["sources_processed"] == 0
-        assert summary["documents_exported"] == 0
-
-    def test_mixed_enabled_disabled(self, tmp_path: Path, demo_config: Path) -> None:
-        dump = _make_synthetic_dump(tmp_path)
-        cfg = _make_demo_config(tmp_path, f"""
-project:
-  event_id: 8f14e45f-ceea-467e-bd5d-0a4f2e0c1a3a
-  default_country: Venezuela
-sources:
-  - id: habilitada
-    name: Habilitada
-    type: manual_file
-    enabled: true
-    trust_tier: C
-    url: "{dump}"
-    refresh_minutes: 60
-    parser_asignado: text
-  - id: deshabilitada
-    name: Deshabilitada
-    type: manual_file
-    enabled: false
-    trust_tier: C
-    url: "{dump}"
-    refresh_minutes: 60
-    parser_asignado: text
-""")
-        summary = run_pipeline(config_path=cfg, output_dir=tmp_path / "out")
-        assert summary["sources_processed"] == 1
+        assert summary["staging_sent"] == 0
 
 
 # ---------------------------------------------------------------------------
-# Tests: resiliencia — error en una fuente no tumba el pipeline
+# Tests: resiliencia
 # ---------------------------------------------------------------------------
 
 class TestResilience:
-    def test_bad_url_does_not_crash_pipeline(self, tmp_path: Path, demo_config: Path) -> None:
-        """Fuente con URL local inexistente → error anotado, pipeline continúa."""
-        dump = _make_synthetic_dump(tmp_path)
-        cfg = _make_demo_config(tmp_path, f"""
-project:
-  event_id: 8f14e45f-ceea-467e-bd5d-0a4f2e0c1a3a
-  default_country: Venezuela
-sources:
-  - id: fuente_rota
-    name: Fuente rota
-    type: manual_file
-    enabled: true
-    trust_tier: C
-    url: "/ruta/inexistente/no_existe.txt"
-    refresh_minutes: 60
-    parser_asignado: text
-  - id: fuente_buena
-    name: Fuente buena
-    type: manual_file
-    enabled: true
-    trust_tier: C
-    url: "{dump}"
-    refresh_minutes: 60
-    parser_asignado: text
-""")
-        summary = run_pipeline(config_path=cfg, output_dir=tmp_path / "out")
-        # La fuente buena debe haberse procesado
-        assert summary["sources_processed"] >= 1
-        # El pipeline no debe haber lanzado excepción (llegamos hasta aquí)
-
-    def test_errors_list_non_empty_on_failure(self, tmp_path: Path, demo_config: Path) -> None:
-        cfg = _make_demo_config(tmp_path, """
-project:
-  event_id: 8f14e45f-ceea-467e-bd5d-0a4f2e0c1a3a
-  default_country: Venezuela
-sources:
-  - id: fuente_rota
-    name: Fuente rota
-    type: manual_file
-    enabled: true
-    trust_tier: C
-    url: "/no_existe.txt"
-    refresh_minutes: 60
-    parser_asignado: text
-""")
-        summary = run_pipeline(config_path=cfg, output_dir=tmp_path / "out")
-        assert len(summary["errors"]) >= 1
-
-    def test_invalid_config_returns_error_summary(self, tmp_path: Path, demo_config: Path) -> None:
+    def test_invalid_config_returns_error_summary(self, tmp_path: Path) -> None:
         cfg = tmp_path / "bad.yaml"
         cfg.write_text("esto no es un yaml valido: [\n", encoding="utf-8")
         summary = run_pipeline(config_path=cfg, output_dir=tmp_path / "out")
         assert summary["sources_processed"] == 0
         assert len(summary["errors"]) >= 1
+        assert summary["staging_sent"] == 0
+
+    def test_invalid_event_id_returns_error_summary(self, tmp_path: Path) -> None:
+        cfg = _make_demo_config(tmp_path, """
+project:
+  event_id: no-es-un-uuid
+  default_country: Venezuela
+sources: []
+""")
+        summary = run_pipeline(config_path=cfg, output_dir=tmp_path / "out")
+        assert summary["sources_processed"] == 0
+        assert len(summary["errors"]) >= 1
 
     def test_unimplemented_adapter_type_skipped(self) -> None:
-        """Un type sin adapter registrado en `_get_adapter` debe omitirse (None), no lanzar."""
         source = SourceConfig(
             id="fuente_futura",
             name="Fuente con type aun no soportado",
@@ -390,240 +512,117 @@ sources:
             refresh_minutes=60,
             parser_asignado="html",
         )
-
         assert _get_adapter(source) is None
 
-
-# ---------------------------------------------------------------------------
-# Tests: límite por fuente
-# ---------------------------------------------------------------------------
-
-class TestLimit:
-    def test_limit_zero_exports_nothing(self, tmp_path: Path, demo_config: Path) -> None:
-        out = tmp_path / "out"
-        summary = run_pipeline(config_path=demo_config, output_dir=out, limit=0)
-        assert summary["documents_exported"] == 0
-
-    def test_limit_one_exports_at_most_one(self, tmp_path: Path, demo_config: Path) -> None:
-        out = tmp_path / "out"
-        run_pipeline(config_path=demo_config, output_dir=out, limit=1)
-        records = _read_jsonl(out / "persons.jsonl")
-        assert len(records) <= 1
-
-    def test_no_limit_exports_all(self, tmp_path: Path, demo_config: Path) -> None:
-        out = tmp_path / "out"
-        summary_no_limit = run_pipeline(config_path=demo_config, output_dir=out, limit=None)
-        summary_high_limit = run_pipeline(config_path=demo_config, output_dir=out, limit=9999)
-        assert summary_no_limit["documents_exported"] == summary_high_limit["documents_exported"]
-
-
-# ---------------------------------------------------------------------------
-# Tests: fuente api_json con adapter mockeado
-# ---------------------------------------------------------------------------
-
-class TestApiJsonSourceMocked:
-    """
-    Verifica que el pipeline conecta correctamente ApiAdapter + EncuentralosParser
-    sin hacer llamadas de red reales.
-    """
-
-    @staticmethod
-    def _mock_parser() -> MagicMock:
-        """Mock de parser que devuelve Person con campos válidos."""
-        parser = MagicMock()
-        parser.parse.return_value = [
-            Person(
-                full_name="JUAN DEMO PEREZ",
-                event_id=_EVENT_ID,
-                status="missing",
-                fuente="encuentralos_tecnosoft",
-                age_range={"min": 30, "max": 40},
-                last_known_location="Lara, Venezuela",
-            ),
-            Person(
-                full_name="ANA DEMO GARCIA",
-                event_id=_EVENT_ID,
-                status="found",
-                fuente="encuentralos_tecnosoft",
-                age_range={"min": 25, "max": 35},
-                last_known_location="Zulia, Venezuela",
-            ),
-        ]
-        return parser
-
-    def _mock_adapter(self) -> MagicMock:
-        """Mock de ApiAdapter que devuelve páginas predefinidas."""
-        adapter = MagicMock()
-        adapter.default_path = "/api/personas"
-        adapter.fetch_all.return_value = iter([
-            _encuentralos_raw(_SAMPLE_ENCUENTRALOS_RECORDS)
-        ])
-        adapter.close = MagicMock()
-        return adapter
-
-    def test_api_json_source_produces_persons(self, tmp_path: Path, demo_config: Path) -> None:
-        _make_synthetic_dump(tmp_path)  # no se usa, pero el yaml lo necesita como dummy
-        cfg = _make_demo_config(tmp_path, """
+    def test_unimplemented_parser_source_omitted(self, tmp_path: Path) -> None:
+        dump = _make_synthetic_dump(tmp_path)
+        cfg = _make_demo_config(tmp_path, f"""
 project:
   event_id: 8f14e45f-ceea-467e-bd5d-0a4f2e0c1a3a
   default_country: Venezuela
 sources:
-  - id: encuentralos_tecnosoft
-    name: Encuentralos tecnosoft
-    type: api_json
+  - id: fuente_sin_parser
+    name: Fuente sin parser concreto
+    type: manual_file
     enabled: true
     trust_tier: C
-    url: "https://encuentralos.tecnosoft.dev/api/personas"
-    refresh_minutes: 30
-    parser_asignado: encuentralos
+    url: "{_yaml_url(dump)}"
+    refresh_minutes: 60
+    parser_asignado: text
 """)
-        mock_adapter = self._mock_adapter()
-
-        with patch(
-            "scrapers.pipelines.run_pipeline._get_adapter",
-            return_value=mock_adapter,
-        ), patch(
-            "scrapers.pipelines.run_pipeline._get_parser",
-            return_value=self._mock_parser(),
-        ):
+        transport = _StagingTransport()
+        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport):
             summary = run_pipeline(config_path=cfg, output_dir=tmp_path / "out")
-
+        # La fuente se procesa sin error fatal pero no envia nada (parser None).
         assert summary["sources_processed"] == 1
-        assert summary["documents_exported"] == len(_SAMPLE_ENCUENTRALOS_RECORDS)
+        assert summary["staging_sent"] == 0
+        assert transport.posts == []
 
-    def test_api_json_persons_have_correct_status(self, tmp_path: Path, demo_config: Path) -> None:
-        cfg = _make_demo_config(tmp_path, """
+    def test_unimplemented_parser_visible_in_summary(self, tmp_path: Path) -> None:
+        """Una fuente con parser no registrado aparece VISIBLE en el resumen.
+
+        No basta con el log.warning silencioso: la omision se contabiliza en
+        summary["errors"] (con el slug, el parser_asignado y la palabra
+        omitida) para que el operador la vea en el resumen del run.
+        """
+        dump = _make_synthetic_dump(tmp_path)
+        cfg = _make_demo_config(tmp_path, f"""
 project:
   event_id: 8f14e45f-ceea-467e-bd5d-0a4f2e0c1a3a
   default_country: Venezuela
 sources:
-  - id: encuentralos_tecnosoft
-    name: Encuentralos tecnosoft
-    type: api_json
+  - id: fuente_sin_parser
+    name: Fuente sin parser concreto
+    type: manual_file
     enabled: true
     trust_tier: C
-    url: "https://encuentralos.tecnosoft.dev/api/personas"
-    refresh_minutes: 30
-    parser_asignado: encuentralos
+    url: "{_yaml_url(dump)}"
+    refresh_minutes: 60
+    parser_asignado: parser_inexistente
 """)
-        mock_adapter = self._mock_adapter()
-        out = tmp_path / "out"
-
-        with patch(
-            "scrapers.pipelines.run_pipeline._get_adapter",
-            return_value=mock_adapter,
-        ), patch(
-            "scrapers.pipelines.run_pipeline._get_parser",
-            return_value=self._mock_parser(),
-        ):
-            run_pipeline(config_path=cfg, output_dir=out)
-
-        records = _read_jsonl(out / "persons.jsonl")
-        statuses = {r["status"] for r in records}
-        assert statuses == {"missing", "found"}
-
-    def test_api_json_no_entity_type_in_export(self, tmp_path: Path, demo_config: Path) -> None:
-        cfg = _make_demo_config(tmp_path, """
-project:
-  event_id: 8f14e45f-ceea-467e-bd5d-0a4f2e0c1a3a
-  default_country: Venezuela
-sources:
-  - id: encuentralos_tecnosoft
-    name: Encuentralos tecnosoft
-    type: api_json
-    enabled: true
-    trust_tier: C
-    url: "https://encuentralos.tecnosoft.dev/api/personas"
-    refresh_minutes: 30
-    parser_asignado: encuentralos
-""")
-        mock_adapter = self._mock_adapter()
-        out = tmp_path / "out"
-
-        with patch(
-            "scrapers.pipelines.run_pipeline._get_adapter",
-            return_value=mock_adapter,
-        ), patch(
-            "scrapers.pipelines.run_pipeline._get_parser",
-            return_value=self._mock_parser(),
-        ):
-            run_pipeline(config_path=cfg, output_dir=out)
-
-        for rec in _read_jsonl(out / "persons.jsonl"):
-            assert "_entity_type" not in rec
-
-    def test_adapter_close_called_even_when_fetch_raises(
-        self, tmp_path: Path, demo_config: Path
-    ) -> None:
-        """Un adapter con recursos vivos (ej. browser de Playwright) no debe
-        quedar huerfano si fetch_all() falla — close() debe correr en finally."""
-        cfg = _make_demo_config(tmp_path, """
-project:
-  event_id: 8f14e45f-ceea-467e-bd5d-0a4f2e0c1a3a
-  default_country: Venezuela
-sources:
-  - id: encuentralos_tecnosoft
-    name: Encuentralos tecnosoft
-    type: api_json
-    enabled: true
-    trust_tier: C
-    url: "https://encuentralos.tecnosoft.dev/api/personas"
-    refresh_minutes: 30
-    parser_asignado: encuentralos
-""")
-        mock_adapter = self._mock_adapter()
-        mock_adapter.fetch_all.side_effect = RuntimeError("fetch agotado tras reintentos")
-
-        with patch(
-            "scrapers.pipelines.run_pipeline._get_adapter",
-            return_value=mock_adapter,
-        ), patch(
-            "scrapers.pipelines.run_pipeline._get_parser",
-            return_value=self._mock_parser(),
-        ):
+        transport = _StagingTransport()
+        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport):
             summary = run_pipeline(config_path=cfg, output_dir=tmp_path / "out")
+        omissions = [
+            e for e in summary["errors"]
+            if "parser no implementado" in e and "omitida" in e
+        ]
+        assert len(omissions) == 1
+        assert "parser_inexistente" in omissions[0]
+        assert "fuente_sin_parser" in omissions[0]
+        # La omision tambien cuenta como error de staging (visibilidad numerica).
+        assert summary["staging_errors"] >= 1
 
-        mock_adapter.close.assert_called_once()
+    def test_fetch_error_does_not_crash_pipeline(self, tmp_path: Path, demo_config: Path) -> None:
+        adapter = _mock_adapter()
+        adapter.fetch_all.side_effect = RuntimeError("fetch agotado tras reintentos")
+        transport = _StagingTransport()
+        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport), patch(
+            "scrapers.pipelines.run_pipeline._get_adapter", return_value=adapter
+        ), patch(
+            "scrapers.pipelines.run_pipeline._get_parser", return_value=_mock_parser()
+        ):
+            summary = run_pipeline(config_path=demo_config, output_dir=tmp_path / "out")
+        adapter.close.assert_called_once()
         assert summary["sources_processed"] == 0
         assert len(summary["errors"]) == 1
 
 
 # ---------------------------------------------------------------------------
-# Tests: protección de menores end-to-end
+# Tests: limite por fuente
+# ---------------------------------------------------------------------------
+
+class TestLimit:
+    def test_limit_zero_sends_nothing(self, tmp_path: Path, demo_config: Path) -> None:
+        transport = _StagingTransport()
+        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport), patch(
+            "scrapers.pipelines.run_pipeline._get_adapter", return_value=_mock_adapter()
+        ), patch(
+            "scrapers.pipelines.run_pipeline._get_parser", return_value=_mock_parser()
+        ):
+            summary = run_pipeline(config_path=demo_config, output_dir=tmp_path / "out", limit=0)
+        assert summary["staging_sent"] == 0
+
+    def test_limit_one_sends_at_most_one(self, tmp_path: Path, demo_config: Path) -> None:
+        transport = _StagingTransport()
+        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport), patch(
+            "scrapers.pipelines.run_pipeline._get_adapter", return_value=_mock_adapter()
+        ), patch(
+            "scrapers.pipelines.run_pipeline._get_parser", return_value=_mock_parser()
+        ):
+            run_pipeline(config_path=demo_config, output_dir=tmp_path / "out", limit=1)
+        assert len(transport.posts) <= 1
+
+
+# ---------------------------------------------------------------------------
+# Tests: proteccion de menores end-to-end
 # ---------------------------------------------------------------------------
 
 class TestMinorProtectionEndToEnd:
-    """Un Person con is_minor=True debe llegar a persons.jsonl con foto y
-    cedula_masked anulados, y la ubicación acotada a estado."""
-
-    def _cfg(self, tmp_path: Path) -> Path:
-        return _make_demo_config(tmp_path, """
-project:
-  event_id: 8f14e45f-ceea-467e-bd5d-0a4f2e0c1a3a
-  default_country: Venezuela
-sources:
-  - id: encuentralos_tecnosoft
-    name: Encuentralos tecnosoft
-    type: api_json
-    enabled: true
-    trust_tier: C
-    url: "https://encuentralos.tecnosoft.dev/api/personas"
-    refresh_minutes: 30
-    parser_asignado: encuentralos
-""")
-
-    def _mock_adapter(self) -> MagicMock:
-        adapter = MagicMock()
-        adapter.default_path = "/api/personas"
-        adapter.fetch_all.return_value = iter([_encuentralos_raw([{"id": 1}])])
-        adapter.close = MagicMock()
-        return adapter
-
-    def test_minor_fields_redacted_in_export(self, tmp_path: Path) -> None:
-        parser = MagicMock()
-        parser.parse.return_value = [
+    def test_minor_fields_redacted_in_payload(self, tmp_path: Path, demo_config: Path) -> None:
+        persons = [
             Person(
-                full_name="NIÑO DEMO PEREZ",
+                full_name="NINIO DEMO PEREZ",
                 event_id=_EVENT_ID,
                 is_minor=True,
                 foto="https://example.org/foto.jpg",
@@ -632,179 +631,85 @@ sources:
                 fuente="encuentralos_tecnosoft",
             )
         ]
-        out = tmp_path / "out"
-
-        with patch(
-            "scrapers.pipelines.run_pipeline._get_adapter",
-            return_value=self._mock_adapter(),
+        transport = _StagingTransport()
+        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport), patch(
+            "scrapers.pipelines.run_pipeline._get_adapter", return_value=_mock_adapter()
         ), patch(
-            "scrapers.pipelines.run_pipeline._get_parser",
-            return_value=parser,
+            "scrapers.pipelines.run_pipeline._get_parser", return_value=_mock_parser(persons)
         ):
-            run_pipeline(config_path=self._cfg(tmp_path), output_dir=out)
+            run_pipeline(config_path=demo_config, output_dir=tmp_path / "out")
+        assert len(transport.posts) == 1
+        data = transport.posts[0]["data"]
+        assert data["foto"] is None
+        assert data["cedula_masked"] is None
+        assert data["last_known_location"] == "Lara"
 
-        records = _read_jsonl(out / "persons.jsonl")
-        assert len(records) == 1
-        rec = records[0]
-        assert rec["foto"] is None
-        assert rec["cedula_masked"] is None
-        assert rec["last_known_location"] == "Lara"
-
-    def test_non_minor_fields_untouched_in_export(self, tmp_path: Path) -> None:
-        parser = MagicMock()
-        parser.parse.return_value = [
+    def test_minor_record_omitted_when_protection_raises(self, tmp_path: Path, demo_config: Path) -> None:
+        persons = [
             Person(
-                full_name="ADULTO DEMO PEREZ",
-                event_id=_EVENT_ID,
-                is_minor=False,
-                foto="https://example.org/foto.jpg",
-                cedula_masked="V-****1234",
-                last_known_location="Iribarren, Lara",
-                fuente="encuentralos_tecnosoft",
-            )
-        ]
-        out = tmp_path / "out"
-
-        with patch(
-            "scrapers.pipelines.run_pipeline._get_adapter",
-            return_value=self._mock_adapter(),
-        ), patch(
-            "scrapers.pipelines.run_pipeline._get_parser",
-            return_value=parser,
-        ):
-            run_pipeline(config_path=self._cfg(tmp_path), output_dir=out)
-
-        records = _read_jsonl(out / "persons.jsonl")
-        assert len(records) == 1
-        rec = records[0]
-        assert rec["foto"] == "https://example.org/foto.jpg"
-        assert rec["cedula_masked"] == "V-****1234"
-        assert rec["last_known_location"] == "Iribarren, Lara"
-
-    def test_minor_record_omitted_when_protection_raises(self, tmp_path: Path) -> None:
-        """Fail-closed: si protect_minor_fields lanza, el registro de un menor
-        no debe exportarse sin redactar (ver PR #102)."""
-        parser = MagicMock()
-        parser.parse.return_value = [
-            Person(
-                full_name="NIÑO DEMO PEREZ",
+                full_name="NINIO DEMO PEREZ",
                 event_id=_EVENT_ID,
                 is_minor=True,
                 foto="https://example.org/foto.jpg",
-                cedula_masked="V-****1234",
                 last_known_location="Iribarren, Lara",
                 fuente="encuentralos_tecnosoft",
             )
         ]
-        out = tmp_path / "out"
-
-        with patch(
-            "scrapers.pipelines.run_pipeline._get_adapter",
-            return_value=self._mock_adapter(),
+        transport = _StagingTransport()
+        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport), patch(
+            "scrapers.pipelines.run_pipeline._get_adapter", return_value=_mock_adapter()
         ), patch(
-            "scrapers.pipelines.run_pipeline._get_parser",
-            return_value=parser,
+            "scrapers.pipelines.run_pipeline._get_parser", return_value=_mock_parser(persons)
         ), patch(
-            "scrapers.pipelines.run_pipeline.protect_minor_fields",
-            side_effect=ValueError("boom"),
+            "scrapers.pipelines.run_pipeline.protect_minor_fields", side_effect=ValueError("boom")
         ):
-            summary = run_pipeline(config_path=self._cfg(tmp_path), output_dir=out)
-
-        records = _read_jsonl(out / "persons.jsonl")
-        assert records == []
+            summary = run_pipeline(config_path=demo_config, output_dir=tmp_path / "out")
+        assert transport.posts == []
         assert any("registro omitido" in e for e in summary["errors"])
 
 
 # ---------------------------------------------------------------------------
-# Tests: PII_SALT presente → tokenize_pii_fields se ejecuta
+# Tests: PII_SALT
 # ---------------------------------------------------------------------------
 
 class TestPIISalt:
-    def test_pipeline_works_without_pii_salt(self, tmp_path: Path, demo_config: Path) -> None:
-        """Sin PII_SALT el pipeline no debe fallar."""
-        env = {k: v for k, v in os.environ.items() if k != "PII_SALT"}
-        with patch.dict(os.environ, env, clear=True):
-            summary = run_pipeline(
-                config_path=demo_config,
-                output_dir=tmp_path / "out",
-            )
-        assert summary["sources_processed"] == 1
-
     def test_pipeline_works_with_pii_salt(self, tmp_path: Path, demo_config: Path) -> None:
-        """Con PII_SALT configurado, el pipeline debe funcionar igual."""
-        with patch.dict(os.environ, {"PII_SALT": "test-salt-pipeline"}):
-            summary = run_pipeline(
-                config_path=demo_config,
-                output_dir=tmp_path / "out",
-            )
+        transport = _StagingTransport()
+        env = {**_STAGING_ENV, "PII_SALT": "test-salt-pipeline"}
+        with patch.dict(os.environ, env, clear=False), _patch_exporter(transport), patch(
+            "scrapers.pipelines.run_pipeline._get_adapter", return_value=_mock_adapter()
+        ), patch(
+            "scrapers.pipelines.run_pipeline._get_parser", return_value=_mock_parser()
+        ):
+            summary = run_pipeline(config_path=demo_config, output_dir=tmp_path / "out")
         assert summary["sources_processed"] == 1
-        assert summary["documents_exported"] >= 1
+        assert summary["staging_sent"] == 2
 
 
 # ---------------------------------------------------------------------------
-# Tests: múltiples fuentes
+# Tests: guard de red real
 # ---------------------------------------------------------------------------
 
-class TestMultipleSources:
-    def test_two_sources_both_processed(self, tmp_path: Path) -> None:
-        dump1 = tmp_path / "dump1.txt"
-        dump2 = tmp_path / "dump2.txt"
-        dump1.write_text("Persona demo uno. Necesita ayuda en Caracas.", encoding="utf-8")
-        dump2.write_text("Persona demo dos. Vista en Maracaibo.", encoding="utf-8")
+class TestNoRealNetwork:
+    def test_no_real_network_during_run(self, tmp_path: Path, demo_config: Path) -> None:
+        """Si algun POST escapase a la red real, el guard falla el test."""
+        transport = _NoRealNetworkTransport()
 
-        cfg = _make_demo_config(tmp_path, f"""
+        def _factory(config: StagingConfig | None, *, run_id: str | None = None) -> StagingExporter:
+            if config is None:
+                return StagingExporter(None, run_id=run_id)
+            client = httpx.Client(base_url=config.base_url, transport=transport)
+            return StagingExporter(config, client=client, run_id=run_id)
+
+        # Fuente deshabilitada -> dry-run efectivo -> no debe tocar el transport.
+        cfg = _make_demo_config(tmp_path, """
 project:
   event_id: 8f14e45f-ceea-467e-bd5d-0a4f2e0c1a3a
   default_country: Venezuela
-sources:
-  - id: fuente_uno
-    name: Fuente uno
-    type: manual_file
-    enabled: true
-    trust_tier: C
-    url: "{dump1}"
-    refresh_minutes: 60
-    parser_asignado: text
-  - id: fuente_dos
-    name: Fuente dos
-    type: manual_file
-    enabled: true
-    trust_tier: B
-    url: "{dump2}"
-    refresh_minutes: 60
-    parser_asignado: text
+sources: []
 """)
-        summary = run_pipeline(config_path=cfg, output_dir=tmp_path / "out")
-        assert summary["sources_processed"] == 2
-        assert summary["documents_exported"] >= 2
-
-    def test_second_source_failure_first_still_exported(self, tmp_path: Path) -> None:
-        dump_ok = _make_synthetic_dump(tmp_path)
-        cfg = _make_demo_config(tmp_path, f"""
-project:
-  event_id: 8f14e45f-ceea-467e-bd5d-0a4f2e0c1a3a
-  default_country: Venezuela
-sources:
-  - id: fuente_ok
-    name: Fuente ok
-    type: manual_file
-    enabled: true
-    trust_tier: C
-    url: "{dump_ok}"
-    refresh_minutes: 60
-    parser_asignado: text
-  - id: fuente_rota
-    name: Fuente rota
-    type: manual_file
-    enabled: true
-    trust_tier: C
-    url: "/no_existe_jamas.txt"
-    refresh_minutes: 60
-    parser_asignado: text
-""")
-        out = tmp_path / "out"
-        summary = run_pipeline(config_path=cfg, output_dir=out)
-        # La buena debe haberse procesado
-        assert summary["sources_processed"] >= 1
-        # Y exportado registros
-        assert summary["documents_exported"] >= 1
+        with patch.dict(os.environ, _STAGING_ENV, clear=False), patch.object(
+            rp, "StagingExporter", side_effect=_factory
+        ):
+            summary = run_pipeline(config_path=cfg, output_dir=tmp_path / "out")
+        assert summary["sources_processed"] == 0

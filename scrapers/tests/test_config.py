@@ -14,6 +14,33 @@ def test_demo_config_is_valid():
     assert payload["sources"][0]["parser_asignado"] == "text"
 
 
+def test_starter_config_enabled_sources_have_registered_parser():
+    """En el starter config, toda fuente enabled debe tener un parser registrado.
+
+    El registry de _get_parser solo conoce 'encuentralos'; cualquier otra
+    fuente con un parser_asignado no registrado debe quedar enabled: false para
+    no contar como fuente omitida en cada corrida (issue #125, mejora 2).
+    """
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "config"
+        / "sources.venezuela.starter.yaml"
+    )
+    payload = validate_sources_config(path)
+
+    # Set de parsers concretos registrados en _get_parser (run_pipeline).
+    registered = {"encuentralos"}
+    enabled = [s for s in payload["sources"] if s.get("enabled")]
+    assert enabled, "el starter config deberia tener al menos una fuente enabled"
+    for source in enabled:
+        assert source["parser_asignado"] in registered, (
+            f"fuente enabled {source['id']!r} usa parser no registrado "
+            f"{source['parser_asignado']!r}: deberia estar enabled: false"
+        )
+    # encuentralos sigue habilitada.
+    assert any(s["id"] == "encuentralos_tecnosoft" for s in enabled)
+
+
 def test_custom_template_config_is_valid():
     path = (
         Path(__file__).resolve().parents[1]
