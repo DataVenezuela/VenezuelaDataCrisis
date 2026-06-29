@@ -650,6 +650,60 @@ en staging; el dedup vive en el consolidation job (#82).
 
 ---
 
+## Capa 4b — Quarantine exporter (Issue #88)
+
+**Principio inamovible:** ningún registro se descarta en silencio. En una crisis
+donde cada registro puede ser una vida, descartar automáticamente no es
+aceptable. Todo lo que el pipeline antes perdía va a la **Quarantine DB** para
+revisión humana.
+
+`scrapers/exporters/quarantine_exporter.py` (`QuarantineExporter`) espeja al
+`StagingExporter`: un `POST /api/quarantine` por registro al backend, cliente
+`httpx` inyectable, retry/backoff en 429/5xx, y **dry-run silencioso** si faltan
+`QUARANTINE_API_KEY` / `QUARANTINE_BASE_URL`. Comparte el `run_id` de la corrida
+con el staging exporter para correlacionar qué se exportó y qué se cuarentenó.
+
+La tabla `quarantine_records` vive en el backend (igual que `aportes`); el
+scraper no ejecuta SQL.
+
+### Qué va a cuarentena y desde dónde
+
+`run_pipeline.py` enruta a cuarentena en cada punto donde antes se perdía el dato:
+
+| Punto en el pipeline | `reason_code` | `risk_level` |
+|----------------------|---------------|--------------|
+| Fuente sin parser asignado (se baja el crudo igual) | `parser_unavailable` | `medium` |
+| Página que falla al parsear | `invalid_schema` | `medium` |
+| PII no tratable/redactable (ni rescatable sin PII) | `pii_untreatable` | `high` |
+| Protección de menores falla (fail-closed solo para staging) | `pii_untreatable` | `high` |
+
+Otros `reason_code` controlados (los produce el backend o etapas futuras):
+`pdf_no_text`, `unclassified_sensitive`, `contradictory_sources`,
+`ambiguous_manual_review`.
+
+Un **type sin adapter** implementado omite la fuente entera: no hay payload que
+cuarentenar (nunca se hizo fetch), pero la omisión queda **visible** en
+`summary["errors"]` — nunca silenciosa.
+
+### Reglas de PII en cuarentena
+
+- `payload_preview_redacted`: fragmento **redactado** con `redact_pii`, nunca el
+  payload completo (se trunca a 500 chars). Sin PII en claro.
+- `pii_findings_summary`: **conteos por tipo** de `detect_pii`
+  (`{"identity_document": 2, "phone": 1}`), nunca los valores.
+- `payload_hash`: SHA-256 hex puro (64 chars, sin prefijo `sha256:`) del payload
+  **original**. Sobrevive a la destrucción para verificar qué se vio y destruyó.
+
+### Estados de revisión (en el backend)
+
+`pending` → `in_review` → (`approved_for_staging` | `needs_manual_redaction` |
+`rejected`) → `destroyed`. `approved_for_staging` permite reintroducir el
+registro al pipeline. La **destrucción auditable** borra
+`payload_preview_redacted` y `pii_findings_summary` pero conserva la fila con
+`destroyed_at` y `payload_hash`.
+
+---
+
 ## Capa 5 — Consolidation job (Issue #82)
 
 Proceso independiente que corre cada 20 minutos. Lee `aportes WHERE consolidated_at IS NULL`.
@@ -796,6 +850,83 @@ Cada aporte debe cumplir:
 8. Enums controlados.
 9. Sin PII en claro (`data` ya viene redactado).
 10. Trazabilidad hacia fuente (`source_slug`).
+
+---
+
+## 10b. Cuarentena (POST /api/quarantine)
+
+Contrato del endpoint que el backend (dataVenezuela) debe exponer para la
+Quarantine DB (ver "Capa 4b"). El scraper hace un POST por registro no
+procesable. `run_id` se comparte con el aporte de la misma corrida.
+
+Ejemplo de payload (campos que envía el `QuarantineExporter`):
+
+```json
+{
+  "run_id": "uuid-v4",
+  "source_slug": "encuentralos",
+  "source_url": "https://fuente.org/registro/123",
+  "reason_code": "invalid_schema",
+  "reason_detail": "Error parseando pagina 2: KeyError 'nombre'",
+  "risk_level": "medium",
+  "payload_preview_redacted": "fragmento [IDENTITY_DOCUMENT] ...",
+  "payload_hash": "64-hex-sin-prefijo",
+  "pii_findings_summary": {"identity_document": 1}
+}
+```
+
+El backend setea por su cuenta `quarantine_id`, `review_status` (default
+`pending`), `retention_until`, `destroyed_at` y `created_at`.
+
+Respuestas que clasifica el exporter:
+
+| Status | Significado |
+|--------|-------------|
+| `200` / `201` | insertado en cuarentena |
+| `409` | ese payload ya estaba en cuarentena (dedup opcional por `(source_slug, payload_hash)`) |
+| otro / error de red | error acumulado (no relanza; el run sigue) |
+
+### Reglas del registro de cuarentena
+
+1. UTF-8, JSON válido. Un POST por registro.
+2. `reason_code` y `risk_level` dentro de los enums controlados (los valida el
+   exporter y el `CHECK` de la tabla).
+3. `payload_preview_redacted` SIN PII en claro (redactado), nunca el payload
+   completo.
+4. `pii_findings_summary` lleva conteos por tipo, nunca valores.
+5. `payload_hash` = SHA-256 hex puro (64) del payload original.
+6. Trazabilidad: `source_slug` + `source_url` + `run_id`.
+
+### DDL de referencia (`quarantine_records`, en el backend)
+
+```sql
+CREATE TABLE public.quarantine_records (
+  quarantine_id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  run_id                   uuid NOT NULL,
+  source_slug              text NOT NULL,
+  source_url               text,
+  reason_code              text NOT NULL CHECK (reason_code IN (
+                             'pii_untreatable','invalid_schema','parser_unavailable',
+                             'pdf_no_text','unclassified_sensitive',
+                             'contradictory_sources','ambiguous_manual_review')),
+  reason_detail            text,
+  risk_level               text NOT NULL CHECK (risk_level IN ('low','medium','high')),
+  payload_preview_redacted text,
+  payload_hash             varchar(64),
+  pii_findings_summary     jsonb,
+  review_status            text NOT NULL DEFAULT 'pending' CHECK (review_status IN (
+                             'pending','in_review','approved_for_staging',
+                             'needs_manual_redaction','rejected','destroyed')),
+  review_decision          text,
+  retention_until          timestamptz,
+  destroyed_at             timestamptz,
+  created_at               timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT quarantine_destroyed_consistency CHECK (
+    review_status <> 'destroyed' OR (
+      destroyed_at IS NOT NULL AND payload_hash IS NOT NULL
+      AND payload_preview_redacted IS NULL AND pii_findings_summary IS NULL))
+);
+```
 
 ---
 
@@ -1043,7 +1174,8 @@ python -m scrapers.cli validate --config scrapers/config/sources.demo.yaml
 | Staging exporter (`POST /api/aportes`) | ✅ Issue #81 |
 | Dedup specs + fingerprint v1 | ✅ Issue #81 |
 | Raw artifact store (R2) | ❌ bloqueado por #81 |
-| Quarantine DB | ❌ bloqueado por #81 |
+| Quarantine exporter (`POST /api/quarantine`) + ruteo | ✅ Issue #88 (scraper) |
+| Quarantine DB (tabla `quarantine_records`) | ⏳ Issue #88 (backend) |
 | Watermark por fuente | ❌ Issue #57, bloqueado por #81 |
 | Consolidation job | ❌ Issue #82, bloqueado por #81 |
 | Build job (Supabase → D1) | ❌ bloqueado por canonical |

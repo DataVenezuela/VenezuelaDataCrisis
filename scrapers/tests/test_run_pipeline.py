@@ -31,6 +31,7 @@ import httpx
 import pytest
 
 from scrapers.adapters.base import RawContent
+from scrapers.exporters.quarantine_exporter import QuarantineConfig, QuarantineExporter
 from scrapers.exporters.staging_exporter import StagingConfig, StagingExporter
 from scrapers.models import Person
 from scrapers.models.source import SourceConfig
@@ -102,6 +103,44 @@ def _patch_exporter(transport: httpx.BaseTransport) -> Any:
         return StagingExporter(config, client=client, run_id=run_id)
 
     return patch.object(rp, "StagingExporter", side_effect=_factory)
+
+
+_QUARANTINE_ENV = {
+    "QUARANTINE_API_KEY": "test-key",
+    "QUARANTINE_BASE_URL": "https://backend.test",
+}
+
+
+class _QuarantineTransport(httpx.BaseTransport):
+    """Intercepta POSTs a /api/quarantine y captura los bodies."""
+
+    def __init__(self, status: int = 201) -> None:
+        self.status = status
+        self.posts: list[dict[str, Any]] = []
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/quarantine":
+            self.posts.append(json.loads(request.content))
+            return httpx.Response(self.status, json={"ok": True})
+        return httpx.Response(404)
+
+
+def _patch_quarantine_exporter(transport: httpx.BaseTransport) -> Any:
+    """Factory que reemplaza QuarantineExporter por uno con client mockeado.
+
+    Espeja ``_patch_exporter``: run_pipeline llama
+    ``QuarantineExporter(QuarantineConfig.from_env(), run_id=...)``; la factory
+    inyecta un httpx.Client(transport=...) para que nada salga a la red.
+    """
+    def _factory(
+        config: QuarantineConfig | None, *, run_id: str | None = None
+    ) -> QuarantineExporter:
+        if config is None:
+            return QuarantineExporter(None, run_id=run_id)
+        client = httpx.Client(base_url=config.base_url, transport=transport)
+        return QuarantineExporter(config, client=client, run_id=run_id)
+
+    return patch.object(rp, "QuarantineExporter", side_effect=_factory)
 
 
 def _make_demo_config(tmp_path: Path, sources_yaml: str) -> Path:
@@ -245,6 +284,8 @@ class TestSummaryShape:
             "staging_sent",
             "staging_duplicates",
             "staging_errors",
+            "quarantined",
+            "quarantine_errors",
             "errors",
         }
         assert required.issubset(summary.keys())
@@ -538,12 +579,31 @@ sources:
         assert summary["staging_sent"] == 0
         assert transport.posts == []
 
-    def test_unimplemented_parser_visible_in_summary(self, tmp_path: Path) -> None:
-        """Una fuente con parser no registrado aparece VISIBLE en el resumen.
+    def test_unimplemented_adapter_visible_in_summary(self, tmp_path: Path, demo_config: Path) -> None:
+        """Un type sin adapter omite la fuente, pero NO en silencio: visible en errors.
 
-        No basta con el log.warning silencioso: la omision se contabiliza en
-        summary["errors"] (con el slug, el parser_asignado y la palabra
-        omitida) para que el operador la vea en el resumen del run.
+        No hay payload que cuarentenar (nunca se hizo fetch), pero la omision de
+        una fuente entera debe quedar en summary["errors"] (Issue #88)."""
+        transport = _StagingTransport()
+        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport), patch(
+            "scrapers.pipelines.run_pipeline._get_adapter", return_value=None
+        ):
+            summary = run_pipeline(config_path=demo_config, output_dir=tmp_path / "out")
+        assert transport.posts == []
+        assert summary["quarantined"] == 0
+        omissions = [
+            e for e in summary["errors"]
+            if "adapter no implementado" in e and "encuentralos_tecnosoft" in e
+        ]
+        assert len(omissions) == 1
+        assert summary["staging_errors"] >= 1
+
+    def test_unimplemented_parser_quarantines_not_discards(self, tmp_path: Path) -> None:
+        """Una fuente con parser no registrado NO se descarta: va a cuarentena.
+
+        El contenido crudo se baja y se manda a la Quarantine DB con reason_code
+        ``parser_unavailable`` para revision humana (Issue #88). La situacion
+        ademas queda VISIBLE en summary["errors"] (slug + parser_asignado).
         """
         dump = _make_synthetic_dump(tmp_path)
         cfg = _make_demo_config(tmp_path, f"""
@@ -561,17 +621,25 @@ sources:
     parser_asignado: parser_inexistente
 """)
         transport = _StagingTransport()
-        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport):
+        qtransport = _QuarantineTransport()
+        with patch.dict(
+            os.environ, {**_STAGING_ENV, **_QUARANTINE_ENV}, clear=False
+        ), _patch_exporter(transport), _patch_quarantine_exporter(qtransport):
             summary = run_pipeline(config_path=cfg, output_dir=tmp_path / "out")
+        # Visible en el resumen.
         omissions = [
             e for e in summary["errors"]
-            if "parser no implementado" in e and "omitida" in e
+            if "parser no implementado" in e and "cuarentena" in e
         ]
         assert len(omissions) == 1
         assert "parser_inexistente" in omissions[0]
         assert "fuente_sin_parser" in omissions[0]
-        # La omision tambien cuenta como error de staging (visibilidad numerica).
         assert summary["staging_errors"] >= 1
+        # Nada a staging, pero el registro NO se perdio: fue a cuarentena.
+        assert transport.posts == []
+        assert summary["quarantined"] >= 1
+        assert qtransport.posts[0]["reason_code"] == "parser_unavailable"
+        assert qtransport.posts[0]["source_slug"] == "fuente_sin_parser"
 
     def test_fetch_error_does_not_crash_pipeline(self, tmp_path: Path, demo_config: Path) -> None:
         adapter = _mock_adapter()
@@ -644,7 +712,10 @@ class TestMinorProtectionEndToEnd:
         assert data["cedula_masked"] is None
         assert data["last_known_location"] == "Lara"
 
-    def test_minor_record_omitted_when_protection_raises(self, tmp_path: Path, demo_config: Path) -> None:
+    def test_minor_record_quarantined_when_protection_raises(self, tmp_path: Path, demo_config: Path) -> None:
+        """Si la proteccion de menores falla, el registro NO se exporta a staging
+        (fail-closed) pero TAMPOCO se descarta: va a cuarentena con riesgo alto
+        para redaccion manual (Issue #88)."""
         persons = [
             Person(
                 full_name="NINIO DEMO PEREZ",
@@ -656,7 +727,10 @@ class TestMinorProtectionEndToEnd:
             )
         ]
         transport = _StagingTransport()
-        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport), patch(
+        qtransport = _QuarantineTransport()
+        with patch.dict(
+            os.environ, {**_STAGING_ENV, **_QUARANTINE_ENV}, clear=False
+        ), _patch_exporter(transport), _patch_quarantine_exporter(qtransport), patch(
             "scrapers.pipelines.run_pipeline._get_adapter", return_value=_mock_adapter()
         ), patch(
             "scrapers.pipelines.run_pipeline._get_parser", return_value=_mock_parser(persons)
@@ -664,8 +738,13 @@ class TestMinorProtectionEndToEnd:
             "scrapers.pipelines.run_pipeline.protect_minor_fields", side_effect=ValueError("boom")
         ):
             summary = run_pipeline(config_path=demo_config, output_dir=tmp_path / "out")
+        # Fail-closed: nada del menor llega a staging.
         assert transport.posts == []
-        assert any("registro omitido" in e for e in summary["errors"])
+        assert any("proteccion de menores" in e for e in summary["errors"])
+        # Pero el registro se preservo en cuarentena, riesgo alto.
+        assert summary["quarantined"] == 1
+        assert qtransport.posts[0]["reason_code"] == "pii_untreatable"
+        assert qtransport.posts[0]["risk_level"] == "high"
 
 
 # ---------------------------------------------------------------------------

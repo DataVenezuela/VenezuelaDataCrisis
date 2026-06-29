@@ -103,9 +103,17 @@ export PII_SALT="mismo-valor"
 # Credenciales de dataVenezuela (staging exporter)
 export DATAVZLA_API_KEY="x-api-key del scraper"
 export DATAVZLA_BASE_URL="https://..."
+
+# Cuarentena (quarantine exporter, Issue #88) — POST /api/quarantine
+export QUARANTINE_API_KEY="x-api-key del scraper"
+export QUARANTINE_BASE_URL="https://..."
 ```
 
 Sin `PII_HMAC_SECRET`, el pipeline corre pero `cedula_hmac` queda `None`. Aceptable en CI offline; obligatorio en producción.
+
+Sin `QUARANTINE_API_KEY` / `QUARANTINE_BASE_URL`, el quarantine exporter entra en
+dry-run silencioso (no envía nada, no falla). En producción son obligatorias:
+los registros no procesables deben preservarse, no perderse.
 
 ---
 
