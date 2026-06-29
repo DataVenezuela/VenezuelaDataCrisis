@@ -1,42 +1,76 @@
 {
-  "-Ndemo001": {
-    "nombre": "Centro de Acopio Demo Caracas",
-    "estado": "Distrito Capital",
-    "municipio": "Libertador",
-    "lat": 10.492,
-    "lng": -66.942,
-    "capacidad": "disponible",
-    "insumos": ["Agua potable", "Alimentos no perecederos", "Medicamentos"],
-    "actualizadoEn": 1751000000000
-  },
-  "-Ndemo002": {
-    "nombre": "Polideportivo Demo San Felipe",
-    "estado": "Yaracuy",
-    "municipio": "San Felipe",
-    "lat": 10.34,
-    "lng": -68.74,
-    "capacidad": "lleno",
-    "insumos": ["Colchonetas", "Pañales", "Leche de fórmula"],
-    "actualizadoEn": 1751000100000
-  },
-  "-Ndemo003": {
-    "nombre": "Refugio Demo Lara",
-    "estado": "Lara",
-    "municipio": null,
-    "lat": 10.07,
-    "lng": -69.32,
-    "capacidad": "parcial",
-    "insumos": ["Ropa", "Calzado", "Kit de higiene"],
-    "actualizadoEn": 1751000200000
-  },
-  "-Ndemo004": {
-    "nombre": "Punto Demo Zulia",
-    "estado": "Zulia",
-    "municipio": "Maracaibo",
-    "lat": 10.65,
-    "lng": -71.64,
-    "capacidad": null,
-    "insumos": ["Hielo seco artesanal"],
-    "actualizadoEn": null
-  }
+  "data": [
+    {
+      "id": "892c4d85-3fc8-4700-9ac9-8369fb1019fc",
+      "name": "Centro de Acopio Demo Diáspora",
+      "tipo": "acopio",
+      "estado": "abierto",
+      "address": "Calle Demo 100, Ciudad Demo",
+      "ciudad": "Ciudad de Panamá",
+      "pais": "Panamá",
+      "lat": 8.9714493,
+      "lng": -79.5341802,
+      "recibe": ["agua", "Alimentos no perecederos", "Medicamentos"],
+      "necesita_ahora": "Insumos de prueba",
+      "horario": "Demo",
+      "contacto": "Por confirmar",
+      "responsable": "Comunidad demo",
+      "fuente": "@demo_fuente_1",
+      "updated_at": "2026-06-29T06:00:00Z"
+    },
+    {
+      "id": "dfd82016-5604-4cdd-8358-cd13163f4d8f",
+      "name": "Refugio Demo Norte",
+      "tipo": "refugio",
+      "estado": "lleno",
+      "address": "Avenida Demo 200, Pueblo Demo",
+      "ciudad": "Pueblo Demo",
+      "pais": "Estados Unidos",
+      "lat": 34.145695,
+      "lng": -118.130486,
+      "recibe": ["Ropa", "Higiene personal", "Pañales", "Frazadas"],
+      "necesita_ahora": "Ayuda humanitaria",
+      "horario": "Demo",
+      "contacto": "Por confirmar",
+      "responsable": "Comunidad demo",
+      "fuente": "@demo_fuente_2",
+      "updated_at": "2026-06-29T05:00:00Z"
+    },
+    {
+      "id": "e2548f94-59a8-4e14-b798-0aca20e2f530",
+      "name": "Centro Demo Solo Ciudad",
+      "tipo": "acopio",
+      "estado": "cerrado",
+      "address": "Plaza Demo 300",
+      "ciudad": "Ciudad Solo Demo",
+      "pais": null,
+      "lat": 40.217021,
+      "lng": -74.7285748,
+      "recibe": ["Artículos de bebé"],
+      "necesita_ahora": "Por confirmar",
+      "horario": "Demo",
+      "contacto": "Por confirmar",
+      "responsable": "Comunidad demo",
+      "fuente": "@demo_fuente_3",
+      "updated_at": "2026-06-29T04:00:00Z"
+    },
+    {
+      "id": "9137cd3b-9fa1-4534-90fd-7cf2c5376e9c",
+      "name": "Centro Demo Sin Estado",
+      "tipo": "acopio",
+      "estado": null,
+      "address": "Calle Demo 400",
+      "ciudad": "Otra Ciudad Demo",
+      "pais": "Estados Unidos",
+      "lat": 40.6189195,
+      "lng": -74.4243632,
+      "recibe": ["agua", "alimentos"],
+      "necesita_ahora": "Por confirmar",
+      "horario": "Demo",
+      "contacto": "Por confirmar",
+      "responsable": "Comunidad demo",
+      "fuente": "@demo_fuente_4",
+      "updated_at": "2026-06-29T03:00:00Z"
+    }
+  ]
 }

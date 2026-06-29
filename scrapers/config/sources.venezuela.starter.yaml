@@ -73,8 +73,8 @@ sources:
     type: api_json
     enabled: false
     trust_tier: C
-    url: "https://acopio-ve-2026-default-rtdb.firebaseio.com/centros.json"
+    url: "https://api.acopiove.org/v1/centros?format=json"
     refresh_minutes: 30
     parser_asignado: acopio_ve
     required_keywords: []
-    notes: "Issue #99. Firebase RTDB → AcopioCenter. Disabled hasta confirmar con el dev la forma del payload (objeto {push_id: centro} vs lista) contra el endpoint real."
+    notes: "Issue #99. API real api.acopiove.org/v1/centros -> AcopioCenter (payload {data:[...]}). Parser validado contra datos reales. Disabled hasta verificar la paginación del ApiAdapter contra esta API antes de habilitar en prod."

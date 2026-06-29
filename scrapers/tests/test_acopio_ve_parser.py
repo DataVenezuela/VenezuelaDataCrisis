@@ -4,20 +4,21 @@ scrapers/tests/test_acopio_ve_parser.py
 Tests del AcopioVeParser con fixture sintético (issue #99).
 
 No se realiza ninguna llamada de red. El fixture vive en
-``scrapers/tests/fixtures/acopio_ve_sample.json`` y reproduce la
-estructura del endpoint Firebase RTDB (campos reales, datos 100% ficticios).
+``scrapers/tests/fixtures/acopio_ve_sample.json`` y reproduce la estructura
+real del endpoint ``api.acopiove.org/v1/centros`` (campos reales, datos 100%
+ficticios — sin nombres, direcciones ni contactos reales).
 
 Cobertura
 ---------
-- Mapeo de todos los campos de la fuente a AcopioCenter
-- capacidad → status (disponible/parcial → active, lleno → full, ausente → unverified)
-- insumos (texto libre) → keywords controlados; desconocido → "otro"; sin duplicados
-- coordinates: lat/lng → {"lat", "lon"}; inválidas → None sin descartar el registro
-- location_text desde estado/municipio (normalize_location)
-- nota con capacidad cruda + fecha de actualización (trazabilidad)
+- Mapeo de los campos reales (name/ciudad/pais/lat/lng/recibe/estado) a AcopioCenter
+- estado → status (abierto → active, lleno → full, cerrado → closed, ausente → unverified)
+- recibe → keywords controlados; categorías reales con casing mixto; desconocido → "otro"
+- coordinates: lat/lng → {"lat", "lon"}; inválidas/NaN/Inf → None sin descartar el registro
+- location_text desde ciudad + pais (centros internacionales; sin normalize_location VE)
+- nota con tipo, recibe crudo y fecha (trazabilidad; sin PII de contacto)
 - Registro sin nombre → omitido; registro sin ubicación → omitido
 - Tolerancia: un registro malo no rompe el resto; raw_content malformado
-- Formas de payload: lista, {"data": [...]} y {push_id: centro} (Firebase)
+- Formas de payload: {"data": [...]} (real), lista y {id: centro}
 - ParserProtocol satisfecho
 """
 
@@ -59,8 +60,8 @@ def _make_raw(payload: Any) -> RawContent:
     """Construye un RawContent mínimo con el payload dado."""
     return RawContent(
         source_key=SOURCE_KEY,
-        source_url="https://acopio-ve-2026-default-rtdb.firebaseio.com/centros.json",
-        fetched_at="2026-06-28T12:00:00Z",
+        source_url="https://api.acopiove.org/v1/centros?format=json",
+        fetched_at="2026-06-29T12:00:00Z",
         http_status=200,
         content_type="application/json",
         content_hash="sha256:abc",
@@ -129,59 +130,65 @@ class TestFieldMapping:
         self.centers = _parser().parse(_make_raw(_load_fixture()))
 
     def test_name_preserves_casing(self) -> None:
-        c = _by_name(self.centers, "Demo Caracas")
+        c = _by_name(self.centers, "Demo Diáspora")
         # normalize_text no fuerza Title Case: el nombre se conserva.
-        assert c.name == "Centro de Acopio Demo Caracas"
+        assert c.name == "Centro de Acopio Demo Diáspora"
 
-    def test_location_text_municipio_estado(self) -> None:
-        c = _by_name(self.centers, "Demo Caracas")
-        assert c.location_text == "Libertador, Distrito Capital"
+    def test_location_text_ciudad_pais(self) -> None:
+        c = _by_name(self.centers, "Demo Diáspora")
+        assert c.location_text == "Ciudad de Panamá, Panamá"
 
-    def test_location_text_only_estado(self) -> None:
-        c = _by_name(self.centers, "Demo Lara")
-        assert c.location_text == "Lara"
+    def test_location_text_only_ciudad(self) -> None:
+        # Registro con pais=null → solo ciudad.
+        c = _by_name(self.centers, "Solo Ciudad")
+        assert c.location_text == "Ciudad Solo Demo"
 
     def test_coordinates_use_lon_key(self) -> None:
-        c = _by_name(self.centers, "Demo Caracas")
-        assert c.coordinates == {"lat": 10.492, "lon": -66.942}
+        c = _by_name(self.centers, "Demo Diáspora")
+        assert c.coordinates == {"lat": 8.9714493, "lon": -79.5341802}
 
     def test_needs_mapped_to_keywords(self) -> None:
-        c = _by_name(self.centers, "Demo Caracas")
+        # ["agua", "Alimentos no perecederos", "Medicamentos"]
+        c = _by_name(self.centers, "Demo Diáspora")
         assert c.needs == ["agua", "alimentos", "medicamentos"]
 
-    def test_needs_panales_and_leche(self) -> None:
-        c = _by_name(self.centers, "San Felipe")
-        assert c.needs == ["colchonetas", "pañales", "leche_formula"]
+    def test_needs_mixed_casing_and_phrases(self) -> None:
+        # ["Ropa", "Higiene personal", "Pañales", "Frazadas"]
+        c = _by_name(self.centers, "Refugio Demo Norte")
+        assert c.needs == ["ropa", "higiene", "pañales", "colchonetas"]
 
     def test_needs_unknown_to_otro(self) -> None:
-        c = _by_name(self.centers, "Demo Zulia")
+        # "Artículos de bebé" no encaja en el vocabulario controlado.
+        c = _by_name(self.centers, "Solo Ciudad")
         assert c.needs == ["otro"]
 
-    def test_nota_has_capacidad_and_date(self) -> None:
-        c = _by_name(self.centers, "Demo Caracas")
+    def test_nota_has_tipo_and_recibe_raw(self) -> None:
+        c = _by_name(self.centers, "Demo Diáspora")
         assert c.nota is not None
-        assert "[capacidad:disponible]" in c.nota
-        assert "actualizado_en=" in c.nota
+        assert "[tipo:acopio]" in c.nota
+        # El recibe crudo se conserva para no perder categorías reales.
+        assert "Alimentos no perecederos" in c.nota
 
-    def test_nota_none_when_no_metadata(self) -> None:
-        # Demo Zulia: capacidad null + actualizadoEn null → nota None
-        c = _by_name(self.centers, "Demo Zulia")
-        assert c.nota is None
+    def test_nota_excludes_contacto(self) -> None:
+        # contacto puede traer PII (teléfonos) — nunca debe ir a nota.
+        c = _by_name(self.centers, "Demo Diáspora")
+        assert c.nota is not None
+        assert "contacto" not in c.nota.lower()
 
 
 # ---------------------------------------------------------------------------
-# Tests: capacidad → status
+# Tests: estado → status
 # ---------------------------------------------------------------------------
 
 class TestStatusMapping:
-    def test_disponible_is_active(self) -> None:
-        assert _map_status("disponible") == "active"
-
-    def test_parcial_is_active(self) -> None:
-        assert _map_status("parcial") == "active"
+    def test_abierto_is_active(self) -> None:
+        assert _map_status("abierto") == "active"
 
     def test_lleno_is_full(self) -> None:
         assert _map_status("lleno") == "full"
+
+    def test_cerrado_is_closed(self) -> None:
+        assert _map_status("cerrado") == "closed"
 
     def test_unknown_is_unverified(self) -> None:
         assert _map_status("cualquier_cosa") == "unverified"
@@ -190,11 +197,11 @@ class TestStatusMapping:
         assert _map_status(None) == "unverified"
 
     def test_case_and_accent_insensitive(self) -> None:
-        assert _map_status("  DISPONIBLE ") == "active"
+        assert _map_status("  ABIERTO ") == "active"
 
 
 # ---------------------------------------------------------------------------
-# Tests: insumos → needs
+# Tests: recibe → needs
 # ---------------------------------------------------------------------------
 
 class TestNeedsMapping:
@@ -204,14 +211,23 @@ class TestNeedsMapping:
     def test_none(self) -> None:
         assert _normalize_needs(None) == []
 
-    def test_string_input_coerced(self) -> None:
-        assert _normalize_needs("Agua potable") == ["agua"]
+    def test_real_categories_with_mixed_casing(self) -> None:
+        # Valores reales observados en la API.
+        recibe = ["Agua", "Alimentos no perecederos", "Higiene personal", "Pañales"]
+        assert _normalize_needs(recibe) == ["agua", "alimentos", "higiene", "pañales"]
+
+    def test_comma_separated_string(self) -> None:
+        # El doc de la API menciona la forma "agua,alimentos".
+        assert _normalize_needs("agua,alimentos") == ["agua", "alimentos"]
 
     def test_dedup_preserves_order(self) -> None:
-        assert _normalize_needs(["Agua", "agua potable", "Medicinas"]) == ["agua", "medicamentos"]
+        assert _normalize_needs(["Agua", "agua", "Medicamentos"]) == ["agua", "medicamentos"]
+
+    def test_frazadas_maps_to_colchonetas(self) -> None:
+        assert _normalize_needs(["Frazadas"]) == ["colchonetas"]
 
     def test_unknown_maps_to_otro(self) -> None:
-        assert _normalize_needs(["objeto raro sin categoria"]) == ["otro"]
+        assert _normalize_needs(["Artículos de bebé"]) == ["otro"]
 
 
 # ---------------------------------------------------------------------------
@@ -234,9 +250,9 @@ class TestCoordinates:
         assert _coordinates(0.0, 999.0) is None
 
     def test_nan_and_inf_return_none(self) -> None:
-        # NaN/Inf no lanzan en float(), pero toda comparación con NaN da False
-        # (IEEE 754), así que `not -90 <= nan <= 90` es True y el chequeo de
-        # rango los descarta: nunca se cuelan como coordenadas.
+        # NaN/Inf no lanzan en float(), pero toda comparación de orden con NaN
+        # da False (IEEE 754), así que `not -90 <= nan <= 90` es True y el
+        # chequeo de rango los descarta: nunca se cuelan como coordenadas.
         nan = float("nan")
         inf = float("inf")
         assert _coordinates(nan, -66.0) is None
@@ -251,17 +267,25 @@ class TestCoordinates:
 
 class TestRobustness:
     def test_record_without_name_is_skipped(self) -> None:
-        raw = _make_raw([{"estado": "Lara", "lat": 10.0, "lng": -69.0}])
+        raw = _make_raw([{"ciudad": "Caracas", "pais": "Venezuela", "lat": 10.0, "lng": -69.0}])
         assert _parser().parse(raw) == []
 
     def test_record_without_location_is_skipped(self) -> None:
-        raw = _make_raw([{"nombre": "Centro Demo Sin Ubicacion"}])
+        # Sin ciudad, pais ni address → no se puede construir location_text.
+        raw = _make_raw([{"name": "Centro Demo Sin Ubicacion"}])
         assert _parser().parse(raw) == []
+
+    def test_address_fallback_when_no_ciudad_pais(self) -> None:
+        raw = _make_raw([{"name": "Centro Demo Address", "address": "Calle Demo 500"}])
+        centers = _parser().parse(raw)
+        assert len(centers) == 1
+        assert centers[0].location_text == "Calle Demo 500"
 
     def test_bad_coordinates_keep_record(self) -> None:
         raw = _make_raw([{
-            "nombre": "Centro Demo Coords Malas",
-            "estado": "Lara",
+            "name": "Centro Demo Coords Malas",
+            "ciudad": "Caracas",
+            "pais": "Venezuela",
             "lat": 999.0,
             "lng": -69.0,
         }])
@@ -271,8 +295,8 @@ class TestRobustness:
 
     def test_one_bad_record_does_not_break_others(self) -> None:
         raw = _make_raw([
-            {"nombre": None, "estado": "Lara"},                  # se omite
-            {"nombre": "Centro Demo Valido", "estado": "Zulia"},  # válido
+            {"name": None, "ciudad": "Caracas"},                       # se omite
+            {"name": "Centro Demo Valido", "ciudad": "Valencia"},      # válido
         ])
         centers = _parser().parse(raw)
         assert len(centers) == 1
@@ -284,29 +308,31 @@ class TestRobustness:
 
 
 # ---------------------------------------------------------------------------
-# Tests: Formas del payload (lista / data-wrapper / Firebase dict)
+# Tests: Formas del payload ({"data": [...]} / lista / {id: centro})
 # ---------------------------------------------------------------------------
 
 class TestPayloadShapes:
     _CENTER = {
-        "nombre": "Centro Demo Forma",
-        "estado": "Yaracuy",
-        "municipio": "San Felipe",
-        "lat": 10.34,
-        "lng": -68.74,
-        "capacidad": "disponible",
-        "insumos": ["Agua"],
-        "actualizadoEn": 1751000000000,
+        "name": "Centro Demo Forma",
+        "tipo": "acopio",
+        "estado": "abierto",
+        "ciudad": "Ciudad Demo",
+        "pais": "Panamá",
+        "lat": 8.97,
+        "lng": -79.53,
+        "recibe": ["agua"],
+        "updated_at": "2026-06-29T06:00:00Z",
     }
+
+    def test_data_wrapper_form(self) -> None:
+        # Forma real de /centros.
+        centers = _parser().parse(_make_raw({"data": [self._CENTER]}))
+        assert len(centers) == 1
 
     def test_list_form(self) -> None:
         centers = _parser().parse(_make_raw([self._CENTER]))
         assert len(centers) == 1
 
-    def test_data_wrapper_form(self) -> None:
-        centers = _parser().parse(_make_raw({"data": [self._CENTER]}))
-        assert len(centers) == 1
-
-    def test_firebase_dict_form(self) -> None:
-        centers = _parser().parse(_make_raw({"-Npush123": self._CENTER}))
+    def test_id_keyed_dict_form(self) -> None:
+        centers = _parser().parse(_make_raw({"abc123": self._CENTER}))
         assert len(centers) == 1

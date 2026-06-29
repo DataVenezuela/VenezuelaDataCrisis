@@ -1,59 +1,68 @@
 """
 scrapers/parsers/acopio_ve_parser.py
 =====================================
-Parser concreto para la fuente comunitaria **Acopio VE**
-(``acopio-ve-2026.web.app`` — issue #99).
+Parser concreto para la fuente comunitaria **Acopio VE** (issue #99).
 
-Recibe el ``RawContent`` producido por ``ApiAdapter`` contra el endpoint
-público de Firebase RTDB y devuelve ``list[AcopioCenter]``.
+Recibe el ``RawContent`` producido por ``ApiAdapter`` contra
+``https://api.acopiove.org/v1/centros?format=json`` y devuelve
+``list[AcopioCenter]``.
 
-Mapeo de campos
----------------
-API field          → AcopioCenter field
------------------  -----------------------------------------------
-nombre             name            (normalize_text — preserva casing)
-estado / municipio location_text   (normalize_location → string legible)
-lat / lng          coordinates     ({"lat": ..., "lon": ...}; None si inválidas)
-insumos            needs           (texto libre → keyword controlado; ver abajo)
-capacidad          status          (ver _CAPACIDAD_STATUS_MAP)
-capacidad          nota            (se conserva el valor crudo para trazabilidad)
-actualizadoEn      nota            (epoch ms → ISO 8601 UTC)
+La fuente lista centros de acopio y refugios de la diáspora venezolana en
+todo el mundo (no solo en Venezuela), así que la ubicación se toma tal cual
+la entrega la API (``ciudad`` + ``pais``) sin normalización geográfica
+venezolana.
 
-Mapeo de capacidad → status
----------------------------
-API value          → AcopioCenter.status enum
------------------  -------------------------
-disponible         active
-parcial            active
-lleno              full
-*cualquier otro*   unverified
+Mapeo de campos (contra el contrato real de ``/centros``)
+---------------------------------------------------------
+API field        -> AcopioCenter field
+---------------  -----------------------------------------------
+name             name            (normalize_text — preserva casing)
+ciudad / pais    location_text   ("Ciudad, Pais"; fallback a address)
+lat / lng        coordinates     ({"lat": ..., "lon": ...}; None si inválidas)
+recibe           needs           (categorías -> keyword controlado; ver abajo)
+estado           status          (ver _ESTADO_STATUS_MAP)
+tipo / recibe /  nota            (trazabilidad: tipo, necesidad, recibe crudo,
+necesita_ahora /                  fecha y fuente upstream)
+updated_at / fuente
+
+Mapeo de estado -> status
+-------------------------
+API value        -> AcopioCenter.status enum
+---------------  -------------------------
+abierto          active
+lleno            full
+cerrado          closed
+*cualquier otro* unverified
+
+Categorías de ``recibe``
+------------------------
+La API devuelve ``recibe`` con casing mixto y categorías multi-palabra
+(``"Alimentos no perecederos"``, ``"Artículos de bebé"``, ``"Frazadas"``...).
+Se mapean al vocabulario controlado del contrato por substring; lo que no
+encaja cae en ``otro`` (regla del contrato) y el ``recibe`` crudo se
+conserva en ``nota`` para no perder ninguna categoría real.
 
 PII
 ---
 Un centro de acopio es un lugar público, no una persona. El modelo
-``AcopioCenter`` actual no tiene campos de contacto y la fuente no expone
-PII de personas en el esquema documentado, así que este parser **no
-aplica HMAC ni almacena PII de personas**. Los mensajes de log no incluyen
-valores de campos del registro.
+``AcopioCenter`` no tiene campos de contacto, así que el campo ``contacto``
+de la fuente (que a veces trae teléfonos) **no se almacena ni se loguea**.
+Los mensajes de log no incluyen valores de campos del registro.
 
-Forma del payload (supuesto a confirmar)
-----------------------------------------
-Firebase RTDB en ``/centros.json`` puede devolver el contenido como un
-objeto ``{push_id: {centro}}`` o como una lista ``[{centro}]``. El parser
-tolera ambas formas (y también un envoltorio ``{"data": [...]}``). La forma
-exacta debe confirmarse con el dev de Acopio VE antes de habilitar la
-fuente en producción (ver nota en el YAML de fuentes).
+Forma del payload
+-----------------
+``/centros`` devuelve ``{"data": [ {centro}, ... ]}``. El parser también
+tolera una lista directa y el objeto ``{id: {centro}}`` por robustez.
 """
 
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
 from typing import Any
 
 from scrapers.adapters.base import RawContent
 from scrapers.models import AcopioCenter
-from scrapers.normalizers import normalize_for_match, normalize_location, normalize_text
+from scrapers.normalizers import normalize_for_match, normalize_text
 
 log = logging.getLogger(__name__)
 
@@ -62,31 +71,32 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 SOURCE_KEY = "acopio_ve"
-FUENTE_LABEL = "acopio-ve-2026.web.app"
+FUENTE_LABEL = "acopiove.org"
 DEFAULT_TRUST_TIER = "C"   # data comunitaria en tiempo real, sin validación cruzada
 
-# Valor de capacidad de la fuente → enum status de AcopioCenter.
-_CAPACIDAD_STATUS_MAP: dict[str, str] = {
-    "disponible": "active",
-    "parcial":    "active",
-    "lleno":      "full",
+# Valor del campo ``estado`` de la fuente -> enum status de AcopioCenter.
+_ESTADO_STATUS_MAP: dict[str, str] = {
+    "abierto": "active",
+    "lleno":   "full",
+    "cerrado": "closed",
 }
 
-# Sinónimos de insumos (texto libre) → keyword controlado del contrato.
-# Las claves van en forma normalizada para match (minúscula, sin acentos,
-# ñ→n) porque se comparan contra la salida de ``normalize_for_match``.
-# La comparación es por substring, así que basta la raíz del término
-# ("aliment" cubre alimento/alimentos/alimentación).
+# Sinónimos de categorías de ``recibe`` -> keyword controlado del contrato.
+# Claves en forma normalizada (minúscula, sin acentos, ñ->n) porque se comparan
+# contra la salida de ``normalize_for_match``. Comparación por substring: basta
+# la raíz ("aliment" cubre "Alimentos no perecederos").
 _NEED_SYNONYMS: tuple[tuple[str, str], ...] = (
     ("agua",            "agua"),
     ("aliment",         "alimentos"),
     ("comida",          "alimentos"),
     ("viver",           "alimentos"),
-    ("pereceder",       "alimentos"),
     ("medicament",      "medicamentos"),
     ("medicina",        "medicamentos"),
     ("farmac",          "medicamentos"),
     ("colchon",         "colchonetas"),
+    ("frazada",         "colchonetas"),
+    ("cobija",          "colchonetas"),
+    ("manta",           "colchonetas"),
     ("ropa",            "ropa"),
     ("vestiment",       "ropa"),
     ("calzado",         "calzado"),
@@ -97,11 +107,8 @@ _NEED_SYNONYMS: tuple[tuple[str, str], ...] = (
     ("leche",           "leche_formula"),
     ("formula",         "leche_formula"),
     ("generador",       "generador"),
-    ("planta electrica", "generador"),
     ("combustible",     "combustible"),
     ("gasolina",        "combustible"),
-    ("gasoil",          "combustible"),
-    ("diesel",          "combustible"),
     ("herramient",      "herramientas"),
     ("voluntari",       "voluntarios"),
     ("transporte",      "transporte"),
@@ -113,46 +120,33 @@ _NEED_SYNONYMS: tuple[tuple[str, str], ...] = (
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _map_status(raw_capacidad: Any) -> str:
-    """Convierte el valor de capacidad de la fuente al enum status."""
-    if not raw_capacidad:
+def _map_status(raw_estado: Any) -> str:
+    """Convierte el campo ``estado`` de la fuente al enum status del modelo."""
+    if not raw_estado:
         return "unverified"
-    return _CAPACIDAD_STATUS_MAP.get(normalize_for_match(str(raw_capacidad)), "unverified")
+    return _ESTADO_STATUS_MAP.get(normalize_for_match(str(raw_estado)), "unverified")
 
 
 def _location_text(rec: dict[str, Any]) -> str | None:
     """
-    Construye un ``location_text`` legible a partir de estado y municipio.
+    Construye un ``location_text`` legible: ``"Ciudad, Pais"``.
 
-    Combina ``"Municipio, Estado"`` y lo pasa por ``normalize_location`` para
-    canonicalizar nombres de estados venezolanos. Si la fuente no trae ni
-    estado ni municipio, devuelve ``None`` (el registro se omite: el modelo
-    exige ``location_text`` no vacío).
+    Los centros son internacionales, así que NO se aplica normalización
+    geográfica venezolana. Fallback a ``address`` y, si no hay nada, ``None``
+    (el registro se omite: el modelo exige ``location_text`` no vacío).
     """
-    estado = normalize_text(rec.get("estado"))
-    municipio = normalize_text(rec.get("municipio"))
+    ciudad = normalize_text(rec.get("ciudad"))
+    pais = normalize_text(rec.get("pais"))
 
-    if municipio and estado:
-        raw = f"{municipio}, {estado}"
-    elif estado:
-        raw = estado
-    elif municipio:
-        raw = municipio
-    else:
-        return None
+    if ciudad and pais:
+        return f"{ciudad}, {pais}"
+    if ciudad:
+        return ciudad
+    if pais:
+        return pais
 
-    loc = normalize_location(raw)
-    loc_estado = loc.get("estado")
-    loc_municipio = loc.get("municipio")
-    loc_raw = loc.get("raw")
-
-    if loc_municipio and loc_estado:
-        return f"{loc_municipio}, {loc_estado}"
-    if loc_estado:
-        return str(loc_estado)
-    if loc_raw:
-        return str(loc_raw)
-    return raw or None
+    address = normalize_text(rec.get("address"))
+    return address or None
 
 
 def _coordinates(lat: Any, lng: Any) -> dict[str, float] | None:
@@ -178,15 +172,15 @@ def _coordinates(lat: Any, lng: Any) -> dict[str, float] | None:
     return {"lat": lat_f, "lon": lon_f}
 
 
-def _normalize_need(raw_insumo: Any) -> str | None:
+def _normalize_need(raw_categoria: Any) -> str | None:
     """
-    Mapea un insumo de texto libre al keyword controlado del contrato.
+    Mapea una categoría de ``recibe`` al keyword controlado del contrato.
 
-    Devuelve ``None`` si el insumo está vacío, o ``"otro"`` si no coincide
-    con ningún sinónimo conocido (el contrato exige que lo desconocido caiga
-    en ``otro``, nunca que se descarte).
+    Devuelve ``None`` si está vacía, o ``"otro"`` si no coincide con ningún
+    sinónimo conocido (el contrato exige que lo desconocido caiga en ``otro``,
+    nunca que se descarte — y el ``recibe`` crudo queda en ``nota``).
     """
-    norm = normalize_for_match(raw_insumo if isinstance(raw_insumo, str) else str(raw_insumo or ""))
+    norm = normalize_for_match(raw_categoria if isinstance(raw_categoria, str) else str(raw_categoria or ""))
     if not norm:
         return None
     for synonym, keyword in _NEED_SYNONYMS:
@@ -195,12 +189,12 @@ def _normalize_need(raw_insumo: Any) -> str | None:
     return "otro"
 
 
-def _normalize_needs(insumos: Any) -> list[str]:
-    """Normaliza la lista de insumos a keywords controlados, sin duplicados."""
-    if isinstance(insumos, str):
-        items: list[Any] = [insumos]
-    elif isinstance(insumos, (list, tuple)):
-        items = list(insumos)
+def _normalize_needs(recibe: Any) -> list[str]:
+    """Normaliza ``recibe`` (lista o string separado por comas) a keywords."""
+    if isinstance(recibe, str):
+        items: list[Any] = recibe.split(",")
+    elif isinstance(recibe, (list, tuple)):
+        items = list(recibe)
     else:
         return []
 
@@ -212,32 +206,39 @@ def _normalize_needs(insumos: Any) -> list[str]:
     return result
 
 
-def _iso_from_epoch_ms(value: Any) -> str | None:
-    """Convierte un timestamp epoch en milisegundos a ISO 8601 UTC."""
-    if value is None:
-        return None
-    try:
-        seconds = float(value) / 1000.0
-        return datetime.fromtimestamp(seconds, tz=timezone.utc).isoformat().replace("+00:00", "Z")
-    except (TypeError, ValueError, OSError, OverflowError):
-        return None
-
-
 def _build_nota(rec: dict[str, Any]) -> str | None:
     """
-    Conserva en ``nota`` la capacidad cruda y la fecha de actualización.
+    Conserva en ``nota`` metadatos de trazabilidad sin PII.
 
-    ``capacidad`` se mapea a ``status`` (perdiendo el matiz disponible/parcial),
-    así que el valor original se guarda aquí para no perder trazabilidad.
+    Incluye tipo (acopio/refugio), la necesidad declarada, el ``recibe`` crudo
+    (para no perder categorías que cayeron en ``otro``), la fecha de
+    actualización y la fuente upstream. No incluye ``contacto`` (posible PII).
     """
     parts: list[str] = []
-    capacidad = normalize_text(rec.get("capacidad"))
-    if capacidad:
-        parts.append(f"[capacidad:{capacidad}]")
-    iso = _iso_from_epoch_ms(rec.get("actualizadoEn"))
-    if iso:
-        parts.append(f"actualizado_en={iso}")
-    return " ".join(parts) if parts else None
+
+    tipo = normalize_text(rec.get("tipo"))
+    if tipo:
+        parts.append(f"[tipo:{tipo}]")
+
+    necesita = normalize_text(rec.get("necesita_ahora"))
+    if necesita:
+        parts.append(f"necesita: {necesita}")
+
+    recibe = rec.get("recibe")
+    if isinstance(recibe, (list, tuple)) and recibe:
+        parts.append("recibe: " + ", ".join(normalize_text(str(r)) for r in recibe))
+    elif isinstance(recibe, str) and recibe.strip():
+        parts.append(f"recibe: {normalize_text(recibe)}")
+
+    updated_at = normalize_text(rec.get("updated_at"))
+    if updated_at:
+        parts.append(f"actualizado: {updated_at}")
+
+    fuente_upstream = normalize_text(rec.get("fuente"))
+    if fuente_upstream:
+        parts.append(f"fuente_origen: {fuente_upstream}")
+
+    return " | ".join(parts) if parts else None
 
 
 # ---------------------------------------------------------------------------
@@ -246,7 +247,7 @@ def _build_nota(rec: dict[str, Any]) -> str | None:
 
 class AcopioVeParser:
     """
-    Parser para la API pública de Acopio VE (Firebase RTDB).
+    Parser para la API pública de Acopio VE (``api.acopiove.org/v1/centros``).
 
     Implementa ``ParserProtocol``.
 
@@ -293,8 +294,8 @@ class AcopioVeParser:
         """
         Normaliza las distintas formas del payload a una lista de dicts.
 
-        Soporta lista directa, envoltorio ``{"data": [...]}`` y el objeto
-        ``{push_id: {centro}}`` típico de Firebase RTDB.
+        Forma real de ``/centros``: ``{"data": [...]}``. También tolera una
+        lista directa y el objeto ``{id: {centro}}`` por robustez.
         """
         payload = raw.get("raw_content")
 
@@ -305,7 +306,6 @@ class AcopioVeParser:
             data = payload.get("data")
             if isinstance(data, list):
                 return [r for r in data if isinstance(r, dict)]
-            # Firebase RTDB: objeto keyado por push-id → tomar los valores.
             return [v for v in payload.values() if isinstance(v, dict)]
 
         log.warning(
@@ -326,7 +326,7 @@ class AcopioVeParser:
         (ambos obligatorios en el modelo). No lanza: cualquier fallo de
         validación Pydantic se captura y loguea.
         """
-        name = normalize_text(rec.get("nombre"))
+        name = normalize_text(rec.get("name"))
         if not name:
             log.warning("%s: registro sin nombre — omitido", SOURCE_KEY)
             return None
@@ -337,8 +337,8 @@ class AcopioVeParser:
             return None
 
         coordinates = _coordinates(rec.get("lat"), rec.get("lng"))
-        needs = _normalize_needs(rec.get("insumos"))
-        status = _map_status(rec.get("capacidad"))
+        needs = _normalize_needs(rec.get("recibe"))
+        status = _map_status(rec.get("estado"))
         nota = _build_nota(rec)
 
         try:
