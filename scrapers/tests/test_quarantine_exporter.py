@@ -5,7 +5,7 @@ Tests del QuarantineExporter, 100% offline.
 
 Ningun test hace red real: el httpx.Client se construye con un
 ``_RecordingTransport`` (subclase de httpx.BaseTransport) inyectado via el
-parametro ``client`` del constructor. El transport responde a /api/quarantine
+parametro ``client`` del constructor. El transport responde a /api/v1/quarantine
 y registra los bodies para los asserts.
 
 Incluye un fixture por cada ``reason_code`` (criterio de aceptacion #88).
@@ -32,11 +32,11 @@ from scrapers.exporters.quarantine_exporter import (
     quarantine_payload_hash,
 )
 
-_QUARANTINE_PATH = "/api/quarantine"
+_QUARANTINE_PATH = "/api/v1/quarantine"
 
 
 class _RecordingTransport(httpx.BaseTransport):
-    """Captura POSTs a /api/quarantine y devuelve un status fijo."""
+    """Captura POSTs a /api/v1/quarantine y devuelve un status fijo."""
 
     def __init__(self, status: int = 201) -> None:
         self.status = status
@@ -50,7 +50,7 @@ class _RecordingTransport(httpx.BaseTransport):
 
 
 class _FlakyTransport(httpx.BaseTransport):
-    """Devuelve los status de ``sequence`` en orden para /api/quarantine."""
+    """Devuelve los status de ``sequence`` en orden para /api/v1/quarantine."""
 
     def __init__(self, sequence: list[int]) -> None:
         self.sequence = sequence

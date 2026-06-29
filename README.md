@@ -104,7 +104,7 @@ export PII_SALT="mismo-valor"
 export DATAVZLA_API_KEY="x-api-key del scraper"
 export DATAVZLA_BASE_URL="https://..."
 
-# Cuarentena (quarantine exporter, Issue #88) — POST /api/quarantine
+# Cuarentena (quarantine exporter, Issue #88) — POST /api/v1/quarantine
 export QUARANTINE_API_KEY="x-api-key del scraper"
 export QUARANTINE_BASE_URL="https://..."
 ```

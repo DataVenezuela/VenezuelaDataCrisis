@@ -1,4 +1,4 @@
-"""Quarantine exporter: POST de registros no procesables a /api/quarantine.
+"""Quarantine exporter: POST de registros no procesables a /api/v1/quarantine.
 
 Cuando un registro no puede procesarse automaticamente (parser ausente, schema
 invalido, PII no redactable, PDF sin texto, etc.) NO se descarta en silencio:
@@ -34,7 +34,7 @@ from scrapers.adapters.http_client import USER_AGENT
 
 log = logging.getLogger(__name__)
 
-_QUARANTINE_PATH = "/api/quarantine"
+_QUARANTINE_PATH = "/api/v1/quarantine"
 
 # Status HTTP transitorios que ameritan reintento (igual criterio que staging).
 _RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
@@ -78,7 +78,7 @@ def quarantine_payload_hash(raw: str | bytes) -> str:
 class QuarantineConfig:
     """Configuracion del exporter leida del entorno.
 
-    Apunta al backend que hospeda ``/api/quarantine`` (normalmente el mismo
+    Apunta al backend que hospeda ``/api/v1/quarantine`` (normalmente el mismo
     dataVenezuela que ``/api/aportes``, pero con sus propias credenciales para
     no acoplar los dos endpoints).
     """
@@ -178,7 +178,7 @@ def _truncate_preview(preview: str | None) -> str | None:
 
 
 class QuarantineExporter:
-    """Envia registros no procesables a /api/quarantine del backend."""
+    """Envia registros no procesables a /api/v1/quarantine del backend."""
 
     def __init__(
         self,
@@ -197,7 +197,7 @@ class QuarantineExporter:
                 base_url=config.base_url,
                 headers={
                     # El backend dataVenezuela autentica al scraper con x-api-key
-                    # (authenticatePartner), no con Bearer. Ver POST /api/quarantine.
+                    # (authenticatePartner), no con Bearer. Ver POST /api/v1/quarantine.
                     "x-api-key": config.api_key,
                     "User-Agent": USER_AGENT,
                     "Accept": "application/json",

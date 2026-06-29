@@ -658,7 +658,7 @@ aceptable. Todo lo que el pipeline antes perdía va a la **Quarantine DB** para
 revisión humana.
 
 `scrapers/exporters/quarantine_exporter.py` (`QuarantineExporter`) espeja al
-`StagingExporter`: un `POST /api/quarantine` por registro al backend, cliente
+`StagingExporter`: un `POST /api/v1/quarantine` por registro al backend, cliente
 `httpx` inyectable, retry/backoff en 429/5xx, y **dry-run silencioso** si faltan
 `QUARANTINE_API_KEY` / `QUARANTINE_BASE_URL`. Comparte el `run_id` de la corrida
 con el staging exporter para correlacionar qué se exportó y qué se cuarentenó.
@@ -853,7 +853,7 @@ Cada aporte debe cumplir:
 
 ---
 
-## 10b. Cuarentena (POST /api/quarantine)
+## 10b. Cuarentena (POST /api/v1/quarantine)
 
 Contrato del endpoint que el backend (dataVenezuela) debe exponer para la
 Quarantine DB (ver "Capa 4b"). El scraper hace un POST por registro no
@@ -876,15 +876,21 @@ Ejemplo de payload (campos que envía el `QuarantineExporter`):
 ```
 
 El backend setea por su cuenta `quarantine_id`, `review_status` (default
-`pending`), `retention_until`, `destroyed_at` y `created_at`.
+`pending`), `retention_until`, `destroyed_at` y `created_at`. Autentica con
+`x-api-key` y valida que `source_slug` pertenezca al scraper de la key.
 
 Respuestas que clasifica el exporter:
 
 | Status | Significado |
 |--------|-------------|
 | `200` / `201` | insertado en cuarentena |
-| `409` | ese payload ya estaba en cuarentena (dedup opcional por `(source_slug, payload_hash)`) |
+| `409` | ese payload ya estaba en cuarentena (dedup por `(source_slug, payload_hash)`) |
+| `403` | la fuente no existe o no pertenece al scraper (error acumulado; el run sigue) |
 | otro / error de red | error acumulado (no relanza; el run sigue) |
+
+> La fuente debe estar **registrada** en el backend y ser propiedad del scraper:
+> el contrato valida ownership. Una fuente no registrada recibe `403` y su
+> registro NO se preserva — queda como `quarantine_error` visible en el summary.
 
 ### Reglas del registro de cuarentena
 
@@ -902,8 +908,8 @@ Respuestas que clasifica el exporter:
 ```sql
 CREATE TABLE public.quarantine_records (
   quarantine_id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  run_id                   uuid NOT NULL,
-  source_slug              text NOT NULL,
+  run_id                   uuid,
+  source_slug              text NOT NULL REFERENCES public.sources(slug),
   source_url               text,
   reason_code              text NOT NULL CHECK (reason_code IN (
                              'pii_untreatable','invalid_schema','parser_unavailable',
@@ -1174,7 +1180,7 @@ python -m scrapers.cli validate --config scrapers/config/sources.demo.yaml
 | Staging exporter (`POST /api/aportes`) | ✅ Issue #81 |
 | Dedup specs + fingerprint v1 | ✅ Issue #81 |
 | Raw artifact store (R2) | ❌ bloqueado por #81 |
-| Quarantine exporter (`POST /api/quarantine`) + ruteo | ✅ Issue #88 (scraper) |
+| Quarantine exporter (`POST /api/v1/quarantine`) + ruteo | ✅ Issue #88 (scraper) |
 | Quarantine DB (tabla `quarantine_records`) | ⏳ Issue #88 (backend) |
 | Watermark por fuente | ❌ Issue #57, bloqueado por #81 |
 | Consolidation job | ❌ Issue #82, bloqueado por #81 |

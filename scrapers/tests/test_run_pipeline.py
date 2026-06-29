@@ -112,14 +112,14 @@ _QUARANTINE_ENV = {
 
 
 class _QuarantineTransport(httpx.BaseTransport):
-    """Intercepta POSTs a /api/quarantine y captura los bodies."""
+    """Intercepta POSTs a /api/v1/quarantine y captura los bodies."""
 
     def __init__(self, status: int = 201) -> None:
         self.status = status
         self.posts: list[dict[str, Any]] = []
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/api/quarantine":
+        if request.url.path == "/api/v1/quarantine":
             self.posts.append(json.loads(request.content))
             return httpx.Response(self.status, json={"ok": True})
         return httpx.Response(404)
