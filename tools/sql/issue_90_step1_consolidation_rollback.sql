@@ -1,7 +1,8 @@
 -- Rollback de Issue #90 - Paso 1.
 --
 -- Revierte solamente los objetos creados por
--- issue_90_step1_consolidation.sql. No toca aportes ni dedup_decisions.
+-- issue_90_step1_consolidation.sql. No toca aportes, dedup_decisions
+-- ni jobs de consolidation.
 
 BEGIN;
 

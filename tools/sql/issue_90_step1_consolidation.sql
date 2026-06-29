@@ -2,7 +2,8 @@
 --
 -- Scope intencional:
 -- - agrega dedup_hash a public.events y public.acopio_centers;
--- - crea public.dedup_candidates para candidatos de Person;
+-- - crea public.dedup_candidates para candidatos de Person, incluyendo
+--   blocking_key informativa emitida por el pipeline de dedup;
 -- - no toca aportes;
 -- - no crea dedup_decisions.
 --
@@ -28,20 +29,65 @@ CREATE UNIQUE INDEX IF NOT EXISTS acopio_centers_dedup_uniq
 CREATE TABLE IF NOT EXISTS public.dedup_candidates (
     candidate_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     event_id varchar(36) NOT NULL REFERENCES public.events(event_id),
-    left_person varchar(36) NOT NULL REFERENCES public.persons(person_record_id),
-    right_person varchar(36) NOT NULL REFERENCES public.persons(person_record_id),
+    left_person_record_id varchar(36) NOT NULL REFERENCES public.persons(person_record_id),
+    right_person_record_id varchar(36) NOT NULL REFERENCES public.persons(person_record_id),
+    blocking_key text,
     score numeric(4,3) NOT NULL CHECK (score >= 0 AND score <= 1),
     reasons jsonb,
     priority text NOT NULL,
     decision text NOT NULL DEFAULT 'pending',
     created_at timestamptz NOT NULL DEFAULT now(),
-    CONSTRAINT dedup_candidates_no_self_match CHECK (left_person <> right_person)
+    CONSTRAINT dedup_candidates_no_self_match
+        CHECK (left_person_record_id <> right_person_record_id)
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS dedup_candidates_pair_uniq
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'dedup_candidates'
+          AND column_name = 'left_person'
+    ) AND NOT EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'dedup_candidates'
+          AND column_name = 'left_person_record_id'
+    ) THEN
+        ALTER TABLE public.dedup_candidates
+            RENAME COLUMN left_person TO left_person_record_id;
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'dedup_candidates'
+          AND column_name = 'right_person'
+    ) AND NOT EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'dedup_candidates'
+          AND column_name = 'right_person_record_id'
+    ) THEN
+        ALTER TABLE public.dedup_candidates
+            RENAME COLUMN right_person TO right_person_record_id;
+    END IF;
+END $$;
+
+ALTER TABLE public.dedup_candidates
+    ADD COLUMN IF NOT EXISTS blocking_key text;
+
+DROP INDEX IF EXISTS public.dedup_candidates_pair_uniq;
+
+CREATE UNIQUE INDEX IF NOT EXISTS dedup_candidates_pair_blocking_uniq
     ON public.dedup_candidates (
-        LEAST(left_person, right_person),
-        GREATEST(left_person, right_person)
+        LEAST(left_person_record_id, right_person_record_id),
+        GREATEST(left_person_record_id, right_person_record_id),
+        blocking_key
     );
 
 COMMIT;
