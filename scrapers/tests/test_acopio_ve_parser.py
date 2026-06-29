@@ -15,7 +15,7 @@ Cobertura
 - recibe → keywords controlados; categorías reales con casing mixto; desconocido → "otro"
 - coordinates: lat/lng → {"lat", "lon"}; inválidas/NaN/Inf → None sin descartar el registro
 - location_text desde ciudad + pais (centros internacionales; sin normalize_location VE)
-- nota con tipo, recibe crudo y fecha (trazabilidad; sin PII de contacto)
+- nota con id upstream, tipo, recibe crudo y fecha (trazabilidad; sin PII de contacto)
 - Registro sin nombre → omitido; registro sin ubicación → omitido
 - Tolerancia: un registro malo no rompe el resto; raw_content malformado
 - Formas de payload: {"data": [...]} (real), lista y {id: centro}
@@ -60,7 +60,7 @@ def _make_raw(payload: Any) -> RawContent:
     """Construye un RawContent mínimo con el payload dado."""
     return RawContent(
         source_key=SOURCE_KEY,
-        source_url="https://api.acopiove.org/v1/centros?format=json",
+        source_url="https://api.acopiove.org/v1/centros",
         fetched_at="2026-06-29T12:00:00Z",
         http_status=200,
         content_type="application/json",
@@ -168,6 +168,11 @@ class TestFieldMapping:
         assert "[tipo:acopio]" in c.nota
         # El recibe crudo se conserva para no perder categorías reales.
         assert "Alimentos no perecederos" in c.nota
+
+    def test_nota_has_upstream_id(self) -> None:
+        c = _by_name(self.centers, "Demo Diáspora")
+        assert c.nota is not None
+        assert "id_origen: 892c4d85-3fc8-4700-9ac9-8369fb1019fc" in c.nota
 
     def test_nota_excludes_contacto(self) -> None:
         # contacto puede traer PII de contacto directo — nunca debe ir a nota.

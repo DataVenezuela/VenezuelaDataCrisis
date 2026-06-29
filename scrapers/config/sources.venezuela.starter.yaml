@@ -73,8 +73,8 @@ sources:
     type: api_json
     enabled: false
     trust_tier: C
-    url: "https://api.acopiove.org/v1/centros?format=json"
+    url: "https://api.acopiove.org/v1/centros"
     refresh_minutes: 30
     parser_asignado: acopio_ve
     required_keywords: []
-    notes: "Issue #99. API real api.acopiove.org/v1/centros -> AcopioCenter (payload {data:[...]}). Parser validado contra datos reales. Disabled hasta verificar la paginación del ApiAdapter contra esta API antes de habilitar en prod."
+    notes: "Issue #99. API real api.acopiove.org/v1/centros -> AcopioCenter (payload {data:[...]}). Parser y paginación limit/offset validados contra datos reales; disabled hasta habilitación explícita en prod."

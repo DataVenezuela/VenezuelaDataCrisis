@@ -4,7 +4,7 @@ scrapers/parsers/acopio_ve_parser.py
 Parser concreto para la fuente comunitaria **Acopio VE** (issue #99).
 
 Recibe el ``RawContent`` producido por ``ApiAdapter`` contra
-``https://api.acopiove.org/v1/centros?format=json`` y devuelve
+``https://api.acopiove.org/v1/centros`` y devuelve
 ``list[AcopioCenter]``.
 
 La fuente lista centros de acopio y refugios de la diáspora venezolana en
@@ -21,8 +21,9 @@ ciudad / pais    location_text   ("Ciudad, Pais"; fallback a address)
 lat / lng        coordinates     ({"lat": ..., "lon": ...}; None si inválidas)
 recibe           needs           (categorías -> keyword controlado; ver abajo)
 estado           status          (ver _ESTADO_STATUS_MAP)
-tipo / recibe /  nota            (trazabilidad: tipo, necesidad, recibe crudo,
-necesita_ahora /                  fecha y fuente upstream)
+id / tipo /      nota            (trazabilidad: id upstream, tipo, necesidad,
+recibe /                          recibe crudo, fecha y fuente upstream)
+necesita_ahora /
 updated_at / fuente
 
 Mapeo de estado -> status
@@ -255,15 +256,20 @@ def _build_nota(rec: dict[str, Any]) -> str | None:
     """
     Conserva en ``nota`` metadatos de trazabilidad sin PII.
 
-    Incluye tipo (acopio/refugio), la necesidad declarada, el ``recibe`` crudo
-    (para no perder categorías que cayeron en ``otro``), la fecha de
-    actualización y la fuente upstream. No incluye ``contacto`` (posible PII).
+    Incluye el UUID upstream, tipo (acopio/refugio), la necesidad declarada, el
+    ``recibe`` crudo (para no perder categorías que cayeron en ``otro``), la
+    fecha de actualización y la fuente upstream. No incluye ``contacto``
+    (posible PII).
     """
     parts: list[str] = []
 
     tipo = normalize_text(rec.get("tipo"))
     if tipo:
         parts.append(f"[tipo:{tipo}]")
+
+    upstream_id = normalize_text(rec.get("id"))
+    if upstream_id:
+        parts.append(f"id_origen: {upstream_id}")
 
     necesita = normalize_text(rec.get("necesita_ahora"))
     if necesita:
