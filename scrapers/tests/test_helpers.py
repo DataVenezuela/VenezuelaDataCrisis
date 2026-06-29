@@ -18,7 +18,8 @@ class TestDigitsOnly:
     )
     def test_strips_everything_but_digits(self, raw, expected):
         assert digits_only(raw) == expected
-
+    
+    
     @pytest.mark.parametrize("raw", ["sin numeros", "", "----", "V-..."])
     def test_empty_when_no_digits(self, raw):
         assert digits_only(raw) == ""
@@ -35,12 +36,10 @@ class TestMaskLast4:
             ("12345678", "****5678"),
             ("V-12.345.678", "****5678"),
             ("0412-1234567", "****4567"),
-            ("1234", "****1234"),
-            ("12", "****12"),
-            ("7", "****7"),
-            ("0000", "****0000"),
+            
         ],
     )
+    
     def test_masks_keeping_last_four_digits(self, raw, expected):
         assert mask_last4(raw) == expected
 
@@ -57,6 +56,11 @@ class TestMaskLast4:
     @pytest.mark.parametrize("raw", ["sin numeros", "", "----", "V-..."])
     def test_raises_when_no_digits(self, raw):
         with pytest.raises(ValueError, match="No hay dígitos"):
+            mask_last4(raw) 
+
+    @pytest.mark.parametrize("raw", ["1234", "V-1234", "0000"])
+    def test_raises_when_less_than_5_characters(self, raw):
+        with pytest.raises(ValueError, match="Debe tener al menos 5 caracteres para generar máscara PII"):
             mask_last4(raw)
 
 

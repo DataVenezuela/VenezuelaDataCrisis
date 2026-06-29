@@ -27,8 +27,13 @@ def mask_last4(value: str) -> str:
     Ej.: ``"V-12.345.678"`` -> ``"****5678"``.
 
     Lanza ``ValueError`` si el valor no contiene ningún dígito.
+    O 
+    Lanza `ValueError`` si el valor tiene menos de 5 caracteres
     """
     digits = digits_only(value)
     if not digits:
         raise ValueError("No hay dígitos para generar máscara PII")
+    if len(digits) < 5: 
+        raise ValueError("Debe tener al menos 5 caracteres para generar máscara PII")
+        
     return f"****{digits[-4:]}"
