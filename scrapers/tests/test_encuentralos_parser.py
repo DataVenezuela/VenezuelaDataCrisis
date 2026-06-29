@@ -80,8 +80,11 @@ def _make_raw(payload: Any, source_key: str = SOURCE_KEY) -> RawContent:
     )
 
 
+_EVENT_ID = "8f14e45f-ceea-467e-bd5d-0a4f2e0c1a3a"
+
+
 def _parser(secret: str | None = _SECRET) -> EncuentralosParser:
-    return EncuentralosParser(secret=secret)
+    return EncuentralosParser(event_id=_EVENT_ID, secret=secret)
 
 
 # ---------------------------------------------------------------------------
@@ -283,7 +286,7 @@ class TestCedulaHMAC:
         """Sin PII_HMAC_SECRET, cedula_hmac debe ser None (no lanzar)."""
         fixture = _load_fixture()
         raw = _make_raw(fixture)
-        parser_no_secret = EncuentralosParser(secret=None)
+        parser_no_secret = EncuentralosParser(event_id=_EVENT_ID, secret=None)
         persons = parser_no_secret.parse(raw)
         # Ningún registro debe tener cedula_hmac
         assert all(p.cedula_hmac is None for p in persons)

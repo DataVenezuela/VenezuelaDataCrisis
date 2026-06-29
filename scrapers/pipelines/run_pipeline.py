@@ -5,27 +5,34 @@ Orquestador principal del pipeline VZLA_DEDUP.
 
 Flujo por fuente habilitada
 ----------------------------
-1. **Adapter**   — fetch del contenido raw según ``source.type``
-2. **Parser**    — convierte raw → list[Person | AcopioCenter | Event]
+1. **Adapter**   — fetch del contenido raw segun ``source.type``
+2. **Parser**    — convierte raw -> list[Person | AcopioCenter | Event]
 3. **PII**       — ``tokenize_pii_fields`` sobre cada entidad (model_dump)
-4. **Dedup**     — ``deduplicate_typed_entities`` para Event/AcopioCenter;
-                   Person se pasa sin dedup global (sensible, requiere revisión)
+4. **Enriquecimiento** — normaliza last_known_location/date_iso y calcula
+                   ``deterministic_id`` (el exporter lo usa como external_id
+                   de Person)
 5. **Score**     — ``confidence_score`` sobre cada entidad
-6. **Export**    — ``write_jsonl`` → persons.jsonl / acopio.jsonl / events.jsonl
+6. **Minor protection** — ``protect_minor_fields`` reduce campos identificables
+                   cuando is_minor=True (foto, cedula_masked, ubicacion exacta)
+7. **Staging**   — ``StagingExporter`` hace POST a /api/aportes de dataVenezuela
+
+La deduplicacion ya no ocurre por fuente: el dedup_hash/external_id deterministas
+y las block keys (scrapers/dedup/specs.py) la trasladan al backend (upsert por
+external_id) y al consolidation job de Stage 2 (#82).
 
 Principios de resiliencia
 --------------------------
 - Un error en un registro individual no tumba el pipeline.
-- Un error en una fuente entera se loguea y se continúa con la siguiente.
+- Un error en una fuente entera se loguea y se continua con la siguiente.
 - Todos los errores se acumulan en el summary para visibilidad.
 
 Summary devuelto
 -----------------
 El dict de retorno tiene las keys que espera ``cli.py``:
   sources_processed   int  — fuentes completadas sin error fatal
-  documents_exported  int  — total de entidades escritas a JSONL
-  claims_exported     int  — alias de documents_exported (compat. legacy)
-  claims_deduplicated int  — duplicados eliminados (solo Event/AcopioCenter)
+  staging_sent        int  — aportes aceptados por staging (200/201)
+  staging_duplicates  int  — aportes ya existentes en staging (409)
+  staging_errors      int  — errores por registro o de watermark
   errors              list[str]  — mensajes de error no fatales
 """
 
@@ -33,16 +40,22 @@ from __future__ import annotations
 
 import logging
 import os
+import uuid
 from pathlib import Path
 from typing import Any
 
 from scrapers.adapters._shared import now_utc, sha256_hex
 from scrapers.adapters.base import RawContent
-from scrapers.dedup.deduplicator import deduplicate_typed_entities
+from scrapers.exporters.staging_exporter import (
+    ExportResult,
+    StagingConfig,
+    StagingExporter,
+)
 from scrapers.models import AcopioCenter, Event, Person
+from scrapers.models._validators import validate_uuid_str
 from scrapers.models.source import SourceConfig
 from scrapers.normalizers import normalize_date, normalize_location
-from scrapers.outputs.jsonl_writer import write_jsonl
+from scrapers.sanitizers.minor_protection import protect_minor_fields
 from scrapers.sanitizers.pii_tokenizer import tokenize_pii_fields
 from scrapers.sources.loader import load_sources
 from scrapers.validators.quality import confidence_score
@@ -54,7 +67,17 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 ParsedEntity = Person | AcopioCenter | Event
-_PII_SECRET_ENV = "PII_SALT"
+
+
+def _error_summary(message: str) -> dict[str, Any]:
+    """Summary de salida temprana con las keys nuevas de staging."""
+    return {
+        "sources_processed": 0,
+        "staging_sent": 0,
+        "staging_duplicates": 0,
+        "staging_errors": 0,
+        "errors": [message],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -66,12 +89,12 @@ def _get_adapter(source: SourceConfig) -> Any:
     Devuelve la instancia del adapter adecuado para el type de la fuente.
 
     Tipos soportados:
-      api_json    → ApiAdapter (httpx, paginación automática)
-      html_static → HtmlAdapter (requests + BeautifulSoup, devuelve texto limpio)
-      manual_file / text → local_file (lectura local)
-      pdf         → PdfAdapter (pdfplumber, texto por página)
-      rss         → fetch_url (el RSS es HTML/XML estático)
-      webapp_js   → PlaywrightAdapter (browser headless, paginas con JS)
+      api_json    -> ApiAdapter (httpx, paginacion automatica)
+      html_static -> HtmlAdapter (requests + BeautifulSoup, devuelve texto limpio)
+      manual_file / text -> local_file (lectura local)
+      pdf         -> PdfAdapter (pdfplumber, texto por pagina)
+      rss         -> RssAdapter (extrae items del feed RSS/Atom)
+      webapp_js   -> PlaywrightAdapter (browser headless, paginas con JS)
 
     Tipos sin adapter registrado devuelven None y la fuente se omite.
     """
@@ -98,8 +121,8 @@ def _get_adapter(source: SourceConfig) -> Any:
         return HtmlAdapter.from_source_config(source)
 
     if stype == "rss":
-        from scrapers.adapters.http_client import fetch_url
-        return _StaticHttpAdapter(source_key=source.id, fetch_fn=fetch_url)
+        from scrapers.adapters.rss_adapter import RssAdapter
+        return RssAdapter.from_source_config(source)
 
     if stype in ("manual_file", "text"):
         from scrapers.adapters.local_file import read_local_file
@@ -120,62 +143,39 @@ def _get_adapter(source: SourceConfig) -> Any:
     return None
 
 
-def _get_parser(source: SourceConfig) -> Any:
+def _get_parser(source: SourceConfig, event_id: str) -> Any:
     """
-    Devuelve la instancia del parser asignado según ``parser_asignado``.
+    Devuelve la instancia del parser asignado segun ``parser_asignado``.
 
     Parsers concretos (producen entidades tipadas):
-      encuentralos  → EncuentralosParser → list[Person]
+      encuentralos  -> EncuentralosParser -> list[Person]
 
-    Parsers genéricos (producen entidades tipadas con texto crudo como nota):
-      text / html / rss / json_generic / geojson_earthquake / reliefweb_reports
-      → _TextFallbackParser → list[Person] (registro único por página con nota)
+    Si ``parser_asignado`` no tiene implementacion registrada se loguea un
+    warning y se devuelve None; ``_run_source`` trata la ausencia de parser
+    como fuente omitida (no se pierde el pipeline, solo esa fuente).
 
-    Si ``parser_asignado`` no tiene implementación registrada, se usa el
-    fallback genérico para no perder datos.
+    ``event_id`` viene validado (UUID) desde ``run_pipeline`` y se inyecta
+    en el parser para que lo propague a cada ``Person`` — los parsers no
+    lo derivan ni lo conocen mas alla de propagarlo, igual que ``fuente``
+    o ``trust_tier``.
     """
     pa = (source.parser_asignado or "").lower().strip()
 
     if pa == "encuentralos":
         from scrapers.parsers.encuentralos_parser import EncuentralosParser
         secret = os.getenv("PII_HMAC_SECRET")
-        return EncuentralosParser(secret=secret)
+        return EncuentralosParser(event_id=event_id, secret=secret)
 
-    # Fallback genérico para parsers aún no implementados
-    return _TextFallbackParser(source=source)
+    log.warning(
+        "Parser %r no implementado (fuente=%s) — fuente omitida",
+        source.parser_asignado, source.id,
+    )
+    return None
 
 
 # ---------------------------------------------------------------------------
 # Adapters ligeros para fuentes no-API
 # ---------------------------------------------------------------------------
-
-class _StaticHttpAdapter:
-    """Wrapper fino sobre fetch_url para fuentes html_static/rss."""
-
-    def __init__(self, source_key: str, fetch_fn: Any) -> None:
-        self.source_key = source_key
-        self._fetch = fetch_fn
-
-    def fetch(self, url: str, **_: Any) -> RawContent:
-        text, content_type = self._fetch(url)
-        return RawContent(
-            source_key=self.source_key,
-            source_url=url,
-            fetched_at=now_utc(),
-            http_status=200,
-            content_type=content_type,
-            content_hash=sha256_hex(text.encode("utf-8")),
-            raw_content=text,
-            page=None,
-            total_pages=None,
-            offset=None,
-            limit=None,
-            records_in_page=None,
-        )
-
-    def fetch_all(self, url: str, **kwargs: Any):  # type: ignore[return]
-        yield self.fetch(url)
-
 
 class _LocalFileAdapter:
     """Wrapper fino sobre read_local_file para fuentes manual_file."""
@@ -206,70 +206,28 @@ class _LocalFileAdapter:
 
 
 # ---------------------------------------------------------------------------
-# Parser fallback genérico
-# ---------------------------------------------------------------------------
-
-class _TextFallbackParser:
-    """
-    Parser de último recurso para fuentes sin parser concreto.
-
-    Produce un único Person por página con el contenido raw en el campo
-    ``nota``.  Útil para fuentes en desarrollo o de tipo manual_file.
-    El registro se crea como status=unknown, confianza mínima.
-    """
-
-    def __init__(self, source: SourceConfig) -> None:
-        self.source_key = source.id
-        self._trust_tier = source.trust_tier
-        self._fuente = source.name
-
-    def parse(self, raw: RawContent, **_: Any) -> list[Person]:
-        content = raw.get("raw_content", "")
-        if isinstance(content, (dict, list)):
-            import json as _json
-            # Fix: raise truncation limit from 500 to 10K. At 500 chars entire
-            # pages of useful data were silently dropped by the fallback parser.
-            content = _json.dumps(content, ensure_ascii=False)[:10_000]
-        elif isinstance(content, str):
-            content = content[:10_000]
-        else:
-            content = str(content)[:10_000]
-
-        if not content.strip():
-            return []
-
-        # Un único Person-placeholder por página con el contenido como nota
-        try:
-            return [
-                Person(
-                    full_name=f"[registro sin parser] {self._fuente}",
-                    nota=content.strip() or None,
-                    trust_tier=self._trust_tier,
-                    confidence_score=0.0,
-                    fuente=self._fuente,
-                )
-            ]
-        except Exception as exc:
-            log.warning("Fallback parser error para %s: %s", self.source_key, exc)
-            return []
-
-
-# ---------------------------------------------------------------------------
 # Etapas del pipeline
 # ---------------------------------------------------------------------------
 
-def _fetch_pages(adapter: Any, source: SourceConfig) -> list[RawContent]:
-    """Llama a fetch_all del adapter y recopila todas las páginas."""
+def _fetch_pages(adapter: Any, source: SourceConfig, updated_after: str) -> list[RawContent]:
+    """Llama a fetch_all del adapter y recopila todas las paginas.
+
+    ``updated_after`` es el watermark actual de la fuente; se pasa como query
+    param a todos los adapters (fetch_all acepta **kwargs en todos). Los que
+    soportan filtrado server-side (ApiAdapter) lo incluyen en la request; el
+    resto lo ignora silenciosamente.
+    """
     url = source.url
     pages: list[RawContent] = []
+    params = {"updated_after": updated_after}
 
     # ApiAdapter expone default_path separado de base_url
     if hasattr(adapter, "default_path") and adapter.default_path:
         path = adapter.default_path
-        for page in adapter.fetch_all(path):
+        for page in adapter.fetch_all(path, params=params):
             pages.append(page)
     else:
-        for page in adapter.fetch_all(url):
+        for page in adapter.fetch_all(url, params=params):
             pages.append(page)
 
     return pages
@@ -280,7 +238,7 @@ def _parse_pages(
     pages: list[RawContent],
     limit: int | None,
 ) -> tuple[list[ParsedEntity], list[str]]:
-    """Parsea todas las páginas y devuelve (entidades, errores_por_registro)."""
+    """Parsea todas las paginas y devuelve (entidades, errores_por_registro)."""
     entities: list[ParsedEntity] = []
     errors: list[str] = []
 
@@ -288,7 +246,7 @@ def _parse_pages(
         try:
             batch = parser.parse(raw)
         except Exception as exc:
-            msg = f"Error parseando página {raw.get('page')}: {exc}"
+            msg = f"Error parseando pagina {raw.get('page')}: {exc}"
             log.warning(msg)
             errors.append(msg)
             continue
@@ -319,16 +277,15 @@ def _apply_pii(
     Convierte entidades tipadas a dicts y aplica tokenize_pii_fields.
 
     Los campos cedula_hmac/cedula_masked ya vienen del parser concreto
-    (p. ej. EncuentralosParser).  tokenize_pii_fields actúa como segunda
+    (p. ej. EncuentralosParser).  tokenize_pii_fields actua como segunda
     capa de seguridad: detecta y hashea cualquier campo PII que haya
     escapado del parser.
 
-    Si PII_SALT no está configurado (entorno CI/dev), el registro pasa
+    Si PII_SALT no esta configurado (entorno CI/dev), el registro pasa
     igualmente — sin los campos PII crudos — en lugar de perderse.
     Esto permite que el pipeline funcione en tests offline.
-    Devuelve lista de dicts listos para dedup + export.
+    Devuelve lista de dicts listos para enriquecimiento + staging.
     """
-    import os
     pii_salt_available = bool(os.getenv("PII_SALT"))
 
     result: list[dict] = []
@@ -357,22 +314,28 @@ def _apply_pii(
     return result
 
 
-def _apply_normalization(records: list[dict], errors: list[str]) -> list[dict]:
+def _enrich_records(records: list[dict], errors: list[str]) -> list[dict]:
     """
-    Normalización post-dump: last_known_location y campos de fecha.
+    Normalizacion post-dump y computo de ``deterministic_id``.
 
-    Los parsers concretos (EncuentralosParser) ya normalizan al parsear,
-    así que esta etapa es principalmente para parsers genéricos/fallback
-    que entregan texto crudo.
+    El exporter usa ``deterministic_id`` como external_id de Person, asi que
+    este enriquecimiento debe correr antes de la etapa de staging. Normaliza
+    ``last_known_location`` (string crudo) y ``date_iso`` cuando aplica; los
+    parsers concretos ya normalizan al parsear, esta etapa cubre los huecos.
     """
-    normalized: list[dict] = []
+    from scrapers.normalizers.person import normalize_person_name as _norm_name
+    from scrapers.normalizers.phonetic import (
+        build_deterministic_id as _build_det_id,
+        phonetic_hash as _compute_phonetic,
+    )
+
+    enriched: list[dict] = []
     for rec in records:
         try:
-            # Normalizar ubicación si viene como string crudo sin objeto
+            # Normalizar ubicacion si viene como string crudo sin objeto
             loc = rec.get("last_known_location")
             if isinstance(loc, str) and loc:
                 loc_obj = normalize_location(loc)
-                # Reemplazar con string legible si la normalización aportó algo
                 estado = loc_obj.get("estado")
                 municipio = loc_obj.get("municipio")
                 if municipio and estado:
@@ -380,12 +343,10 @@ def _apply_normalization(records: list[dict], errors: list[str]) -> list[dict]:
                 elif estado:
                     rec["last_known_location"] = estado
 
-            # Compute deterministic_id
-            from scrapers.normalizers.phonetic import phonetic_hash as _compute_phonetic, build_deterministic_id as _build_det_id
-            from scrapers.normalizers.person import normalize_person_name as _norm_name
-            _name_norm = _norm_name(rec.get("full_name") or "")
-            _ph = _compute_phonetic(_name_norm) if _name_norm else None
-            rec["deterministic_id"] = _build_det_id(_ph, rec.get("last_known_location"))
+            # Computar deterministic_id (external_id de Person)
+            name_norm = _norm_name(rec.get("full_name") or "")
+            ph = _compute_phonetic(name_norm) if name_norm else None
+            rec["deterministic_id"] = _build_det_id(ph, rec.get("last_known_location"))
 
             # Normalizar date_iso para Event
             date_raw = rec.get("date_iso")
@@ -394,73 +355,13 @@ def _apply_normalization(records: list[dict], errors: list[str]) -> list[dict]:
                 if normalized_date and isinstance(normalized_date, str):
                     rec["date_iso"] = normalized_date
 
-            normalized.append(rec)
+            enriched.append(rec)
         except Exception as exc:
-            msg = f"Error en normalización: {exc}"
+            msg = f"Error en enriquecimiento: {exc}"
             log.warning(msg)
             errors.append(msg)
-            normalized.append(rec)  # añadir sin normalizar antes que perder
-    return normalized
-
-
-def _apply_dedup(
-    records: list[dict],
-    errors: list[str],
-) -> tuple[list[dict], int]:
-    """
-    Deduplicación para Event y AcopioCenter.
-
-    Person se excluye de dedup global por diseño: un falso merge puede
-    costar una vida.  Los Person pasan sin filtrar.
-    """
-    events_raw = [r for r in records if r.get("_entity_type") == "Event"]
-    acopio_raw = [r for r in records if r.get("_entity_type") == "AcopioCenter"]
-    persons = [r for r in records if r.get("_entity_type") == "Person"]
-
-    total_deduped = 0
-
-    def _to_event(d: dict) -> Event | None:
-        try:
-            d2 = {k: v for k, v in d.items() if not k.startswith("_")}
-            return Event(**d2)
-        except Exception as exc:
-            errors.append(f"Error reconstruyendo Event para dedup: {exc}")
-            return None
-
-    def _to_acopio(d: dict) -> AcopioCenter | None:
-        try:
-            d2 = {k: v for k, v in d.items() if not k.startswith("_")}
-            return AcopioCenter(**d2)
-        except Exception as exc:
-            errors.append(f"Error reconstruyendo AcopioCenter para dedup: {exc}")
-            return None
-
-    # Fix: deduped_events is list[dict], not list[Event] — we convert back
-    # to dicts immediately after dedup. Removes dead store `events_raw_deduped`
-    # and 7 type: ignore comments that were papering over the wrong annotation.
-    deduped_events: list[dict] = []
-    if events_raw:
-        typed_events = [e for d in events_raw if (e := _to_event(d)) is not None]
-        if typed_events:
-            deduped_typed, n_dup = deduplicate_typed_entities(typed_events)
-            total_deduped += n_dup
-            for entity in deduped_typed:
-                d = entity.model_dump()
-                d["_entity_type"] = "Event"
-                deduped_events.append(d)
-
-    deduped_acopio: list[dict] = []
-    if acopio_raw:
-        typed_acopio = [a for d in acopio_raw if (a := _to_acopio(d)) is not None]
-        if typed_acopio:
-            deduped_typed, n_dup = deduplicate_typed_entities(typed_acopio)
-            total_deduped += n_dup
-            for entity in deduped_typed:
-                d = entity.model_dump()
-                d["_entity_type"] = "AcopioCenter"
-                deduped_acopio.append(d)
-
-    return persons + deduped_events + deduped_acopio, total_deduped
+            enriched.append(rec)  # anadir sin enriquecer antes que perder
+    return enriched
 
 
 def _apply_confidence(
@@ -485,50 +386,24 @@ def _apply_confidence(
     return result
 
 
-def _export(
+def _apply_minor_protection(
     records: list[dict],
-    output_dir: Path,
     errors: list[str],
-) -> int:
-    """
-    Escribe los registros a persons.jsonl / acopio.jsonl / events.jsonl.
+) -> list[dict]:
+    """Reduce campos identificables en registros con is_minor=True antes de exportar.
 
-    Elimina el campo interno ``_entity_type`` antes de exportar.
-    Devuelve el total de registros escritos.
+    No afecta a Event/AcopioCenter (no tienen is_minor) ni a Person con
+    is_minor en None/False — ver scrapers/sanitizers/minor_protection.py.
     """
-    persons = []
-    acopio = []
-    events = []
-
+    result: list[dict] = []
     for rec in records:
-        entity_type = rec.pop("_entity_type", "Person")
-        if entity_type == "AcopioCenter":
-            acopio.append(rec)
-        elif entity_type == "Event":
-            events.append(rec)
-        else:
-            persons.append(rec)
-
-    total = 0
-    try:
-        if persons:
-            n = write_jsonl(output_dir / "persons.jsonl", persons)
-            total += n
-            log.info("Exportados %d Person → persons.jsonl", n)
-        if acopio:
-            n = write_jsonl(output_dir / "acopio.jsonl", acopio)
-            total += n
-            log.info("Exportados %d AcopioCenter → acopio.jsonl", n)
-        if events:
-            n = write_jsonl(output_dir / "events.jsonl", events)
-            total += n
-            log.info("Exportados %d Event → events.jsonl", n)
-    except Exception as exc:
-        msg = f"Error exportando JSONL: {exc}"
-        log.error(msg)
-        errors.append(msg)
-
-    return total
+        try:
+            result.append(protect_minor_fields(rec))
+        except Exception as exc:
+            log.error("Error en proteccion de menores, registro omitido: %s", exc)
+            errors.append(f"Error en proteccion de menores (registro omitido): {exc}")
+            # Fail-closed: no se agrega el registro sin redactar.
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -537,15 +412,18 @@ def _export(
 
 def _run_source(
     source: SourceConfig,
-    output_dir: Path,
     limit: int | None,
     all_errors: list[str],
-) -> tuple[int, int]:
+    event_id: str,
+    exporter: StagingExporter,
+) -> ExportResult:
     """
     Ejecuta el pipeline completo para una fuente.
 
-    Devuelve (registros_exportados, duplicados_eliminados).
-    Cualquier excepción no capturada sube al orquestador principal.
+    Devuelve un ``ExportResult`` agregado (sent, duplicates, errors). Los
+    errores previos de la fuente (parse/PII/enriquecimiento) se arrastran en
+    ``ExportResult.errors``. Cualquier excepcion no capturada sube al
+    orquestador principal.
     """
     log.info("Iniciando fuente: %s (type=%s, parser=%s)", source.id, source.type, source.parser_asignado)
     source_errors: list[str] = []
@@ -553,17 +431,37 @@ def _run_source(
     # 1. Adapter
     adapter = _get_adapter(source)
     if adapter is None:
-        return 0, 0
+        return ExportResult()
 
     # 2. Parser
-    parser = _get_parser(source)
+    parser = _get_parser(source, event_id)
+    if parser is None:
+        # El adapter ya fue creado (puede tener browser/conexion abierta), asi
+        # que se cierra antes de omitir la fuente para no filtrar recursos en
+        # cada corrida (fuentes con parser_asignado no registrado).
+        if hasattr(adapter, "close"):
+            adapter.close()
+        # La omision queda VISIBLE en el summary del run (no solo en un
+        # log.warning silencioso): se contabiliza como error de fuente y
+        # fluye a summary["errors"] via all_errors, igual que el resto de
+        # errores no fatales de la fuente.
+        msg = (
+            f"parser no implementado: {source.parser_asignado} "
+            f"(fuente {source.id} omitida)"
+        )
+        all_errors.append(f"[{source.id}] {msg}")
+        return ExportResult(errors=[msg])
 
     # 3. Fetch
-    # El close() va en finally: si fetch_all() lanza (ej. PlaywrightAdapter
-    # agotando retries), el adapter puede mantener recursos vivos (browser,
-    # conexiones) y el error sube igual al orquestador principal.
+    # El watermark se lee ANTES del fetch para acotar la ventana
+    # (updated_after); en la primera corrida de la fuente (sin watermark
+    # previo) vale "1970-01-01T00:00:00Z" y provoca backfill completo.
+    # get_watermark() va DENTRO del try/finally: aunque hace fail-open en
+    # httpx.HTTPError, un fallo no contemplado (ej. JSON malformado) no debe
+    # dejar el adapter sin cerrar (browser, conexiones) ni saltarse el close().
     try:
-        pages = _fetch_pages(adapter, source)
+        watermark_at = exporter.get_watermark(source.id)
+        pages = _fetch_pages(adapter, source, watermark_at)
     finally:
         if hasattr(adapter, "close"):
             try:
@@ -571,7 +469,9 @@ def _run_source(
             except Exception:
                 pass
 
-    log.info("%s: %d página(s) descargadas", source.id, len(pages))
+    log.info("%s: %d pagina(s) descargadas", source.id, len(pages))
+
+    fetched_ats = [str(p.get("fetched_at")) for p in pages if p.get("fetched_at")]
 
     # 4. Parse
     entities, parse_errors = _parse_pages(parser, pages, limit)
@@ -580,37 +480,48 @@ def _run_source(
 
     if not entities:
         all_errors.extend([f"[{source.id}] {e}" for e in source_errors])
-        return 0, 0
+        return ExportResult(errors=list(source_errors))
 
     # 5. PII
     records = _apply_pii(entities, source_errors)
 
-    # 6. Normalización adicional
-    records = _apply_normalization(records, source_errors)
+    # 6. Enriquecimiento (deterministic_id + normalizacion)
+    records = _enrich_records(records, source_errors)
 
-    # 7. Dedup (solo Event/AcopioCenter)
-    records, n_deduped = _apply_dedup(records, source_errors)
-
-    # 8. Confidence score
+    # 7. Confidence score
     records = _apply_confidence(records, source_errors)
 
-    # 9. Export
-    n_exported = _export(records, output_dir, source_errors)
+    # 8. Proteccion de menores (is_minor=True reduce campos identificables)
+    records = _apply_minor_protection(records, source_errors)
 
-    all_errors.extend([f"[{source.id}] {e}" for e in source_errors])
-    log.info("%s: %d exportados, %d deduplicados, %d errores", source.id, n_exported, n_deduped, len(source_errors))
-    return n_exported, n_deduped
+    # 9. Staging export
+    # source_errors se pasa para que el watermark NO avance si hubo errores
+    # previos de la fuente (parse/PII/enriquecimiento/proteccion de menores).
+    result = exporter.export_source(
+        records,
+        source_slug=source.id,
+        source_fetched_ats=fetched_ats,
+        source_errors=source_errors,
+    )
+    # Arrastrar los errores previos de la fuente al frente del resultado.
+    result.errors[0:0] = source_errors
+
+    all_errors.extend([f"[{source.id}] {e}" for e in result.errors])
+    log.info(
+        "%s: %d enviados, %d duplicados, %d errores",
+        source.id, result.sent, result.duplicates, len(result.errors),
+    )
+    return result
 
 
 # ---------------------------------------------------------------------------
-# Punto de entrada público
+# Punto de entrada publico
 # ---------------------------------------------------------------------------
 
 def run_pipeline(
     config_path: Path,
     output_dir: Path,
     limit: int | None = None,
-    keep_raw: bool = False,
 ) -> dict:
     """
     Orquestador principal del pipeline.
@@ -618,18 +529,18 @@ def run_pipeline(
     Parameters
     ----------
     config_path:
-        Ruta al YAML de configuración de fuentes.
+        Ruta al YAML de configuracion de fuentes.
     output_dir:
-        Directorio donde se escriben persons.jsonl / acopio.jsonl / events.jsonl.
+        Reservado para artefactos/logs. El export a JSONL desaparecio; el
+        destino ahora es la tabla aportes via /api/aportes. Se conserva en la
+        firma por compatibilidad con la CLI.
     limit:
-        Número máximo de entidades por fuente (None = sin límite).
-    keep_raw:
-        Reservado para snapshots de depuración (no implementado aún).
+        Numero maximo de entidades por fuente (None = sin limite).
 
     Returns
     -------
-    dict con keys: sources_processed, documents_exported, claims_exported,
-                   claims_deduplicated, errors.
+    dict con keys: sources_processed, staging_sent, staging_duplicates,
+                   staging_errors, errors.
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -641,44 +552,56 @@ def run_pipeline(
         project, sources = load_sources(config_path)
     except Exception as exc:
         log.error("Error cargando config: %s", exc)
-        return {
-            "sources_processed": 0,
-            "documents_exported": 0,
-            "claims_exported": 0,
-            "claims_deduplicated": 0,
-            "errors": [f"Error cargando config: {exc}"],
-        }
+        return _error_summary(f"Error cargando config: {exc}")
+
+    # event_id es obligatorio en cada Person/AcopioCenter exportado (FK NOT NULL
+    # en la DB) — se valida una sola vez aqui en vez de dejar que cada registro
+    # falle su propia validacion y generar ruido masivo en los logs.
+    raw_event_id = project.get("event_id")
+    try:
+        event_id = validate_uuid_str(str(raw_event_id))
+    except ValueError:
+        msg = f"project.event_id invalido o ausente en config: {raw_event_id!r}"
+        log.error(msg)
+        return _error_summary(msg)
 
     enabled = [s for s in sources if s.enabled]
     log.info("%d fuentes habilitadas de %d totales", len(enabled), len(sources))
 
-    total_exported = 0
-    total_deduped = 0
+    staging_sent = 0
+    staging_duplicates = 0
+    staging_errors = 0
     sources_processed = 0
     all_errors: list[str] = []
 
-    for source in enabled:
-        try:
-            n_exp, n_dup = _run_source(source, output_dir, limit, all_errors)
-            total_exported += n_exp
-            total_deduped += n_dup
-            sources_processed += 1
-        except Exception as exc:
-            msg = f"[{source.id}] Error fatal en fuente: {exc}"
-            log.error(msg, exc_info=True)
-            all_errors.append(msg)
-            # Continuar con la siguiente fuente
+    # Un solo exporter (un httpx.Client) y un solo run_id por corrida.
+    exporter = StagingExporter(StagingConfig.from_env(), run_id=str(uuid.uuid4()))
+    try:
+        for source in enabled:
+            try:
+                result = _run_source(source, limit, all_errors, event_id, exporter)
+                staging_sent += result.sent
+                staging_duplicates += result.duplicates
+                staging_errors += len(result.errors)
+                sources_processed += 1
+            except Exception as exc:
+                msg = f"[{source.id}] Error fatal en fuente: {exc}"
+                log.error(msg, exc_info=True)
+                all_errors.append(msg)
+                # Continuar con la siguiente fuente
+    finally:
+        exporter.close()
 
     summary = {
         "sources_processed": sources_processed,
-        "documents_exported": total_exported,
-        "claims_exported": total_exported,       # alias legacy para cli.py
-        "claims_deduplicated": total_deduped,
+        "staging_sent": staging_sent,
+        "staging_duplicates": staging_duplicates,
+        "staging_errors": staging_errors,
         "errors": all_errors,
     }
 
     log.info(
-        "Pipeline finalizado — fuentes=%d exportados=%d deduplicados=%d errores=%d",
-        sources_processed, total_exported, total_deduped, len(all_errors),
+        "Pipeline finalizado — fuentes=%d enviados=%d duplicados=%d errores=%d",
+        sources_processed, staging_sent, staging_duplicates, len(all_errors),
     )
     return summary

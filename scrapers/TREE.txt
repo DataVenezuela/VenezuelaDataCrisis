@@ -33,9 +33,9 @@ normalizers/
   __init__.py
   location.py
   text.py
-outputs/
+exporters/
   __init__.py
-  jsonl_writer.py
+  staging_exporter.py
 pipelines/
   __init__.py
   run_pipeline.py

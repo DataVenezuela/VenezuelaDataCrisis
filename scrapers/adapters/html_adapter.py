@@ -61,15 +61,19 @@ class HtmlAdapter:
             source_key = self.source_key or _source_key_from_url(url)
 
         html, content_type = self.fetcher(url, timeout or self.timeout)
-        title, text = extract_html_text(html)
+        title, raw_text = extract_html_text(html)
         title = _clean_extracted_text(title)
-        text = _clean_extracted_text(text)
+        text = _clean_extracted_text(raw_text) or ""
         text = _drop_duplicate_title(text, title)
 
         return RawContent(
             source_key=source_key,
             source_url=url,
             fetched_at=_now_utc(),
+            # fetch_url() hace raise_for_status(): si llegamos aquí, la respuesta
+            # fue 2xx, así que 200 es seguro. http_client no expone el código real;
+            # si cambia su contrato (ver #60), surfacing el status real aquí en vez
+            # de hardcodearlo.
             http_status=200,
             content_type=content_type,
             content_hash=_sha256_text(text),

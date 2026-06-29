@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import yaml
@@ -7,6 +8,9 @@ import yaml
 
 SUPPORTED_TYPES = {"html_static", "api_json", "rss", "manual_file", "webapp_js", "pdf"}
 SUPPORTED_TRUST_TIERS = {"A", "B", "C", "D"}
+# id se usa como segmento de URL en /api/source-watermarks/{id} (staging_exporter);
+# debe ser seguro para una ruta REST sin escapar.
+_SOURCE_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
 REQUIRED_SOURCE_FIELDS = {
     "id",
     "name",
@@ -92,6 +96,7 @@ def validate_sources_config(config_path: Path) -> dict:
     if "sources" not in payload or not isinstance(payload["sources"], list):
         raise ValueError("El YAML debe tener una lista top-level 'sources'.")
 
+    seen_ids: set[str] = set()
     for idx, source in enumerate(payload["sources"]):
         if not isinstance(source, dict):
             raise ValueError(f"source #{idx} debe ser un objeto.")
@@ -117,6 +122,16 @@ def validate_sources_config(config_path: Path) -> dict:
 
         for field in ["id", "name", "type", "trust_tier", "url", "parser_asignado"]:
             _validate_non_empty_string(source, field, label)
+
+        source_id = source["id"]
+        if not _SOURCE_ID_PATTERN.match(source_id):
+            raise ValueError(
+                f"{label}: 'id' debe contener solo letras, numeros, '-' o '_' "
+                f"(se usa como segmento de URL en /api/source-watermarks/{{id}})."
+            )
+        if source_id in seen_ids:
+            raise ValueError(f"{label}: 'id' duplicado ({source_id!r}); debe ser unico.")
+        seen_ids.add(source_id)
 
         _validate_bool(source, "enabled", label)
         _validate_positive_int(source, "refresh_minutes", label)

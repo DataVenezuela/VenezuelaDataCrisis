@@ -2,63 +2,49 @@
 
 Este documento describe el flujo técnico del pipeline de VZLA_DEDUP.
 
-El objetivo del pipeline es recolectar registros dispersos, convertirlos en entidades tipadas, proteger datos sensibles, normalizar la información, detectar posibles duplicados y exportar archivos JSONL listos para ser ingeridos por DB/API.
-
-El pipeline debe ser modular, trazable y seguro.
+El objetivo es recolectar registros dispersos, convertirlos en entidades tipadas, proteger datos sensibles, normalizarlos y enviarlos a staging en Supabase para que el consolidation job los deduplique y los mueva a las tablas canónicas.
 
 ---
 
-## Resumen del flujo
+## Flujo completo
 
-```text
+```
 Fuentes externas
-    ↓
-Adapters / Fetchers
-    ↓
-Parsers
-    ↓
-Entidades tipadas
-    ↓
-Sanitización PII
-    ↓
-Normalización
-    ↓
-Deduplicación
-    ↓
-Validación técnica
-    ↓
-Export JSONL
-    ↓
-DB/API
-    ↓
-Verification humana / externa
+      ↓
+Adapters (fetch raw)
+      ↓
+Parsers (raw → entidad tipada)
+      ↓
+PII masking (HMAC antes que nada)
+      ↓
+Normalización (texto, fechas, ubicaciones)
+      ↓
+Claves de dedup pre-calculadas (dedup_hash, block_keys)
+      ↓
+┌─────────────────────────────┐     ┌──────────────────────┐
+│  Raw DB (R2 + Supabase)     │     │  Quarantine DB        │
+│  Payload enmascarado,       │ ←── │  Sin parser, PII      │
+│  inmutable, trazable        │     │  no redactable, etc.  │
+└─────────────────────────────┘     └──────────────────────┘
+      ↓
+Staging exporter → POST /api/aportes → aportes (Supabase)
+      ↓  consolidation job (cada 20 min)
+Canonical: persons / events / acopio_centers
+      ↓  build job (cada 30 min)
+Cloudflare D1 → Worker → API pública
 ```
 
 ---
 
-## Estado de implementación
+## Capa 1 — Adapters
 
-El orquestador del pipeline está implementado en `scrapers/pipelines/run_pipeline.py`.
-
-### Flujo ejecutable
-
-```text
-SourceConfig (YAML)
-  → adapter (api_json / html_static / manual_file)
-    → parser (encuentralos / fallback genérico)
-      → PII tokenizer (HMAC o strip)
-        → normalización (fechas, ubicaciones)
-          → dedup (Event / AcopioCenter; Person excluido intencionalmente)
-            → confidence_score
-              → JSONL export (persons.jsonl / acopio.jsonl / events.jsonl)
-```
-
-### Adapters implementados
+Cada tipo de fuente tiene un adapter dedicado. El adapter solo hace fetch: devuelve un `RawContent` con el payload crudo y metadatos del request (status HTTP, timestamp, hash del contenido). No interpreta ni transforma nada.
 
 | Tipo | Módulo | Estado |
 |------|--------|--------|
 | `api_json` | `scrapers/adapters/api_adapter.py` | ✅ Implementado (httpx, paginación, retry) |
-| `html_static` / `rss` | `scrapers/adapters/http_client.py` | ✅ Implementado (fetch wrapper) |
+| `html_static` | `scrapers/adapters/html_adapter.py` | ✅ Implementado (requests + BeautifulSoup) |
+| `rss` | `scrapers/adapters/rss_adapter.py` | ✅ Implementado (un registro por `<item>` del feed) |
 | `manual_file` / `text` | `scrapers/adapters/local_file.py` | ✅ Implementado (lectura local) |
 | `pdf` | `scrapers/adapters/pdf_adapter.py` | ✅ Implementado (pdfplumber) |
 | `webapp_js` | `scrapers/adapters/playwright_adapter.py` | ✅ Implementado (Playwright headless, timeout/retries configurables) |
@@ -71,8 +57,11 @@ contenido para `content_hash`, backoff exponencial con jitter) viven en
 
 | Parser | Módulo | Estado |
 |--------|--------|--------|
-| `encuentralos` | `scrapers/parsers/encuentralos_parser.py` | ⏳ Pendiente |
-| Fallback genérico | `_TextFallbackParser` (interno) | ✅ Para text/html/rss |
+| `encuentralos` | `scrapers/parsers/encuentralos_parser.py` | ✅ Implementado |
+
+Si una fuente no tiene parser concreto asignado, `_get_parser` loguea un
+warning y la fuente se omite (devuelve `None`). No hay parser de fallback
+genérico: el `_TextFallbackParser` fue eliminado en #81.
 
 ### Ejecución
 
@@ -97,7 +86,9 @@ python -m scrapers.cli run --config scrapers/config/sources.yaml --output scrape
 
 ### Tests
 
-28 tests de integración offline en `scrapers/tests/test_run_pipeline.py`.
+Tests de integración offline en `scrapers/tests/test_run_pipeline.py`. Ninguno
+hace red real: el destino staging (`/api/aportes`) se intercepta con
+`httpx.BaseTransport` inyectado en el `StagingExporter`.
 
 ---
 
@@ -128,11 +119,11 @@ flowchart TD
     D --> E[Entidades tipadas]
     E --> F[PII Sanitizer]
     F --> G[Normalizer]
-    G --> H[Dedup Engine]
+    G --> H[Claves de dedup precalculadas]
     H --> I[Technical Validator]
-    I --> J[JSONL Export]
-    J --> K[DB / API]
-    K --> L[Verification]
+    I --> J[Staging exporter POST /api/aportes]
+    J --> K[aportes Supabase]
+    K --> L[Consolidation / Verification]
 ```
 
 ---
@@ -469,6 +460,39 @@ debe documentarse explícitamente aquí y migrar/recalcular los
 
 ---
 
+## Protección de menores (`is_minor`)
+
+`Person.is_minor` es `bool | None`: `true` si la persona reportada es menor
+de 18 años, `false` si se sabe que es mayor, `None` si no se puede
+determinar (no hay edad reportada).
+
+Solo el valor explícito `true` activa protección — `None`/`false` no
+disparan ninguna reducción, porque ausencia de edad no implica minoría de
+edad.
+
+Cuando `is_minor=true`, antes de enviar el aporte a staging
+(`scrapers.sanitizers.minor_protection.protect_minor_fields`, ejecutado como
+etapa propia del pipeline justo antes del staging exporter):
+
+* `foto` se anula (`null`) — una foto es directamente identificable.
+* `cedula_masked` se anula (`null`) — deja de mostrarse la cédula parcial en
+  claro. `cedula_hmac` **no** se toca: sigue siendo un hash, no identifica
+  por sí solo, y Stage 1 lo necesita para matching.
+* `last_known_location` se acota a nivel estado (`"Municipio, Estado"` →
+  `"Estado"`) para no facilitar la localización exacta de un menor.
+
+`EncuentralosParser` deriva `is_minor` automáticamente cuando la fuente
+reporta `edad` (`edad < 18` → `true`); si la fuente no reporta edad,
+`is_minor` queda en `None`. Cualquier parser futuro que reciba una edad
+puntual o un `age_range` debe derivar `is_minor` de la misma forma.
+
+Pendiente para Stage 1 (#81): `person_sources` (tabla/modelo todavía no
+implementado en este repo) debe heredar/propagar la misma protección — un
+`PersonSource` corroborando un `Person` con `is_minor=true` no debe exponer
+más detalle del que expone el `Person` protegido.
+
+---
+
 ## 7. Normalizer
 
 El normalizer convierte datos heterogéneos en formatos estables.
@@ -547,194 +571,148 @@ Debe normalizarse como:
 
 ## Normalización de fechas
 
-Todas las fechas deben exportarse como UTC ISO 8601.
-
-Ejemplo:
-
-```json
-"2026-06-24T17:00:00Z"
-```
-
-Si una fuente trae una fecha sin hora, se debe mantener la fecha con la mejor precisión posible según el contrato acordado.
-
-Si la fecha no puede interpretarse de forma segura, usar `null`.
-
-No inventar horas.
+Helpers compartidos entre adapters (timestamp UTC, hash de contenido, backoff exponencial) viven en `scrapers/adapters/_shared.py`.
 
 ---
 
-## Normalización de ubicaciones
+## Capa 2 — Parsers
 
-Las ubicaciones deben convertirse a un `location_object`.
+Cada fuente tiene un parser específico que implementa `ParserProtocol`. El parser recibe el `RawContent` del adapter y devuelve `list[Person | AcopioCenter | Event]`.
 
-Ejemplo:
+El parser conoce la estructura de su fuente: qué campo es el nombre, qué campo es la cédula, qué valor de status mapea a qué enum.
 
-```json
-{
-  "raw": "El Tocuyo, Lara",
-  "estado": "Lara",
-  "municipio": "Morán",
-  "parroquia": null,
-  "lat": 9.7834,
-  "lng": -69.7921
-}
-```
+**Agregar una fuente nueva = escribir un parser nuevo.** El resto del pipeline no cambia.
 
-### Diccionario de sinónimos de ubicaciones
+| Parser | Módulo | Entidad | Estado |
+|--------|--------|---------|--------|
+| `encuentralos` | `scrapers/parsers/encuentralos_parser.py` | `Person` | ✅ |
 
-Antes de la geocodificación vía OpenStreetMap, el normalizador consulta
-`shared/common/locations.yml`, un diccionario de sinónimos que mapea
-variantes coloquiales, abreviaturas y typos comunes venezolanos a
-nombres canónicos compatibles con OSM.
-
-Ejemplos:
-
-- `"ccs"` → `"Caracas"`
-- `"ptocabello"` → `"Puerto Cabello"`
-- `"maracaivo"` → `"Maracaibo"`
-
-Si una ubicación no está en el diccionario, se usa el texto original.
-El diccionario se carga en memoria una sola vez (lazy-load).
-
-Si la geocodificación falla:
-
-```json
-{
-  "raw": "El Tocuyo, Lara",
-  "estado": "Lara",
-  "municipio": "Morán",
-  "parroquia": null,
-  "lat": null,
-  "lng": null
-}
-```
-
-El registro no debe descartarse porque no tenga coordenadas.
+Si una fuente no tiene parser asignado, sus registros van a **cuarentena** — no al basura, no a un fallback genérico. El FallbackParser fue eliminado.
 
 ---
 
-## Normalización de enums
+## Capa 3 — Limpieza (orden fijo e inamovible)
 
-Los parsers deben mapear valores de cada fuente a enums internos.
+### 3.1 PII — va primero
 
-Ejemplo:
+Cédulas y teléfonos se HMAC antes de cualquier otro procesamiento. El campo original no se guarda en ningún lugar.
 
-```text
-"No localizado" → missing
-"Ubicado"       → found
-"Herido"        → injured
-"Fallecido"     → deceased
-```
+- `cedula_hmac` = `shared/hashing.identity_token(cedula, secret)` → hex puro 64 chars, sin prefijo
+- `cedula_masked` = últimos 4 dígitos con máscara (`V-****5821`)
+- `telefono_contacto` de terceros se descarta explícitamente (familiar que reportó)
 
-Si no se puede mapear con seguridad, usar:
+El secreto viene de `PII_HMAC_SECRET` (env var). Sin él, el pipeline no produce HMAC — los campos quedan `None`. En CI offline esto está aceptado; en producción es obligatorio.
 
-```text
-unknown
-```
+### 3.2 Normalización — va antes de dedup
 
----
+El matching necesita texto uniforme. `"JOSE LUIS"` y `"José Luis"` deben ser el mismo registro antes de comparar.
 
-## 8. Dedup Engine
+- **Texto:** unicode, tildes, mayúsculas, espacios, abreviaciones venezolanas (`ve_abbreviations.json`)
+- **Fechas:** todo a ISO 8601 UTC (`normalize_date`)
+- **Ubicaciones:** nombre normalizado + coordenadas opcionales via OpenStreetMap (`normalize_location`). Si la API falla, `lat/lng = null`; el registro no se descarta
+- **NLP:** para fuentes de texto libre (PDFs, HTML narrativo), `spaCy es_core_news_sm` extrae entidades antes del mapeo
 
-La deduplicación busca detectar registros repetidos.
+### 3.3 Claves de dedup — se calculan aquí, antes de enviar a staging
 
-No todos los tipos de entidad se deduplican igual.
-
----
-
-## Deduplicación de eventos
-
-Para eventos se puede usar fingerprint por contenido normalizado.
-
-Campos posibles:
-
-* `event_type`
-* `occurred_at`
-* `affected_states`
-* `magnitude`
-* `depth_km`
-* `external_ids`
-
-Si dos eventos tienen el mismo `external_id` confiable, pueden tratarse como el mismo evento.
+- `dedup_hash` — SHA-256 del contenido normalizado. Para Event y AcopioCenter, dos registros con el mismo hash son duplicados exactos.
+- `block_keys` — para Person: fonética del nombre (Double Metaphone / NYSIIS) + primeras letras + estado. Permite agrupar candidatos sin comparar todos contra todos.
 
 ---
 
-## Deduplicación de centros de acopio
+## Capa 4 — Staging exporter (Issue #81) y watermark por fuente (Issue #57)
 
-Para centros de acopio se puede usar fingerprint por contenido normalizado.
+`scrapers/exporters/staging_exporter.py` lee las entidades procesadas (un dict
+por registro, post-PII, post-score, post-protección de menores) y hace un
+`POST /api/aportes` por registro a `dataVenezuela`.
 
-Campos posibles:
+Responsabilidades del exporter:
+- Construir el payload del aporte usando los contratos de
+  `scrapers/dedup/specs.py`: `runId`, `entityType`, `externalId`, `dedupHash`,
+  `dedupVersion`, `blockKeys`, `contentHash`, `sourceSlug` y `rawJson` (el
+  record de negocio sin claves internas con prefijo `_`). Keys en camelCase y
+  `rawJson` (no `data`) por contrato real de `dataVenezuela` — ver
+  `dataVenezuela/docs/api-dedup.md` (alineado en #129/#131).
+- `external_id` es determinista (fingerprint v1 para Event/AcopioCenter,
+  `deterministic_id` para Person). El backend hace upsert por `external_id`,
+  así que re-correr la misma fuente no duplica (idempotencia).
+- Clasificar la respuesta: 200/201 → enviado, 409 → duplicado, cualquier otro
+  status o error de red → error acumulado (nunca relanza, resiliencia por
+  registro).
+- Avanzar el watermark de la fuente (`PUT /api/source-watermarks/{slug}`, body
+  `{"watermarkAt": "<ISO>"}`) a `max(fetched_at)` menos un margen de seguridad
+  (`_WATERMARK_SAFETY_MARGIN`, ver más abajo) solo cuando todos los POST de
+  esa fuente terminaron en 200/201. Si cualquiera falla, el watermark no
+  cambia.
 
-* Nombre normalizado.
-* Ubicación normalizada.
-* Organización responsable.
-* Contacto público.
-* Evento asociado.
+Auth con `dataVenezuela`: header `x-api-key` (no `Authorization: Bearer`) —
+mismo header en `/api/aportes` y en `/api/source-watermarks/{slug}`, por
+contrato real documentado en `dataVenezuela/docs/api-dedup.md`.
 
-Si hay dudas, debe mantenerse como candidato de duplicado y no fusionarse automáticamente.
+### Semántica del watermark: `fetched_at` (wall-clock local) vs `updated_at` (servidor)
+
+El watermark persiste `max(fetched_at)`, donde `fetched_at` es el momento en
+que **este scraper** terminó de descargar la página (wall-clock local del
+adapter, `now_utc()`) — **no** el `updated_at` del registro en el servidor de
+la fuente. Mientras el watermark era solo informativo (antes de #57) esto no
+importaba; ahora que filtra el fetch real (`updated_after`) es **load-bearing**:
+
+Si un registro se actualiza en el servidor **mientras el fetch está en
+vuelo** (entre que el servidor ejecutó la query y que terminamos de recibir
+la respuesta), la respuesta que ya recibimos no lo refleja, pero el
+`fetched_at` que persistimos como watermark es *posterior* a esa
+actualización. La siguiente corrida pediría `updated_after=<ese watermark>`
+y el servidor excluiría ese registro — quedaría perdido permanentemente, sin
+que la idempotencia por `external_id` lo remedie (nunca lo volveríamos a
+pedir).
+
+Mitigación: `_apply_safety_margin` resta `_WATERMARK_SAFETY_MARGIN` (5
+minutos) al watermark antes de persistirlo, creando una ventana de overlap
+en cada corrida. La idempotencia por `external_id` en `dataVenezuela` absorbe
+los registros re-enviados en ese overlap sin duplicar. El margen es una
+mitigación, no una garantía formal — depende de que el reloj del scraper y el
+del servidor de la fuente no diverjan más que el margen, y de que la latencia
+de un fetch individual no exceda esa ventana. **Pendiente de confirmar con
+cada fuente:** si su API interpreta `updated_after` de forma inclusiva o
+exclusiva en el límite exacto.
+
+`source_slug` **no** vive en `StagingConfig`: una corrida del pipeline procesa
+múltiples fuentes (`run_pipeline._run_source` itera todas las habilitadas), así
+que `source_slug` es siempre `source.id` y se pasa explícito en cada llamada a
+`StagingExporter.get_watermark(source_slug)` / `export_source(..., source_slug=...)`.
+Esto mantiene watermarks independientes por fuente dentro de la misma corrida.
+Como `source.id` viaja sin escapar en el path REST (`/api/source-watermarks/{id}`),
+`validate_sources_config` exige que sea único entre fuentes y que solo contenga
+`[a-zA-Z0-9_-]`.
+
+Antes de hacer el fetch, `_run_source` lee `exporter.get_watermark(source.id)`
+**dentro** del mismo `try/finally` que cierra el adapter, y lo pasa como
+`params={"updated_after": ...}` a `adapter.fetch_all(...)`. El `ApiAdapter` lo
+reenvía como query param real; el resto de adapters (RSS, PDF, HTML,
+Playwright, archivo local) lo ignora (no soportan filtrado server-side). Si la
+fuente nunca tuvo watermark, `get_watermark` devuelve el default
+`1970-01-01T00:00:00Z`, lo que provoca backfill completo en la primera corrida.
+Una lectura fallida del watermark (red, 5xx, o un body 2xx con JSON
+malformado/no-dict) tampoco bloquea el fetch ni filtra el cierre del adapter:
+degrada al mismo default en vez de abortar la fuente.
+
+Modo dry-run silencioso: si falta cualquiera de `STAGING_API_KEY` o
+`STAGING_BASE_URL`, el exporter queda deshabilitado, no abre cliente HTTP (cero
+red), loguea a INFO lo que enviaría y termina con `staging_sent=0` sin error.
+
+El exporter no toma decisiones de dedup. Su única responsabilidad es persistir
+en staging; el dedup vive en el consolidation job (#82).
 
 ---
 
-## Deduplicación de personas
+## Capa 5 — Consolidation job (Issue #82)
 
-La deduplicación de personas es sensible.
+Proceso independiente que corre cada 20 minutos. Lee `aportes WHERE consolidated_at IS NULL`.
 
-Un falso merge puede causar daño real.
+**Event y AcopioCenter:** dedup automática por `dedup_hash`. El registro con mayor `trust_tier` gana. La decisión queda en `dedup_decisions`.
 
-Por eso, para personas el sistema no debe colapsar registros automáticamente salvo que exista una regla explícita aprobada por el equipo.
+**Person:** nunca auto-merge. El job calcula similitud (Jaro-Winkler + HMAC match + rango de edad + ubicación) dentro de bloques fonéticos y genera candidatos en `dedup_candidates`. Un voluntario humano aprueba o rechaza. Cada versión anterior queda en `canonical_record_versions`.
 
-El flujo recomendado es:
-
-```text
-Person records limpios
-    ↓
-Blocking
-    ↓
-Similarity scoring
-    ↓
-Dedup candidates
-    ↓
-Revisión humana
-    ↓
-Merge o rechazo
-```
-
----
-
-## Blocking
-
-Blocking reduce el número de comparaciones.
-
-Ejemplos de claves de bloqueo:
-
-* Fonética del nombre.
-* Primeras letras del nombre y apellido.
-* Estado.
-* Municipio.
-* Rango de edad.
-* Evento asociado.
-* Cédula HMAC si existe.
-
-El objetivo es evitar comparar todos contra todos.
-
----
-
-## Similarity scoring
-
-El scoring puede considerar:
-
-* Similitud de nombre.
-* Coincidencia de cédula HMAC.
-* Compatibilidad de edad.
-* Ubicación compatible.
-* Estado reportado.
-* Fuente.
-* Fecha de publicación.
-* Foto, si el sistema lo habilita en el futuro.
-
-El scoring no debe ser interpretado como verdad absoluta.
-
-Debe ser una señal para revisión.
+El job es incremental e idempotente: si se interrumpe, la próxima corrida retoma desde donde quedó sin re-procesar lo ya consolidado.
 
 ---
 
@@ -833,67 +811,45 @@ Son responsabilidades distintas.
 
 ---
 
-## 10. Export JSONL
+## 10. Staging (POST /api/aportes)
 
-El export genera archivos JSONL listos para DB/API.
+El export a JSONL en disco fue eliminado en #81. El destino final es la tabla
+`aportes` de dataVenezuela vía `POST /api/aportes` (ver "Capa 4 — Staging
+exporter"). Cada aporte es un objeto JSON con `external_id` determinista para
+idempotencia.
 
-Cada línea debe ser un JSON válido.
-
-Ejemplo:
-
-```json
-{"person_record_id":"uuid-v4","event_id":"uuid-v4","full_name":"JOSE PEREZ"}
-{"person_record_id":"uuid-v4","event_id":"uuid-v4","full_name":"MARIA GOMEZ"}
-```
-
-No se debe exportar un array completo.
-
-Incorrecto:
+Ejemplo de payload (un POST por registro):
 
 ```json
-[
-  {"person_record_id": "uuid-v4"},
-  {"person_record_id": "uuid-v4"}
-]
-```
-
-Correcto:
-
-```json
-{"person_record_id": "uuid-v4"}
-{"person_record_id": "uuid-v4"}
+{
+  "run_id": "uuid-v4",
+  "entity_type": "person",
+  "external_id": "deterministico-16-hex-o-sha256",
+  "dedup_hash": "deterministico",
+  "dedup_version": "person-detid-v1",
+  "block_keys": ["ced:uuid-v4:hmac", "phon:uuid-v4:lara:JN"],
+  "content_hash": "sha256-hex",
+  "source_slug": "encuentralos",
+  "data": {"full_name": "JOSE PEREZ", "event_id": "uuid-v4"}
+}
 ```
 
 ---
 
-## Archivos de salida recomendados
+## Reglas del aporte enviado a staging
 
-```text
-events.jsonl
-persons.jsonl
-person_notes.jsonl
-person_sources.jsonl
-person_photos.jsonl
-acopio_centers.jsonl
-dedup_candidates.jsonl
-```
+Cada aporte debe cumplir:
 
----
-
-## Reglas del export
-
-Cada export debe cumplir:
-
-1. UTF-8.
-2. Una entidad por línea.
-3. JSON válido por línea.
+1. UTF-8, JSON válido.
+2. Un POST por registro.
+3. `external_id` determinista (idempotencia por upsert).
 4. Campos requeridos presentes.
 5. Campos desconocidos como `null`.
 6. Fechas en UTC ISO 8601.
 7. IDs como UUID v4.
 8. Enums controlados.
-9. Sin PII en claro.
-10. Trazabilidad hacia fuente.
+9. Sin PII en claro (`data` ya viene redactado).
+10. Trazabilidad hacia fuente (`source_slug`).
 
 ---
 
@@ -914,6 +870,25 @@ Responsabilidades de DB/API:
 * Permitir actualizaciones sin destruir historial.
 
 DB/API no debe asumir que un registro está verificado solo porque fue ingerido correctamente.
+
+---
+
+## Conversión de `trust_tier`
+
+Los modelos tipados (`Person`, `Event`, `AcopioCenter`) usan `trust_tier: str` con valores `A/B/C/D` por legibilidad en configs y código de parsers.
+
+La tabla `person_sources` persiste el trust tier como `SMALLINT` (`1/2/3`). Ningún módulo del pipeline hace esa conversión hoy — la implementa Stage 1 (#81) al momento de escribir `person_sources`.
+
+Mapeo canónico:
+
+```text
+A → 1   (fuente oficial)
+B → 2   (ONG verificada)
+C → 2   (ONG no verificada)
+D → 3   (redes sociales, anónimo)
+```
+
+Este mapeo es la única fuente de verdad para esa conversión — cualquier implementación de Stage 1 debe usar exactamente estos valores en vez de inventar una escala propia.
 
 ---
 
@@ -1081,67 +1056,49 @@ Casos mínimos:
 
 ## 17. Flujo esperado para agregar una nueva fuente
 
-```text
-1. Crear source config.
-2. Crear fixture ficticio.
-3. Crear adapter si no existe uno compatible.
-4. Crear parser específico.
-5. Mapear campos al modelo interno.
-6. Aplicar sanitizer.
-7. Aplicar normalizer.
-8. Validar schema.
-9. Exportar JSONL.
-10. Agregar tests.
-11. Documentar limitaciones.
-12. Abrir PR.
+1. Un error en un registro individual no tumba el pipeline.
+2. Un error en una fuente entera se loguea y se continúa con la siguiente.
+3. Los registros sin parser van a cuarentena, no al basura.
+4. La PII se enmascara antes que cualquier persistencia.
+5. La dedup de personas no es destructiva: propone, un humano decide.
+6. Todo registro mantiene trazabilidad hacia la fuente y el raw artifact.
+7. Los campos desconocidos se exportan como `null`, nunca se omiten.
+8. El staging exporter avanza el watermark solo cuando confirma entrega.
+
+---
+
+## Ejecución local
+
+```bash
+# Tests (deben pasar siempre)
+pytest scrapers/tests
+
+# Demo offline con datos sintéticos
+python -m scrapers.cli run --config scrapers/config/sources.demo.yaml
+
+# Limitar registros por fuente (útil para desarrollo)
+python -m scrapers.cli run --config scrapers/config/sources.demo.yaml --limit 10
+
+# Validar config de fuentes
+python -m scrapers.cli validate --config scrapers/config/sources.demo.yaml
 ```
 
 ---
 
-## 18. Qué no debe hacer un scraper
+## Estado de implementación
 
-Un scraper no debe:
-
-* Confirmar personas como duplicadas.
-* Borrar registros por parecer repetidos.
-* Decidir que una persona está encontrada sin fuente.
-* Inventar edad exacta.
-* Inventar ubicación.
-* Inferir sexo sin evidencia.
-* Loguear PII.
-* Subir outputs reales.
-* Saltarse el sanitizer.
-* Guardar raw content sensible.
-* Consultar fuentes no declaradas.
-* Scrappear fuentes privadas sin autorización.
-
----
-
-## 19. Contratos relacionados
-
-Este documento define el flujo general.
-
-Los detalles específicos viven en:
-
-```text
-docs/source_config.md
-docs/scraper_contract.md
-docs/schema.md
-docs/pii_and_security.md
-docs/deduplication.md
-docs/verification.md
-docs/testing.md
-```
-
----
-
-## Regla de oro
-
-En una crisis, el sistema debe preferir prudencia sobre automatización agresiva.
-
-```text
-Un duplicado se puede revisar.
-Un falso merge puede dañar.
-La trazabilidad no se negocia.
-La PII no se expone.
-```
+| Componente | Estado |
+|-----------|--------|
+| Adapters (todos) | ✅ |
+| `encuentralos` parser | ✅ |
+| PII HMAC (`shared/hashing.py`) | ✅ |
+| Normalización (texto, fechas, ubicaciones, NLP) | ✅ |
+| Modelos Pydantic (Person/AcopioCenter/Event) | ⏳ fix #85 pendiente |
+| Staging exporter (`POST /api/aportes`) | ✅ Issue #81 |
+| Dedup specs + fingerprint v1 | ✅ Issue #81 |
+| Raw artifact store (R2) | ❌ bloqueado por #81 |
+| Quarantine DB | ❌ bloqueado por #81 |
+| Watermark por fuente | ✅ Issue #57 |
+| Consolidation job | ❌ Issue #82, bloqueado por #81 |
+| Build job (Supabase → D1) | ❌ bloqueado por canonical |
+| Cloudflare Worker | ❌ bloqueado por build job |

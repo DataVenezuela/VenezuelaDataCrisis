@@ -1,0 +1,44 @@
+name: Consolidate
+
+on:
+  schedule:
+    - cron: "5,25,45 * * * *"   # cada 20 minutos (offset de ingest)
+  workflow_dispatch: {}
+
+concurrency:
+  group: consolidate
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  consolidate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: scrapers/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r scrapers/requirements.txt
+
+      - name: Download latest ingest artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: scrapers/runtime_output
+          merge-multiple: true
+        continue-on-error: true
+
+      - name: Run consolidation
+        env:
+          PII_SALT: ${{ secrets.PII_HMAC_SECRET }}
+          PII_HMAC_SECRET: ${{ secrets.PII_HMAC_SECRET }}
+        run: |
+          python -m scrapers.cli consolidate \
+            --output-dir scrapers/runtime_output

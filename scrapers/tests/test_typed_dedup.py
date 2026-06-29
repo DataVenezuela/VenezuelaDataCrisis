@@ -12,6 +12,8 @@ from scrapers.dedup.fingerprint import (
 from scrapers.models import AcopioCenter, Event
 from scrapers.normalizers.text import normalize_for_match
 
+_EVENT_ID = "8f14e45f-ceea-467e-bd5d-0a4f2e0c1a3a"
+
 
 def test_event_fingerprint_keeps_highest_trust_tier(caplog) -> None:
     low_trust = Event(
@@ -46,12 +48,14 @@ def test_event_fingerprint_keeps_highest_trust_tier(caplog) -> None:
 def test_acopio_fingerprint_keeps_highest_trust_tier(caplog) -> None:
     low_trust = AcopioCenter(
         name="Centro de Acopio Demo",
+        event_id=_EVENT_ID,
         location_text="Ciudad Demo, Estado Demo",
         trust_tier="C",
         fuente="source-social-demo",
     )
     high_trust = AcopioCenter(
         name="Centro de Acopio Demo",
+        event_id=_EVENT_ID,
         location_text="Ciudad Demo, Estado Demo",
         trust_tier="B",
         fuente="source-ngo-demo",
