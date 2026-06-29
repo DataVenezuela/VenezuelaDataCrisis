@@ -23,6 +23,7 @@ from scrapers.exporters.staging_exporter import (
     ExportResult,
     StagingConfig,
     StagingExporter,
+    _apply_safety_margin,
     compute_external_id,
 )
 
@@ -257,7 +258,8 @@ class TestWatermark:
             source_slug="demo", source_fetched_ats=["2026-06-24T15:00:00Z", "2026-06-24T16:00:00Z"],
         )
         assert t.watermark_puts
-        assert t.watermark_puts[-1]["watermarkAt"] == "2026-06-24T16:00:00Z"
+        # max(fetched_ats) menos el margen de seguridad de 5 minutos.
+        assert t.watermark_puts[-1]["watermarkAt"] == "2026-06-24T15:55:00Z"
         assert t.watermark_puts[-1]["source_slug"] == "demo"
 
     def test_watermark_not_set_on_post_failure(self) -> None:
@@ -273,6 +275,23 @@ class TestWatermark:
         t = _RecordingTransport(aportes_status=201)
         _exporter(t).export_source([_person("Juan")], source_slug="demo", source_fetched_ats=[])
         assert t.watermark_puts == []
+
+    def test_watermark_advance_is_monotonic_across_runs(self) -> None:
+        """El margen resta una constante: una secuencia de fetched_at creciente
+        (como en corridas reales sucesivas) sigue produciendo watermarks
+        crecientes, nunca retrocede."""
+        t = _RecordingTransport(aportes_status=201)
+        exp = _exporter(t)
+        exp.export_source(
+            [_person("Juan")], source_slug="demo", source_fetched_ats=["2026-06-24T16:00:00Z"]
+        )
+        exp.export_source(
+            [_person("Ana")], source_slug="demo", source_fetched_ats=["2026-06-24T16:01:00Z"]
+        )
+        assert [p["watermarkAt"] for p in t.watermark_puts] == [
+            "2026-06-24T15:55:00Z",
+            "2026-06-24T15:56:00Z",
+        ]
 
     def test_put_targets_slug_path_with_camelcase_body(self) -> None:
         """Contrato real de dataVenezuela: PUT /api/source-watermarks/{slug}
@@ -294,7 +313,8 @@ class TestWatermark:
             [_person("Juan")], source_slug="fuente-x", source_fetched_ats=["2026-06-24T16:00:00Z"]
         )
         assert captured["path"] == "/api/source-watermarks/fuente-x"
-        assert captured["body"] == {"watermarkAt": "2026-06-24T16:00:00Z"}
+        # max(fetched_ats) menos el margen de seguridad de 5 minutos.
+        assert captured["body"] == {"watermarkAt": "2026-06-24T15:55:00Z"}
 
     def test_watermark_is_per_source_slug(self) -> None:
         """Dos fuentes en la misma corrida avanzan watermarks independientes."""
@@ -308,9 +328,22 @@ class TestWatermark:
         )
         slugs_to_watermark = {p["source_slug"]: p["watermarkAt"] for p in t.watermark_puts}
         assert slugs_to_watermark == {
-            "fuente-a": "2026-06-24T10:00:00Z",
-            "fuente-b": "2026-06-24T20:00:00Z",
+            "fuente-a": "2026-06-24T09:55:00Z",
+            "fuente-b": "2026-06-24T19:55:00Z",
         }
+
+
+# --- margen de seguridad del watermark ---------------------------------------
+
+class TestSafetyMargin:
+    def test_subtracts_five_minutes(self) -> None:
+        assert _apply_safety_margin("2026-06-24T16:00:00Z") == "2026-06-24T15:55:00Z"
+
+    def test_crosses_day_boundary(self) -> None:
+        assert _apply_safety_margin("2026-06-24T00:02:00Z") == "2026-06-23T23:57:00Z"
+
+    def test_malformed_input_returned_unchanged(self) -> None:
+        assert _apply_safety_margin("no-es-una-fecha") == "no-es-una-fecha"
 
 
 # --- get_watermark (lectura previa al fetch) ---------------------------------
@@ -464,7 +497,7 @@ class TestSourceErrorsWatermark:
             source_errors=[],
         )
         assert t.watermark_puts
-        assert t.watermark_puts[-1]["watermarkAt"] == "2026-06-24T16:00:00Z"
+        assert t.watermark_puts[-1]["watermarkAt"] == "2026-06-24T15:55:00Z"
 
 
 # --- dry-run ----------------------------------------------------------------

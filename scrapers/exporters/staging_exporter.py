@@ -20,6 +20,7 @@ import os
 import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 
 import httpx
 
@@ -32,6 +33,17 @@ log = logging.getLogger(__name__)
 _DEFAULT_WATERMARK = "1970-01-01T00:00:00Z"
 _APORTES_PATH = "/api/aportes"
 _WATERMARKS_PATH = "/api/source-watermarks"
+
+# fetched_at es el wall-clock local de cuando el adapter termino de
+# descargar la pagina, no el updated_at del registro en el servidor de la
+# fuente. Un registro puede actualizarse del lado del servidor mientras el
+# fetch esta en vuelo y no quedar reflejado en la respuesta que ya recibimos;
+# si el watermark avanza exactamente hasta fetched_at, la siguiente corrida
+# (updated_after=watermark) nunca volveria a pedirlo. Este margen crea una
+# ventana de overlap; la idempotencia por external_id en dataVenezuela
+# absorbe los registros re-enviados en ese overlap sin duplicar.
+_WATERMARK_SAFETY_MARGIN = timedelta(minutes=5)
+_FETCHED_AT_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
 # Status HTTP transitorios que ameritan reintento del POST a /api/aportes.
 # Definido localmente (no se mueve a _shared para no chocar con PR #61).
@@ -101,6 +113,21 @@ def _content_hash(body: dict[str, object]) -> str:
     """
     raw = json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return sha256_hex(raw.encode("utf-8"))
+
+
+def _apply_safety_margin(watermark_at: str) -> str:
+    """Resta ``_WATERMARK_SAFETY_MARGIN`` al watermark antes de persistirlo.
+
+    Ver comentario junto a ``_WATERMARK_SAFETY_MARGIN``. Si el formato no es
+    el esperado (``now_utc()`` de todos los adapters), devuelve el valor
+    intacto en vez de fallar — no vale la pena tumbar el pipeline por esto.
+    """
+    try:
+        dt = datetime.strptime(watermark_at, _FETCHED_AT_FORMAT).replace(tzinfo=timezone.utc)
+    except ValueError:
+        log.warning("watermark con formato inesperado, sin margen de seguridad: %s", watermark_at)
+        return watermark_at
+    return (dt - _WATERMARK_SAFETY_MARGIN).strftime(_FETCHED_AT_FORMAT)
 
 
 def compute_external_id(rec: dict[str, object], entity_type: str) -> str:
@@ -318,7 +345,7 @@ class StagingExporter:
         # previo de la fuente (source_errors).
         has_source_errors = bool(source_errors)
         if not result.errors and not has_source_errors and source_fetched_ats:
-            new_watermark = max(source_fetched_ats)
+            new_watermark = _apply_safety_margin(max(source_fetched_ats))
             try:
                 if not self._set_watermark(source_slug, new_watermark):
                     result.errors.append("no se pudo actualizar el watermark")

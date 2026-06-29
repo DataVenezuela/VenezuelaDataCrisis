@@ -455,7 +455,8 @@ class TestWatermarkEndToEnd:
         ):
             run_pipeline(config_path=demo_config, output_dir=tmp_path / "out")
         assert transport.watermark_puts
-        assert transport.watermark_puts[-1]["watermarkAt"] == "2026-06-24T15:30:00Z"
+        # fetched_at del mock menos el margen de seguridad de 5 minutos.
+        assert transport.watermark_puts[-1]["watermarkAt"] == "2026-06-24T15:25:00Z"
 
     def test_watermark_not_advanced_on_failure(self, tmp_path: Path, demo_config: Path) -> None:
         transport = _StagingTransport(aportes_status=500)

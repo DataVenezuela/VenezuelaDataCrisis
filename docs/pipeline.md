@@ -627,9 +627,11 @@ por registro, post-PII, post-score, post-protección de menores) y hace un
 
 Responsabilidades del exporter:
 - Construir el payload del aporte usando los contratos de
-  `scrapers/dedup/specs.py`: `entity_type`, `external_id`, `dedup_hash`,
-  `dedup_version`, `block_keys`, `content_hash`, `run_id`, `source_slug` y
-  `data` (el record de negocio sin claves internas con prefijo `_`).
+  `scrapers/dedup/specs.py`: `runId`, `entityType`, `externalId`, `dedupHash`,
+  `dedupVersion`, `blockKeys`, `contentHash`, `sourceSlug` y `rawJson` (el
+  record de negocio sin claves internas con prefijo `_`). Keys en camelCase y
+  `rawJson` (no `data`) por contrato real de `dataVenezuela` — ver
+  `dataVenezuela/docs/api-dedup.md` (alineado en #129/#131).
 - `external_id` es determinista (fingerprint v1 para Event/AcopioCenter,
   `deterministic_id` para Person). El backend hace upsert por `external_id`,
   así que re-correr la misma fuente no duplica (idempotencia).
@@ -637,7 +639,8 @@ Responsabilidades del exporter:
   status o error de red → error acumulado (nunca relanza, resiliencia por
   registro).
 - Avanzar el watermark de la fuente (`PUT /api/source-watermarks/{slug}`, body
-  `{"watermarkAt": "<ISO>"}`) a `max(fetched_at)` solo cuando todos los POST de
+  `{"watermarkAt": "<ISO>"}`) a `max(fetched_at)` menos un margen de seguridad
+  (`_WATERMARK_SAFETY_MARGIN`, ver más abajo) solo cuando todos los POST de
   esa fuente terminaron en 200/201. Si cualquiera falla, el watermark no
   cambia.
 
@@ -645,11 +648,32 @@ Auth con `dataVenezuela`: header `x-api-key` (no `Authorization: Bearer`) —
 mismo header en `/api/aportes` y en `/api/source-watermarks/{slug}`, por
 contrato real documentado en `dataVenezuela/docs/api-dedup.md`.
 
-> **Gap conocido (#129):** el payload de `POST /api/aportes` que construye
-> `_build_payload` sigue en snake_case (`run_id`, `entity_type`, `dedup_hash`,
-> `data`, …); el contrato real de `dataVenezuela` espera camelCase
-> (`runId`, `entityType`, `dedupHash`, `rawJson`, …). El watermark (#57) ya
-> quedó alineado al contrato real; el payload de aportes (#81) todavía no.
+### Semántica del watermark: `fetched_at` (wall-clock local) vs `updated_at` (servidor)
+
+El watermark persiste `max(fetched_at)`, donde `fetched_at` es el momento en
+que **este scraper** terminó de descargar la página (wall-clock local del
+adapter, `now_utc()`) — **no** el `updated_at` del registro en el servidor de
+la fuente. Mientras el watermark era solo informativo (antes de #57) esto no
+importaba; ahora que filtra el fetch real (`updated_after`) es **load-bearing**:
+
+Si un registro se actualiza en el servidor **mientras el fetch está en
+vuelo** (entre que el servidor ejecutó la query y que terminamos de recibir
+la respuesta), la respuesta que ya recibimos no lo refleja, pero el
+`fetched_at` que persistimos como watermark es *posterior* a esa
+actualización. La siguiente corrida pediría `updated_after=<ese watermark>`
+y el servidor excluiría ese registro — quedaría perdido permanentemente, sin
+que la idempotencia por `external_id` lo remedie (nunca lo volveríamos a
+pedir).
+
+Mitigación: `_apply_safety_margin` resta `_WATERMARK_SAFETY_MARGIN` (5
+minutos) al watermark antes de persistirlo, creando una ventana de overlap
+en cada corrida. La idempotencia por `external_id` en `dataVenezuela` absorbe
+los registros re-enviados en ese overlap sin duplicar. El margen es una
+mitigación, no una garantía formal — depende de que el reloj del scraper y el
+del servidor de la fuente no diverjan más que el margen, y de que la latencia
+de un fetch individual no exceda esa ventana. **Pendiente de confirmar con
+cada fuente:** si su API interpreta `updated_after` de forma inclusiva o
+exclusiva en el límite exacto.
 
 `source_slug` **no** vive en `StagingConfig`: una corrida del pipeline procesa
 múltiples fuentes (`run_pipeline._run_source` itera todas las habilitadas), así
