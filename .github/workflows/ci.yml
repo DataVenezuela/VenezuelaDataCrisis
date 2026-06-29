@@ -37,6 +37,10 @@ jobs:
       - name: Lint (ruff)
         run: ruff check .
 
+      - name: Type check (mypy --strict en adapters/parsers)
+        run: |
+          python -m mypy --strict --follow-imports=silent scrapers/adapters scrapers/parsers
+
       - name: Secret scan (gitleaks)
         if: always()
         uses: gitleaks/gitleaks-action@v2
