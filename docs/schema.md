@@ -516,7 +516,34 @@ fue reducida en el `Person` asociado.
 
 ## 10. Entidad: `ACOPIO_CENTER`
 
-Tabla:
+> **⚠️ Vigente vs. aspiracional — leer antes de escribir un parser.**
+>
+> Esta sección describe el esquema **objetivo de la capa de servicio/DB**
+> (`acopio_centers` en Supabase, export JSONL). Es el destino **aspiracional**,
+> NO lo que un parser produce hoy.
+>
+> El contrato **vigente** que un parser debe instanciar es el modelo Pydantic
+> `AcopioCenter` (`scrapers/models/acopio_center.py`), deliberadamente
+> minimalista y alineado a la DB por el #85. Tiene **10 campos**:
+> `name`, `event_id`, `location_text` (string), `coordinates` (`{"lat", "lon"}`
+> o `null`), `needs` (`list[str]`, sin enum forzado), `status`, `trust_tier`,
+> `confidence_score`, `fuente`, `nota`.
+>
+> Diferencias a tener en cuenta respecto a la tabla de abajo:
+>
+> - El modelo usa `location_text` (string) + `coordinates` plano, **no** un
+>   objeto `location` anidado con `raw/estado/municipio/parroquia`.
+> - Las coordenadas usan la clave **`lon`** (el ejemplo JSONL de abajo usa `lng`).
+> - El modelo tiene `fuente` y `nota`, que no aparecen en la tabla.
+> - **No existen aún** en el modelo: `acopio_id`, `contact_hmac`,
+>   `contact_masked`, `capacity`, `current_load`, `managing_org`,
+>   `last_verified_at`, ni el enum de `needs`.
+>
+> Extender el modelo Pydantic + la DB hacia este esquema rico es trabajo
+> cross-repo aparte (toca `dataVenezuela`) y reabriría el mismatch que cerró
+> el #85; trackearlo como issue propio antes de codear contra estos campos.
+
+Tabla (objetivo de servicio/DB — ver nota anterior):
 
 ```text
 acopio_centers
