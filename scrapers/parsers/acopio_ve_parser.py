@@ -46,7 +46,8 @@ PII
 ---
 Un centro de acopio es un lugar público, no una persona. El modelo
 ``AcopioCenter`` no tiene campos de contacto, así que el campo ``contacto``
-de la fuente (que a veces trae teléfonos) **no se almacena ni se loguea**.
+de la fuente (que a veces incluye datos de contacto directo) **no se almacena
+ni se loguea**.
 Los mensajes de log no incluyen valores de campos del registro.
 
 Forma del payload

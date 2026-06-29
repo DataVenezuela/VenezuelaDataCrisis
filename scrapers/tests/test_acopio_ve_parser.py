@@ -170,7 +170,7 @@ class TestFieldMapping:
         assert "Alimentos no perecederos" in c.nota
 
     def test_nota_excludes_contacto(self) -> None:
-        # contacto puede traer PII (teléfonos) — nunca debe ir a nota.
+        # contacto puede traer PII de contacto directo — nunca debe ir a nota.
         c = _by_name(self.centers, "Demo Diáspora")
         assert c.nota is not None
         assert "contacto" not in c.nota.lower()
