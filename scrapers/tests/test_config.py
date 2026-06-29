@@ -116,6 +116,57 @@ sources:
         validate_sources_config(config)
 
 
+def test_unsafe_source_id_is_rejected(tmp_path):
+    """id se usa como segmento de URL en /api/source-watermarks/{id}."""
+    config = tmp_path / "unsafe_id.yaml"
+    config.write_text(
+        """
+sources:
+  - id: "fuente/con/slash"
+    name: Fuente con slash en el id
+    type: html_static
+    enabled: true
+    trust_tier: C
+    url: "https://example.org"
+    refresh_minutes: 30
+    parser_asignado: html
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="letras, numeros"):
+        validate_sources_config(config)
+
+
+def test_duplicate_source_id_is_rejected(tmp_path):
+    config = tmp_path / "duplicate_id.yaml"
+    config.write_text(
+        """
+sources:
+  - id: fuente_dup
+    name: Primera
+    type: html_static
+    enabled: true
+    trust_tier: C
+    url: "https://example.org/a"
+    refresh_minutes: 30
+    parser_asignado: html
+  - id: fuente_dup
+    name: Segunda
+    type: html_static
+    enabled: true
+    trust_tier: C
+    url: "https://example.org/b"
+    refresh_minutes: 30
+    parser_asignado: html
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="duplicado"):
+        validate_sources_config(config)
+
+
 def test_invalid_trust_tier_is_rejected(tmp_path):
     config = tmp_path / "invalid_trust.yaml"
     config.write_text(

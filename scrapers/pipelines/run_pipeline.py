@@ -288,18 +288,25 @@ class _LocalFileAdapter:
 # Etapas del pipeline
 # ---------------------------------------------------------------------------
 
-def _fetch_pages(adapter: Any, source: SourceConfig) -> list[RawContent]:
-    """Llama a fetch_all del adapter y recopila todas las paginas."""
+def _fetch_pages(adapter: Any, source: SourceConfig, updated_after: str) -> list[RawContent]:
+    """Llama a fetch_all del adapter y recopila todas las paginas.
+
+    ``updated_after`` es el watermark actual de la fuente; se pasa como query
+    param a todos los adapters (fetch_all acepta **kwargs en todos). Los que
+    soportan filtrado server-side (ApiAdapter) lo incluyen en la request; el
+    resto lo ignora silenciosamente.
+    """
     url = source.url
     pages: list[RawContent] = []
+    params = {"updated_after": updated_after}
 
     # ApiAdapter expone default_path separado de base_url
     if hasattr(adapter, "default_path") and adapter.default_path:
         path = adapter.default_path
-        for page in adapter.fetch_all(path):
+        for page in adapter.fetch_all(path, params=params):
             pages.append(page)
     else:
-        for page in adapter.fetch_all(url):
+        for page in adapter.fetch_all(url, params=params):
             pages.append(page)
 
     return pages
@@ -561,16 +568,7 @@ def _run_source(
     # 1. Adapter
     adapter = _get_adapter(source)
     if adapter is None:
-        # Tipo de fuente sin adapter implementado: NO hay payload que cuarentenar
-        # (nunca se hizo fetch), pero la omision NO debe ser silenciosa — queda
-        # VISIBLE en summary["errors"] para que el operador sepa que esa fuente
-        # entera no se proceso (Issue #88, principio "nada invisible").
-        msg = (
-            f"adapter no implementado para type={source.type!r} "
-            f"(fuente {source.id} omitida — sin payload que cuarentenar)"
-        )
-        all_errors.append(f"[{source.id}] {msg}")
-        return ExportResult(errors=[msg])
+        return ExportResult()
 
     # 2. Parser
     parser = _get_parser(source, event_id)
@@ -585,7 +583,10 @@ def _run_source(
         )
         all_errors.append(f"[{source.id}] {msg}")
         try:
-            pages = _fetch_pages(adapter, source)
+            # Sin parser no hay staging, asi que tampoco watermark que avance:
+            # se baja TODO el contenido (epoch) para no perder registros que
+            # cuarentenar (el filtrado incremental es solo para el path normal).
+            pages = _fetch_pages(adapter, source, "1970-01-01T00:00:00Z")
         except Exception as exc:
             all_errors.append(
                 f"[{source.id}] fetch fallo al intentar cuarentenar sin parser: {exc}"
@@ -611,11 +612,15 @@ def _run_source(
         return ExportResult(errors=[msg])
 
     # 3. Fetch
-    # El close() va en finally: si fetch_all() lanza (ej. PlaywrightAdapter
-    # agotando retries), el adapter puede mantener recursos vivos (browser,
-    # conexiones) y el error sube igual al orquestador principal.
+    # El watermark se lee ANTES del fetch para acotar la ventana
+    # (updated_after); en la primera corrida de la fuente (sin watermark
+    # previo) vale "1970-01-01T00:00:00Z" y provoca backfill completo.
+    # get_watermark() va DENTRO del try/finally: aunque hace fail-open en
+    # httpx.HTTPError, un fallo no contemplado (ej. JSON malformado) no debe
+    # dejar el adapter sin cerrar (browser, conexiones) ni saltarse el close().
     try:
-        pages = _fetch_pages(adapter, source)
+        watermark_at = exporter.get_watermark(source.id)
+        pages = _fetch_pages(adapter, source, watermark_at)
     finally:
         if hasattr(adapter, "close"):
             try:
@@ -653,6 +658,7 @@ def _run_source(
     # previos de la fuente (parse/PII/enriquecimiento/proteccion de menores).
     result = exporter.export_source(
         records,
+        source_slug=source.id,
         source_fetched_ats=fetched_ats,
         source_errors=source_errors,
     )

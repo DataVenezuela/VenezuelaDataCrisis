@@ -20,6 +20,7 @@ import os
 import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 
 import httpx
 
@@ -31,7 +32,18 @@ log = logging.getLogger(__name__)
 
 _DEFAULT_WATERMARK = "1970-01-01T00:00:00Z"
 _APORTES_PATH = "/api/aportes"
-_WATERMARKS_PATH = "/api/source_watermarks"
+_WATERMARKS_PATH = "/api/source-watermarks"
+
+# fetched_at es el wall-clock local de cuando el adapter termino de
+# descargar la pagina, no el updated_at del registro en el servidor de la
+# fuente. Un registro puede actualizarse del lado del servidor mientras el
+# fetch esta en vuelo y no quedar reflejado en la respuesta que ya recibimos;
+# si el watermark avanza exactamente hasta fetched_at, la siguiente corrida
+# (updated_after=watermark) nunca volveria a pedirlo. Este margen crea una
+# ventana de overlap; la idempotencia por external_id en dataVenezuela
+# absorbe los registros re-enviados en ese overlap sin duplicar.
+_WATERMARK_SAFETY_MARGIN = timedelta(minutes=5)
+_FETCHED_AT_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
 # Status HTTP transitorios que ameritan reintento del POST a /api/aportes.
 # Definido localmente (no se mueve a _shared para no chocar con PR #61).
@@ -41,11 +53,15 @@ _MAX_POST_RETRIES = 4
 
 @dataclass(frozen=True)
 class StagingConfig:
-    """Configuracion del exporter leida del entorno."""
+    """Configuracion del exporter leida del entorno.
+
+    El source_slug NO vive aqui: una sola corrida del pipeline procesa
+    multiples fuentes (ver run_pipeline._run_source), asi que cada llamada a
+    get_watermark/export_source recibe su propio source_slug (source.id).
+    """
 
     api_key: str
     base_url: str
-    source_slug: str
 
     @classmethod
     def from_env(cls) -> StagingConfig | None:
@@ -59,7 +75,6 @@ class StagingConfig:
         values = {
             "STAGING_API_KEY": os.getenv("STAGING_API_KEY"),
             "STAGING_BASE_URL": os.getenv("STAGING_BASE_URL"),
-            "STAGING_SOURCE_SLUG": os.getenv("STAGING_SOURCE_SLUG"),
         }
         present = [k for k, v in values.items() if v]
         if not present:
@@ -78,7 +93,6 @@ class StagingConfig:
         return cls(
             api_key=str(values["STAGING_API_KEY"]),
             base_url=str(values["STAGING_BASE_URL"]).rstrip("/"),
-            source_slug=str(values["STAGING_SOURCE_SLUG"]),
         )
 
 
@@ -99,6 +113,21 @@ def _content_hash(body: dict[str, object]) -> str:
     """
     raw = json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return sha256_hex(raw.encode("utf-8"))
+
+
+def _apply_safety_margin(watermark_at: str) -> str:
+    """Resta ``_WATERMARK_SAFETY_MARGIN`` al watermark antes de persistirlo.
+
+    Ver comentario junto a ``_WATERMARK_SAFETY_MARGIN``. Si el formato no es
+    el esperado (``now_utc()`` de todos los adapters), devuelve el valor
+    intacto en vez de fallar — no vale la pena tumbar el pipeline por esto.
+    """
+    try:
+        dt = datetime.strptime(watermark_at, _FETCHED_AT_FORMAT).replace(tzinfo=timezone.utc)
+    except ValueError:
+        log.warning("watermark con formato inesperado, sin margen de seguridad: %s", watermark_at)
+        return watermark_at
+    return (dt - _WATERMARK_SAFETY_MARGIN).strftime(_FETCHED_AT_FORMAT)
 
 
 def compute_external_id(rec: dict[str, object], entity_type: str) -> str:
@@ -144,7 +173,7 @@ class StagingExporter:
             self._client = httpx.Client(
                 base_url=config.base_url,
                 headers={
-                    "Authorization": f"Bearer {config.api_key}",
+                    "x-api-key": config.api_key,
                     "User-Agent": USER_AGENT,
                     "Accept": "application/json",
                     "Content-Type": "application/json",
@@ -155,11 +184,10 @@ class StagingExporter:
 
     # -- payload --------------------------------------------------------------
 
-    def _build_payload(self, rec: dict[str, object]) -> dict[str, object]:
+    def _build_payload(self, rec: dict[str, object], source_slug: str) -> dict[str, object]:
         entity_type = str(rec.get("_entity_type") or "Person")
         clean = {k: v for k, v in rec.items() if not k.startswith("_")}
         spec = specs.spec_for_entity_type(entity_type)
-        source_slug = self.config.source_slug if self.config is not None else ""
 
         # Event/AcopioCenter: external_id y dedup_hash derivan ambos del mismo
         # fingerprint v1, asi que se calcula UNA sola vez y se reusa (evita el
@@ -180,40 +208,52 @@ class StagingExporter:
             dedup_hash = specs.dedup_key(rec, entity_type)
 
         return {
-            "run_id": self.run_id,
-            "entity_type": _entity_type_slug(entity_type),
-            "external_id": external_id,
-            "dedup_hash": dedup_hash,
-            "dedup_version": spec.version,
-            "block_keys": specs.block_keys(rec, entity_type),
-            "content_hash": _content_hash(clean),
-            "source_slug": source_slug,
-            "source_record_id": _opt_str(rec.get("_source_record_id")),
-            "source_url": _opt_str(rec.get("_source_url")),
-            "parser_version": _opt_str(rec.get("_parser_version")),
-            "normalizer_version": _opt_str(rec.get("_normalizer_version")),
-            "data": clean,
+            "runId": self.run_id,
+            "entityType": _entity_type_slug(entity_type),
+            "externalId": external_id,
+            "dedupHash": dedup_hash,
+            "dedupVersion": spec.version,
+            "blockKeys": specs.block_keys(rec, entity_type),
+            "contentHash": _content_hash(clean),
+            "sourceSlug": source_slug,
+            "sourceRecordId": _opt_str(rec.get("_source_record_id")),
+            "sourceUrl": _opt_str(rec.get("_source_url")),
+            "parserVersion": _opt_str(rec.get("_parser_version")),
+            "normalizerVersion": _opt_str(rec.get("_normalizer_version")),
+            "rawJson": clean,
         }
 
     # -- watermark ------------------------------------------------------------
 
-    def _get_watermark(self) -> str:
-        assert self._client is not None and self.config is not None
-        resp = self._client.get(f"{_WATERMARKS_PATH}/{self.config.source_slug}")
-        if resp.status_code == 404:
-            return _DEFAULT_WATERMARK
-        resp.raise_for_status()
-        payload = resp.json()
-        return str(payload.get("watermark_at", _DEFAULT_WATERMARK))
+    def get_watermark(self, source_slug: str) -> str:
+        """Watermark actual de ``source_slug``; usado por run_pipeline ANTES
+        del fetch para filtrar la ventana (``updated_after``).
 
-    def _set_watermark(self, watermark_at: str) -> bool:
-        assert self._client is not None and self.config is not None
+        Fail-open al default (backfill completo) si el exporter esta
+        deshabilitado (dry-run) o si la lectura falla: nunca debe bloquear el
+        fetch, y re-fetchear de mas es preferible a perder registros. Cubre
+        tanto errores de red/HTTP como respuestas 2xx con body invalido (ej.
+        JSON malformado), que no son httpx.HTTPError pero igual deben
+        degradar al default en vez de propagarse.
+        """
+        if not self.enabled or self._client is None:
+            return _DEFAULT_WATERMARK
+        try:
+            resp = self._client.get(f"{_WATERMARKS_PATH}/{source_slug}")
+            if resp.status_code == 404:
+                return _DEFAULT_WATERMARK
+            resp.raise_for_status()
+            payload = resp.json()
+            return str(payload.get("watermarkAt", _DEFAULT_WATERMARK))
+        except (httpx.HTTPError, ValueError, AttributeError) as exc:
+            log.warning("no se pudo leer watermark de %s: %s", source_slug, exc)
+            return _DEFAULT_WATERMARK
+
+    def _set_watermark(self, source_slug: str, watermark_at: str) -> bool:
+        assert self._client is not None
         resp = self._client.put(
-            _WATERMARKS_PATH,
-            json={
-                "source_slug": self.config.source_slug,
-                "watermark_at": watermark_at,
-            },
+            f"{_WATERMARKS_PATH}/{source_slug}",
+            json={"watermarkAt": watermark_at},
         )
         return resp.status_code in (200, 201)
 
@@ -260,10 +300,11 @@ class StagingExporter:
         self,
         records: list[dict[str, object]],
         *,
+        source_slug: str,
         source_fetched_ats: list[str],
         source_errors: list[str] | None = None,
     ) -> ExportResult:
-        """Exporta los records de una fuente; avanza el watermark si todo OK.
+        """Exporta los records de ``source_slug``; avanza su watermark si todo OK.
 
         ``source_errors`` son errores previos de la fuente (parse, PII,
         enriquecimiento y el fail-closed de proteccion de menores) que se
@@ -275,22 +316,16 @@ class StagingExporter:
 
         if not self.enabled or self._client is None or self.config is None:
             for rec in records:
-                payload = self._build_payload(rec)
+                payload = self._build_payload(rec, source_slug)
                 log.info(
-                    "DRY-RUN staging_exporter: enviaria entity_type=%s external_id=%s",
-                    payload["entity_type"],
-                    payload["external_id"],
+                    "DRY-RUN staging_exporter: enviaria entityType=%s externalId=%s",
+                    payload["entityType"],
+                    payload["externalId"],
                 )
             return result
 
-        # Lectura informativa del watermark actual (no filtra en Stage 1).
-        try:
-            self._get_watermark()
-        except httpx.HTTPError as exc:
-            log.warning("no se pudo leer watermark: %s", exc)
-
         for rec in records:
-            payload = self._build_payload(rec)
+            payload = self._build_payload(rec, source_slug)
             try:
                 resp = self._post_with_retry(_APORTES_PATH, payload)
             except httpx.HTTPError as exc:
@@ -303,16 +338,16 @@ class StagingExporter:
             else:
                 result.errors.append(
                     f"{_APORTES_PATH} status {resp.status_code} "
-                    f"para external_id={payload['external_id']}"
+                    f"para externalId={payload['externalId']}"
                 )
 
         # El watermark solo avanza si no hubo NINGUN error: ni de POST/PUT ni
         # previo de la fuente (source_errors).
         has_source_errors = bool(source_errors)
         if not result.errors and not has_source_errors and source_fetched_ats:
-            new_watermark = max(source_fetched_ats)
+            new_watermark = _apply_safety_margin(max(source_fetched_ats))
             try:
-                if not self._set_watermark(new_watermark):
+                if not self._set_watermark(source_slug, new_watermark):
                     result.errors.append("no se pudo actualizar el watermark")
             except httpx.HTTPError as exc:
                 result.errors.append(f"PUT {_WATERMARKS_PATH} fallo: {exc}")
@@ -344,10 +379,9 @@ def _opt_str(value: object) -> str | None:
 # aportes.entity_type.
 _ENTITY_TYPE_SLUGS = {
     "Event": "event",
-    "AcopioCenter": "acopio_center",
+    "AcopioCenter": "acopio",   # Zod enum: "event" | "acopio" | "person"
     "Person": "person",
 }
-
 
 def _entity_type_slug(entity_type: str) -> str:
     return _ENTITY_TYPE_SLUGS.get(entity_type, entity_type.lower())

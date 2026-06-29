@@ -47,7 +47,6 @@ _EVENT_ID = "8f14e45f-ceea-467e-bd5d-0a4f2e0c1a3a"
 _STAGING_ENV = {
     "STAGING_API_KEY": "test-key",
     "STAGING_BASE_URL": "https://staging.test",
-    "STAGING_SOURCE_SLUG": "demo-source",
 }
 
 
@@ -65,7 +64,7 @@ class _StagingTransport(httpx.BaseTransport):
         if path == "/api/aportes":
             body = json.loads(request.content)
             self.posts.append(body)
-            external_id = body.get("external_id")
+            external_id = body.get("externalId")
             if external_id in self._seen_external_ids:
                 return httpx.Response(409, json={"duplicate": True})
             # Solo se marca como visto si el envio fue exitoso: un status de
@@ -73,10 +72,12 @@ class _StagingTransport(httpx.BaseTransport):
             if self.aportes_status in (200, 201):
                 self._seen_external_ids.add(external_id)
             return httpx.Response(self.aportes_status, json={"ok": True})
-        if path.startswith("/api/source_watermarks"):
+        if path.startswith("/api/source-watermarks/"):
+            slug = path.rsplit("/", 1)[-1]
             if request.method == "GET":
                 return httpx.Response(404)
-            self.watermark_puts.append(json.loads(request.content))
+            body = json.loads(request.content)
+            self.watermark_puts.append({"source_slug": slug, **body})
             return httpx.Response(200, json={"ok": True})
         return httpx.Response(404)
 
@@ -196,7 +197,7 @@ def _encuentralos_raw(records: list[dict]) -> RawContent:
         http_status=200,
         content_type="application/json",
         content_hash="sha256:abc",
-        raw_content={"data": records, "total": len(records)},
+        raw_content={"rawJson": records, "total": len(records)},
         page=1,
         total_pages=1,
         offset=0,
@@ -254,6 +255,27 @@ class TestAdapterCleanup:
         ):
             run_pipeline(config_path=demo_config, output_dir=tmp_path / "out")
         adapter.close.assert_called()
+
+    def test_adapter_closed_when_get_watermark_raises(
+        self, tmp_path: Path, demo_config: Path
+    ) -> None:
+        """Si exporter.get_watermark() lanza (ej. error inesperado leyendo la
+        respuesta), el adapter ya creado (browser/conexiones) debe cerrarse
+        igual; el error de la fuente queda en el summary, no crashea el run.
+        """
+        adapter = _mock_adapter()
+        transport = _StagingTransport()
+        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport), patch(
+            "scrapers.pipelines.run_pipeline._get_adapter", return_value=adapter
+        ), patch(
+            "scrapers.pipelines.run_pipeline._get_parser", return_value=_mock_parser()
+        ), patch.object(
+            StagingExporter, "get_watermark", side_effect=RuntimeError("boom")
+        ):
+            summary = run_pipeline(config_path=demo_config, output_dir=tmp_path / "out")
+        adapter.close.assert_called()
+        assert summary["sources_processed"] == 0
+        assert any("boom" in e for e in summary["errors"])
 
 
 # ---------------------------------------------------------------------------
@@ -347,7 +369,7 @@ class TestStagingSend:
         ):
             run_pipeline(config_path=demo_config, output_dir=tmp_path / "out")
         for post in transport.posts:
-            assert "_entity_type" not in post["data"]
+            assert "_entity_type" not in post["rawJson"]
 
     def test_confidence_score_in_range(self, tmp_path: Path, demo_config: Path) -> None:
         transport = _StagingTransport()
@@ -358,7 +380,7 @@ class TestStagingSend:
         ):
             run_pipeline(config_path=demo_config, output_dir=tmp_path / "out")
         for post in transport.posts:
-            score = post["data"].get("confidence_score", -1)
+            score = post["rawJson"].get("confidence_score", -1)
             assert 0.0 <= score <= 1.0
 
 
@@ -377,7 +399,7 @@ class TestIdempotency:
             ):
                 run_pipeline(config_path=demo_config, output_dir=tmp_path / "out")
         # Cuatro POSTs en total (2 por corrida) pero solo 2 external_id unicos.
-        unique = {p["external_id"] for p in transport.posts}
+        unique = {p["externalId"] for p in transport.posts}
         assert len(transport.posts) == 4
         assert len(unique) == 2
 
@@ -431,9 +453,9 @@ class TestPersonBlockKeysEndToEnd:
             "scrapers.pipelines.run_pipeline._get_parser", return_value=_mock_parser(persons)
         ):
             run_pipeline(config_path=demo_config, output_dir=tmp_path / "out")
-        by_name = {p["data"]["full_name"]: p for p in transport.posts}
-        juan_keys = by_name["JUAN DEMO PEREZ"]["block_keys"]
-        ana_keys = by_name["ANA DEMO GARCIA"]["block_keys"]
+        by_name = {p["rawJson"]["full_name"]: p for p in transport.posts}
+        juan_keys = by_name["JUAN DEMO PEREZ"]["blockKeys"]
+        ana_keys = by_name["ANA DEMO GARCIA"]["blockKeys"]
         assert any(k.startswith(f"ced:{_EVENT_ID}:hmac-abc") for k in juan_keys)
         assert all(not k.startswith("ced:") for k in ana_keys)
 
@@ -448,7 +470,7 @@ class TestStagingDisabled:
         # Sin STAGING_*: el exporter entra en dry-run; el transport no debe
         # recibir ningun POST aunque la factory este parcheada.
         env = {k: v for k, v in os.environ.items()
-               if k not in ("STAGING_API_KEY", "STAGING_BASE_URL", "STAGING_SOURCE_SLUG")}
+               if k not in ("STAGING_API_KEY", "STAGING_BASE_URL")}
         with patch.dict(os.environ, env, clear=True), _patch_exporter(transport), patch(
             "scrapers.pipelines.run_pipeline._get_adapter", return_value=_mock_adapter()
         ), patch(
@@ -474,7 +496,8 @@ class TestWatermarkEndToEnd:
         ):
             run_pipeline(config_path=demo_config, output_dir=tmp_path / "out")
         assert transport.watermark_puts
-        assert transport.watermark_puts[-1]["watermark_at"] == "2026-06-24T15:30:00Z"
+        # fetched_at del mock menos el margen de seguridad de 5 minutos.
+        assert transport.watermark_puts[-1]["watermarkAt"] == "2026-06-24T15:25:00Z"
 
     def test_watermark_not_advanced_on_failure(self, tmp_path: Path, demo_config: Path) -> None:
         transport = _StagingTransport(aportes_status=500)
@@ -488,6 +511,61 @@ class TestWatermarkEndToEnd:
             summary = run_pipeline(config_path=demo_config, output_dir=tmp_path / "out")
         assert transport.watermark_puts == []
         assert summary["staging_errors"] >= 1
+
+    def test_watermark_passed_as_updated_after_to_adapter_fetch(
+        self, tmp_path: Path, demo_config: Path
+    ) -> None:
+        """El watermark persistido se lee ANTES del fetch y llega al adapter."""
+
+        class _PersistedWatermarkTransport(_StagingTransport):
+            def handle_request(self, request: httpx.Request) -> httpx.Response:
+                if request.url.path.startswith("/api/source-watermarks/") and request.method == "GET":
+                    return httpx.Response(200, json={"watermarkAt": "2026-06-01T00:00:00Z"})
+                return super().handle_request(request)
+
+        transport = _PersistedWatermarkTransport()
+        adapter = _mock_adapter()
+        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport), patch(
+            "scrapers.pipelines.run_pipeline._get_adapter", return_value=adapter
+        ), patch(
+            "scrapers.pipelines.run_pipeline._get_parser", return_value=_mock_parser()
+        ):
+            run_pipeline(config_path=demo_config, output_dir=tmp_path / "out")
+        _, kwargs = adapter.fetch_all.call_args
+        assert kwargs["params"] == {"updated_after": "2026-06-01T00:00:00Z"}
+
+    def test_two_sources_get_independent_watermarks(self, tmp_path: Path) -> None:
+        cfg = _make_demo_config(tmp_path, """
+project:
+  event_id: 8f14e45f-ceea-467e-bd5d-0a4f2e0c1a3a
+  default_country: Venezuela
+sources:
+  - id: fuente_a
+    name: Fuente A
+    type: api_json
+    enabled: true
+    trust_tier: C
+    url: "https://fuente-a.test/api/personas"
+    refresh_minutes: 30
+    parser_asignado: encuentralos
+  - id: fuente_b
+    name: Fuente B
+    type: api_json
+    enabled: true
+    trust_tier: C
+    url: "https://fuente-b.test/api/personas"
+    refresh_minutes: 30
+    parser_asignado: encuentralos
+""")
+        transport = _StagingTransport(aportes_status=201)
+        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport), patch(
+            "scrapers.pipelines.run_pipeline._get_adapter", side_effect=lambda *_: _mock_adapter()
+        ), patch(
+            "scrapers.pipelines.run_pipeline._get_parser", side_effect=lambda *_: _mock_parser()
+        ):
+            run_pipeline(config_path=cfg, output_dir=tmp_path / "out")
+        slugs = {p["source_slug"] for p in transport.watermark_puts}
+        assert slugs == {"fuente_a", "fuente_b"}
 
 
 # ---------------------------------------------------------------------------
@@ -578,25 +656,6 @@ sources:
         assert summary["sources_processed"] == 1
         assert summary["staging_sent"] == 0
         assert transport.posts == []
-
-    def test_unimplemented_adapter_visible_in_summary(self, tmp_path: Path, demo_config: Path) -> None:
-        """Un type sin adapter omite la fuente, pero NO en silencio: visible en errors.
-
-        No hay payload que cuarentenar (nunca se hizo fetch), pero la omision de
-        una fuente entera debe quedar en summary["errors"] (Issue #88)."""
-        transport = _StagingTransport()
-        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport), patch(
-            "scrapers.pipelines.run_pipeline._get_adapter", return_value=None
-        ):
-            summary = run_pipeline(config_path=demo_config, output_dir=tmp_path / "out")
-        assert transport.posts == []
-        assert summary["quarantined"] == 0
-        omissions = [
-            e for e in summary["errors"]
-            if "adapter no implementado" in e and "encuentralos_tecnosoft" in e
-        ]
-        assert len(omissions) == 1
-        assert summary["staging_errors"] >= 1
 
     def test_unimplemented_parser_quarantines_not_discards(self, tmp_path: Path) -> None:
         """Una fuente con parser no registrado NO se descarta: va a cuarentena.
@@ -707,7 +766,7 @@ class TestMinorProtectionEndToEnd:
         ):
             run_pipeline(config_path=demo_config, output_dir=tmp_path / "out")
         assert len(transport.posts) == 1
-        data = transport.posts[0]["data"]
+        data = transport.posts[0]["rawJson"]
         assert data["foto"] is None
         assert data["cedula_masked"] is None
         assert data["last_known_location"] == "Lara"

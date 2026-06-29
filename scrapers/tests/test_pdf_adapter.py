@@ -174,7 +174,7 @@ def test_pipeline_registry_returns_pdf_adapter(tmp_path: Path) -> None:
     adapter = _get_adapter(config)
     assert isinstance(adapter, PdfAdapter)
 
-    pages = _fetch_pages(adapter, config)
+    pages = _fetch_pages(adapter, config, "1970-01-01T00:00:00Z")
     assert len(pages) == 1
     assert pages[0]["source_key"] == "pdf_demo"
     assert pages[0]["raw_content"] == ["Texto via registry"]

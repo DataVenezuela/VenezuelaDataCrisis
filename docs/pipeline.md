@@ -619,7 +619,7 @@ El matching necesita texto uniforme. `"JOSE LUIS"` y `"José Luis"` deben ser el
 
 ---
 
-## Capa 4 — Staging exporter (Issue #81)
+## Capa 4 — Staging exporter (Issue #81) y watermark por fuente (Issue #57)
 
 `scrapers/exporters/staging_exporter.py` lee las entidades procesadas (un dict
 por registro, post-PII, post-score, post-protección de menores) y hace un
@@ -627,23 +627,77 @@ por registro, post-PII, post-score, post-protección de menores) y hace un
 
 Responsabilidades del exporter:
 - Construir el payload del aporte usando los contratos de
-  `scrapers/dedup/specs.py`: `entity_type`, `external_id`, `dedup_hash`,
-  `dedup_version`, `block_keys`, `content_hash`, `run_id`, `source_slug` y
-  `data` (el record de negocio sin claves internas con prefijo `_`).
+  `scrapers/dedup/specs.py`: `runId`, `entityType`, `externalId`, `dedupHash`,
+  `dedupVersion`, `blockKeys`, `contentHash`, `sourceSlug` y `rawJson` (el
+  record de negocio sin claves internas con prefijo `_`). Keys en camelCase y
+  `rawJson` (no `data`) por contrato real de `dataVenezuela` — ver
+  `dataVenezuela/docs/api-dedup.md` (alineado en #129/#131).
 - `external_id` es determinista (fingerprint v1 para Event/AcopioCenter,
   `deterministic_id` para Person). El backend hace upsert por `external_id`,
   así que re-correr la misma fuente no duplica (idempotencia).
 - Clasificar la respuesta: 200/201 → enviado, 409 → duplicado, cualquier otro
   status o error de red → error acumulado (nunca relanza, resiliencia por
   registro).
-- Avanzar el watermark de la fuente (`PUT /api/source_watermarks`) a
-  `max(fetched_at)` solo cuando todos los POST de esa fuente terminaron en
-  200/201. Si cualquiera falla, el watermark no cambia.
+- Avanzar el watermark de la fuente (`PUT /api/source-watermarks/{slug}`, body
+  `{"watermarkAt": "<ISO>"}`) a `max(fetched_at)` menos un margen de seguridad
+  (`_WATERMARK_SAFETY_MARGIN`, ver más abajo) solo cuando todos los POST de
+  esa fuente terminaron en 200/201. Si cualquiera falla, el watermark no
+  cambia.
 
-Modo dry-run silencioso: si falta cualquiera de `STAGING_API_KEY`,
-`STAGING_BASE_URL` o `STAGING_SOURCE_SLUG`, el exporter queda deshabilitado, no
-abre cliente HTTP (cero red), loguea a INFO lo que enviaría y termina con
-`staging_sent=0` sin error.
+Auth con `dataVenezuela`: header `x-api-key` (no `Authorization: Bearer`) —
+mismo header en `/api/aportes` y en `/api/source-watermarks/{slug}`, por
+contrato real documentado en `dataVenezuela/docs/api-dedup.md`.
+
+### Semántica del watermark: `fetched_at` (wall-clock local) vs `updated_at` (servidor)
+
+El watermark persiste `max(fetched_at)`, donde `fetched_at` es el momento en
+que **este scraper** terminó de descargar la página (wall-clock local del
+adapter, `now_utc()`) — **no** el `updated_at` del registro en el servidor de
+la fuente. Mientras el watermark era solo informativo (antes de #57) esto no
+importaba; ahora que filtra el fetch real (`updated_after`) es **load-bearing**:
+
+Si un registro se actualiza en el servidor **mientras el fetch está en
+vuelo** (entre que el servidor ejecutó la query y que terminamos de recibir
+la respuesta), la respuesta que ya recibimos no lo refleja, pero el
+`fetched_at` que persistimos como watermark es *posterior* a esa
+actualización. La siguiente corrida pediría `updated_after=<ese watermark>`
+y el servidor excluiría ese registro — quedaría perdido permanentemente, sin
+que la idempotencia por `external_id` lo remedie (nunca lo volveríamos a
+pedir).
+
+Mitigación: `_apply_safety_margin` resta `_WATERMARK_SAFETY_MARGIN` (5
+minutos) al watermark antes de persistirlo, creando una ventana de overlap
+en cada corrida. La idempotencia por `external_id` en `dataVenezuela` absorbe
+los registros re-enviados en ese overlap sin duplicar. El margen es una
+mitigación, no una garantía formal — depende de que el reloj del scraper y el
+del servidor de la fuente no diverjan más que el margen, y de que la latencia
+de un fetch individual no exceda esa ventana. **Pendiente de confirmar con
+cada fuente:** si su API interpreta `updated_after` de forma inclusiva o
+exclusiva en el límite exacto.
+
+`source_slug` **no** vive en `StagingConfig`: una corrida del pipeline procesa
+múltiples fuentes (`run_pipeline._run_source` itera todas las habilitadas), así
+que `source_slug` es siempre `source.id` y se pasa explícito en cada llamada a
+`StagingExporter.get_watermark(source_slug)` / `export_source(..., source_slug=...)`.
+Esto mantiene watermarks independientes por fuente dentro de la misma corrida.
+Como `source.id` viaja sin escapar en el path REST (`/api/source-watermarks/{id}`),
+`validate_sources_config` exige que sea único entre fuentes y que solo contenga
+`[a-zA-Z0-9_-]`.
+
+Antes de hacer el fetch, `_run_source` lee `exporter.get_watermark(source.id)`
+**dentro** del mismo `try/finally` que cierra el adapter, y lo pasa como
+`params={"updated_after": ...}` a `adapter.fetch_all(...)`. El `ApiAdapter` lo
+reenvía como query param real; el resto de adapters (RSS, PDF, HTML,
+Playwright, archivo local) lo ignora (no soportan filtrado server-side). Si la
+fuente nunca tuvo watermark, `get_watermark` devuelve el default
+`1970-01-01T00:00:00Z`, lo que provoca backfill completo en la primera corrida.
+Una lectura fallida del watermark (red, 5xx, o un body 2xx con JSON
+malformado/no-dict) tampoco bloquea el fetch ni filtra el cierre del adapter:
+degrada al mismo default en vez de abortar la fuente.
+
+Modo dry-run silencioso: si falta cualquiera de `STAGING_API_KEY` o
+`STAGING_BASE_URL`, el exporter queda deshabilitado, no abre cliente HTTP (cero
+red), loguea a INFO lo que enviaría y termina con `staging_sent=0` sin error.
 
 El exporter no toma decisiones de dedup. Su única responsabilidad es persistir
 en staging; el dedup vive en el consolidation job (#82).
@@ -680,10 +734,6 @@ scraper no ejecuta SQL.
 Otros `reason_code` controlados (los produce el backend o etapas futuras):
 `pdf_no_text`, `unclassified_sensitive`, `contradictory_sources`,
 `ambiguous_manual_review`.
-
-Un **type sin adapter** implementado omite la fuente entera: no hay payload que
-cuarentenar (nunca se hizo fetch), pero la omisión queda **visible** en
-`summary["errors"]` — nunca silenciosa.
 
 ### Reglas de PII en cuarentena
 
@@ -1184,7 +1234,7 @@ python -m scrapers.cli validate --config scrapers/config/sources.demo.yaml
 | Raw artifact store (R2) | ❌ bloqueado por #81 |
 | Quarantine exporter (`POST /api/v1/quarantine`) + ruteo | ✅ Issue #88 (scraper) |
 | Quarantine DB (tabla `quarantine_records`) | ⏳ Issue #88 (backend) |
-| Watermark por fuente | ❌ Issue #57, bloqueado por #81 |
+| Watermark por fuente | ✅ Issue #57 |
 | Consolidation job | ❌ Issue #82, bloqueado por #81 |
 | Build job (Supabase → D1) | ❌ bloqueado por canonical |
 | Cloudflare Worker | ❌ bloqueado por build job |
