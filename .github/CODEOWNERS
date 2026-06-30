@@ -1,29 +1,24 @@
 # CODEOWNERS — asigna reviewers automáticamente según la carpeta tocada.
-#
-# Reemplazá los placeholders @REPLACE_* por usernames reales de GitHub
-# (con @, ej: @mathiasaiva). Las reglas se evalúan de arriba hacia abajo;
-# la última que matchea gana, así que las más específicas van al final.
-#
 # Referencia: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
 
 # Default: el admin revisa todo lo que no matchee una regla más específica
-*                               @REPLACE_mathiasaiva
+*                               @mathiasaiva
 
 # Pipeline Python — scrapers, adapters, parsers, normalización, PII, exporter
-/scrapers/                      @REPLACE_mathiasaiva @REPLACE_mayerlim @REPLACE_tomas
+/scrapers/                      @mathiasaiva @mayerlim @9v52602d
 
 # CI/CD — workflows de GitHub Actions
-/.github/workflows/             @REPLACE_mathiasaiva @REPLACE_tomas
+/.github/workflows/             @mathiasaiva @9v52602d @mayerlim
 
 # Documentación y archivos de configuración raíz
-/docs/                          @REPLACE_mathiasaiva @REPLACE_mayerlim
-/README.md                      @REPLACE_mathiasaiva @REPLACE_mayerlim
-/CONTRIBUTING.md                @REPLACE_mathiasaiva @REPLACE_mayerlim
-/AGENTS.md                      @REPLACE_mathiasaiva @REPLACE_mayerlim
+/docs/                          @mathiasaiva @mayerlim
+/README.md                      @mathiasaiva @mayerlim
+/CONTRIBUTING.md                @mathiasaiva @mayerlim
+/AGENTS.md                      @mathiasaiva @mayerlim
 
 # Contexto y skills de agentes — cambios acá afectan cómo cualquier agente
 # de IA opera en el repo, requieren revisión cuidadosa
-/.claude/                       @REPLACE_mathiasaiva
+/.claude/                       @mathiasaiva
 
 # Verification — revisión de candidatos de duplicado, validación de claims
-/verification/                  @REPLACE_mathiasaiva
+/verification/                  @mathiasaiva
