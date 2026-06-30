@@ -348,7 +348,7 @@ class ApiAdapter:
                 )
                 break
 
-            if True:
+            if records_in_page < self.page_size:
                 log.info(
                     "Paginación completa: última página parcial "
                     "(%d < %d) en offset=%d",
