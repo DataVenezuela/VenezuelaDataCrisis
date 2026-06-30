@@ -82,13 +82,13 @@ jobs:
           PII_HMAC_SECRET: ${{ secrets.PII_HMAC_SECRET }}
           STAGING_API_KEY: ${{ secrets.STAGING_API_KEY }}
           STAGING_BASE_URL: ${{ vars.STAGING_BASE_URL }}
-          PYTHONUNBUFFERED: "1"
         run: |
           CONFIG="${{ inputs.config || 'scrapers/config/sources.venezuela.starter.yaml' }}"
           python -m scrapers.cli --verbose ingest \
             --config "$CONFIG" \
             --source "${{ matrix.source_id }}" \
-            --output-dir scrapers/runtime_output
+            --output-dir scrapers/runtime_output \
+            --limit 100
 
       - name: Upload artifacts
         if: always()
