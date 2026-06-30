@@ -62,6 +62,8 @@ _DEFAULT_HEADERS: dict[str, str] = {
     "Accept": "application/json",
 }
 
+_KNOWN_RECORD_KEYS = ("data", "results", "items", "personas", "records")
+
 # ---------------------------------------------------------------------------
 # Helpers internos
 # ---------------------------------------------------------------------------
@@ -94,7 +96,7 @@ def _extract_records_and_total(data: Any) -> tuple[list[Any], int | None]:
         return data, None
 
     if isinstance(data, dict):
-        for key in ("data", "results", "items", "personas", "records"):
+        for key in _KNOWN_RECORD_KEYS:
             if key in data and isinstance(data[key], list):
                 records = data[key]
                 break
@@ -306,6 +308,13 @@ class ApiAdapter:
         2. Si la lista de datos devuelta está vacía, se detiene.
         3. Si la lista tiene menos registros que ``page_size``, es la última página.
 
+        Comportamiento de fallos (path paralelo)
+        -----------------------------------------
+        Si una página falla tras agotar los reintentos, se omite del resultado
+        y se emite ``log.error`` con los offsets perdidos al terminar el batch.
+        Las páginas vacías que el servidor devuelve cuando ``total`` está
+        sobreestimado se descartan silenciosamente (``log.info``).
+
         Yields
         ------
         RawContent
@@ -314,7 +323,7 @@ class ApiAdapter:
         extra_params = dict(params or {})
         first_page = self._fetch_page(url, extra_params, 0)
 
-        if isinstance(first_page.data, dict) and first_page.data and not first_page.records:
+        if isinstance(first_page.data, dict) and first_page.data and not any(k in first_page.data for k in _KNOWN_RECORD_KEYS):
             self._log_unrecognized_schema(first_page.data, page_num=1)
 
         total = first_page.total
@@ -420,7 +429,7 @@ class ApiAdapter:
             log.info(
                 "Paginación completa: última página parcial "
                 "(%d < %d) en offset=%d",
-                records_in_page, self.page_size, next_offset,
+                records_in_page, self.page_size, offset,
             )
             return True
 
@@ -440,7 +449,7 @@ class ApiAdapter:
         while True:
             page = self._fetch_page(url, extra_params, offset)
             page_num += 1
-            if isinstance(page.data, dict) and page.data and not page.records:
+            if isinstance(page.data, dict) and page.data and not any(k in page.data for k in _KNOWN_RECORD_KEYS):
                 self._log_unrecognized_schema(page.data, page_num=page_num)
 
             if page.total is not None:
@@ -478,6 +487,7 @@ class ApiAdapter:
         offsets = list(range(self.page_size, total, self.page_size))
         results: list[_FetchedPage] = []
 
+        failed_offsets: list[int] = []
         with ThreadPoolExecutor(max_workers=self.max_concurrent_pages) as executor:
             futures = {
                 executor.submit(self._fetch_page, url, extra_params, offset): offset
@@ -492,10 +502,27 @@ class ApiAdapter:
                         "%s: página offset=%d omitida error_type=%s",
                         self.source_key, offset, type(exc).__name__,
                     )
+                    failed_offsets.append(offset)
 
+        if failed_offsets:
+            log.error(
+                "%s: %d página(s) perdidas tras agotar reintentos — "
+                "offsets=%s — el dataset está incompleto.",
+                self.source_key, len(failed_offsets), failed_offsets,
+            )
+
+        # Acumula todas las páginas en memoria para ordenarlas por offset.
+        # Aceptable porque el pipeline actual ya acumula antes de exportar.
+        # Si fetch_all se consume en streaming real, reemplazar por un heap de prioridad.
         for page in sorted(results, key=lambda item: item.offset):
+            if not page.records:
+                log.info(
+                    "%s: página offset=%d vacía ignorada (total sobreestimado?)",
+                    self.source_key, page.offset,
+                )
+                continue
             page_num = (page.offset // self.page_size) + 1
-            if isinstance(page.data, dict) and page.data and not page.records:
+            if isinstance(page.data, dict) and page.data and not any(k in page.data for k in _KNOWN_RECORD_KEYS):
                 self._log_unrecognized_schema(page.data, page_num=page_num)
             records_in_page = len(page.records)
             yield self._raw_content_from_page(
