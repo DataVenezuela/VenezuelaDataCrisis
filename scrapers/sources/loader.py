@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from scrapers.models.source import SourceConfig
 from scrapers.validators.source_validator import validate_sources_config
 
 
-def load_sources(config_path: Path) -> tuple[dict, list[SourceConfig]]:
+def load_sources(config_path: Path) -> tuple[dict[str, Any], list[SourceConfig]]:
     payload = validate_sources_config(config_path)
     project = payload.get("project", {})
     sources: list[SourceConfig] = []
@@ -26,6 +27,8 @@ def load_sources(config_path: Path) -> tuple[dict, list[SourceConfig]]:
                 notes=source.get("notes"),
                 timeout_seconds=source.get("timeout_seconds"),
                 max_retries=source.get("max_retries"),
+                page_size=source.get("page_size"),
+                max_concurrent_pages=source.get("max_concurrent_pages"),
             )
         )
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from typing import Any
 
 
 PATTERNS = {
@@ -32,8 +33,8 @@ PATTERNS = {
 }
 
 
-def detect_pii(text: str | None) -> list[dict]:
-    findings: list[dict] = []
+def detect_pii(text: str | None) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
     if not text:
         return findings
 

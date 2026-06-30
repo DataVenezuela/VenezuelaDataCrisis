@@ -41,6 +41,8 @@ from __future__ import annotations
 import logging
 import os
 import uuid
+from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -101,7 +103,11 @@ def _get_adapter(source: SourceConfig) -> Any:
     stype = source.type
 
     if stype == "api_json":
-        from scrapers.adapters.api_adapter import ApiAdapter
+        from scrapers.adapters.api_adapter import (
+            ApiAdapter,
+            _DEFAULT_TIMEOUT,
+            _MAX_RETRIES,
+        )
         # base_url = esquema + host; el path se pasa en fetch_all
         import httpx
         parsed = httpx.URL(source.url)
@@ -109,11 +115,20 @@ def _get_adapter(source: SourceConfig) -> Any:
         if parsed.port:
             base_url += f":{parsed.port}"
         path = parsed.path or "/"
-        adapter = ApiAdapter(
-            base_url=base_url,
-            source_key=source.id,
-            default_path=path,
-        )
+        adapter_kwargs: dict[str, Any] = {
+            "base_url": base_url,
+            "source_key": source.id,
+            "default_path": path,
+            "timeout": source.timeout_seconds if source.timeout_seconds is not None else _DEFAULT_TIMEOUT,
+            "max_retries": source.max_retries if source.max_retries is not None else _MAX_RETRIES,
+            "max_concurrent_pages": source.max_concurrent_pages,
+        }
+        # page_size es opcional: cada fuente declara el limite real que su
+        # API soporta (algunas aceptan 1000+, otras capan en 50). Sin
+        # override, ApiAdapter usa su propio default (_DEFAULT_PAGE_SIZE).
+        if source.page_size is not None:
+            adapter_kwargs["page_size"] = source.page_size
+        adapter = ApiAdapter(**adapter_kwargs)
         return adapter
 
     if stype == "html_static":
@@ -206,7 +221,7 @@ class _LocalFileAdapter:
             records_in_page=None,
         )
 
-    def fetch_all(self, url: str, **kwargs: Any):  # type: ignore[return]
+    def fetch_all(self, url: str, **kwargs: Any) -> Iterator[RawContent]:
         yield self.fetch(url)
 
 
@@ -269,7 +284,7 @@ _PII_FIELD_NAMES = {"cedula", "cédula", "identity_document", "documento_identid
                     "telefono", "teléfono", "phone", "mobile", "celular"}
 
 
-def _strip_raw_pii(d: dict) -> dict:
+def _strip_raw_pii(d: dict[str, Any]) -> dict[str, Any]:
     """Elimina campos PII crudos sin hashear (defensa en profundidad)."""
     return {k: v for k, v in d.items() if k.lower() not in _PII_FIELD_NAMES}
 
@@ -277,7 +292,7 @@ def _strip_raw_pii(d: dict) -> dict:
 def _apply_pii(
     entities: list[ParsedEntity],
     errors: list[str],
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """
     Convierte entidades tipadas a dicts y aplica tokenize_pii_fields.
 
@@ -293,7 +308,7 @@ def _apply_pii(
     """
     pii_salt_available = bool(os.getenv("PII_SALT"))
 
-    result: list[dict] = []
+    result: list[dict[str, Any]] = []
     for entity in entities:
         try:
             d = entity.model_dump()
@@ -319,7 +334,10 @@ def _apply_pii(
     return result
 
 
-def _enrich_records(records: list[dict], errors: list[str]) -> list[dict]:
+def _enrich_records(
+    records: list[dict[str, Any]],
+    errors: list[str],
+) -> list[dict[str, Any]]:
     """
     Normalizacion post-dump y computo de ``deterministic_id``.
 
@@ -334,7 +352,7 @@ def _enrich_records(records: list[dict], errors: list[str]) -> list[dict]:
         phonetic_hash as _compute_phonetic,
     )
 
-    enriched: list[dict] = []
+    enriched: list[dict[str, Any]] = []
     for rec in records:
         try:
             # Normalizar ubicacion si viene como string crudo sin objeto
@@ -370,12 +388,12 @@ def _enrich_records(records: list[dict], errors: list[str]) -> list[dict]:
 
 
 def _apply_confidence(
-    records: list[dict],
+    records: list[dict[str, Any]],
     errors: list[str],
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Calcula y escribe confidence_score en cada registro."""
     _MODEL_MAP = {"Person": Person, "AcopioCenter": AcopioCenter, "Event": Event}
-    result: list[dict] = []
+    result: list[dict[str, Any]] = []
     for rec in records:
         try:
             entity_type = rec.get("_entity_type", "Person")
@@ -392,15 +410,15 @@ def _apply_confidence(
 
 
 def _apply_minor_protection(
-    records: list[dict],
+    records: list[dict[str, Any]],
     errors: list[str],
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Reduce campos identificables en registros con is_minor=True antes de exportar.
 
     No afecta a Event/AcopioCenter (no tienen is_minor) ni a Person con
     is_minor en None/False — ver scrapers/sanitizers/minor_protection.py.
     """
-    result: list[dict] = []
+    result: list[dict[str, Any]] = []
     for rec in records:
         try:
             result.append(protect_minor_fields(rec))
@@ -519,6 +537,31 @@ def _run_source(
     return result
 
 
+def _process_source_safe(
+    source: SourceConfig,
+    limit: int | None,
+    all_errors: list[str],
+    event_id: str,
+    exporter: StagingExporter,
+) -> tuple[ExportResult, bool]:
+    """Ejecuta ``_run_source`` capturando cualquier excepcion fatal de la fuente.
+
+    Aisla el manejo de errores fatales (try/except con log + acumulado en
+    ``all_errors``) para que tanto el modo secuencial como el paralelo
+    (``ThreadPoolExecutor``) lo reusen igual. Devuelve ``(resultado, ok)``
+    donde ``ok=False`` si la fuente entera fallo (no cuenta como
+    ``sources_processed``).
+    """
+    try:
+        result = _run_source(source, limit, all_errors, event_id, exporter)
+        return result, True
+    except Exception as exc:
+        msg = f"[{source.id}] Error fatal en fuente: {exc}"
+        log.error(msg, exc_info=True)
+        all_errors.append(msg)
+        return ExportResult(), False
+
+
 # ---------------------------------------------------------------------------
 # Punto de entrada publico
 # ---------------------------------------------------------------------------
@@ -527,7 +570,8 @@ def run_pipeline(
     config_path: Path,
     output_dir: Path,
     limit: int | None = None,
-) -> dict:
+    max_workers: int = 1,
+) -> dict[str, Any]:
     """
     Orquestador principal del pipeline.
 
@@ -541,6 +585,15 @@ def run_pipeline(
         firma por compatibilidad con la CLI.
     limit:
         Numero maximo de entidades por fuente (None = sin limite).
+    max_workers:
+        Fuentes procesadas en paralelo (default 1 = secuencial, igual que
+        antes). Cada fuente es I/O-bound (fetch + POST a staging), asi que
+        threads alcanzan sin GIL real: no hace falta multiprocessing. El
+        ``StagingExporter`` (un solo httpx.Client) es seguro de compartir
+        entre threads. Watermarks y errores se acumulan por fuente
+        (``source.id`` unico), asi que no hay estado compartido mutable entre
+        fuentes mas alla de los acumuladores de ``run_pipeline``, que se
+        suman despues de que cada future termina.
 
     Returns
     -------
@@ -582,18 +635,25 @@ def run_pipeline(
     # Un solo exporter (un httpx.Client) y un solo run_id por corrida.
     exporter = StagingExporter(StagingConfig.from_env(), run_id=str(uuid.uuid4()))
     try:
-        for source in enabled:
-            try:
-                result = _run_source(source, limit, all_errors, event_id, exporter)
+        if max_workers <= 1 or len(enabled) <= 1:
+            for source in enabled:
+                result, ok = _process_source_safe(source, limit, all_errors, event_id, exporter)
                 staging_sent += result.sent
                 staging_duplicates += result.duplicates
                 staging_errors += len(result.errors)
-                sources_processed += 1
-            except Exception as exc:
-                msg = f"[{source.id}] Error fatal en fuente: {exc}"
-                log.error(msg, exc_info=True)
-                all_errors.append(msg)
-                # Continuar con la siguiente fuente
+                sources_processed += int(ok)
+        else:
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                futures = [
+                    pool.submit(_process_source_safe, source, limit, all_errors, event_id, exporter)
+                    for source in enabled
+                ]
+                for future in as_completed(futures):
+                    result, ok = future.result()
+                    staging_sent += result.sent
+                    staging_duplicates += result.duplicates
+                    staging_errors += len(result.errors)
+                    sources_processed += int(ok)
     finally:
         exporter.close()
 

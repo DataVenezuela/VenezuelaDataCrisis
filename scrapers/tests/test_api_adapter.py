@@ -12,6 +12,9 @@ from __future__ import annotations
 
 import json
 import re
+import threading
+import time as time_module
+from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
@@ -20,6 +23,8 @@ import pytest
 
 from scrapers.adapters.api_adapter import ApiAdapter, _sha256
 from scrapers.adapters.base import AdapterProtocol, RawContent
+from scrapers.pipelines.run_pipeline import _get_adapter
+from scrapers.sources.loader import load_sources
 
 
 # ---------------------------------------------------------------------------
@@ -83,6 +88,85 @@ class _PaginatedTransport(httpx.BaseTransport):
         return _json_response(payload)
 
 
+class _ConcurrentPaginatedTransport(httpx.BaseTransport):
+    """Endpoint paginado que mide cuántas páginas están en vuelo."""
+
+    def __init__(self, total: int, page_size: int = 2, delay: float = 0.02) -> None:
+        self.total = total
+        self.page_size = page_size
+        self.delay = delay
+        self.offsets: list[int] = []
+        self.active = 0
+        self.max_active = 0
+        self._lock = threading.Lock()
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        params = dict(request.url.params)
+        limit = int(params.get("limit", self.page_size))
+        offset = int(params.get("offset", 0))
+        with self._lock:
+            self.offsets.append(offset)
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+        try:
+            time_module.sleep(self.delay)
+            start = min(offset, self.total)
+            end = min(offset + limit, self.total)
+            return _json_response(_make_page(_synthetic_records(end - start, start), self.total))
+        finally:
+            with self._lock:
+                self.active -= 1
+
+
+class _NoTotalTransport(httpx.BaseTransport):
+    """Endpoint sin total: obliga al fallback secuencial."""
+
+    def __init__(self, total: int, page_size: int = 2) -> None:
+        self.total = total
+        self.page_size = page_size
+        self.offsets: list[int] = []
+        self.active = 0
+        self.max_active = 0
+        self._lock = threading.Lock()
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        params = dict(request.url.params)
+        limit = int(params.get("limit", self.page_size))
+        offset = int(params.get("offset", 0))
+        with self._lock:
+            self.offsets.append(offset)
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+        try:
+            start = min(offset, self.total)
+            end = min(offset + limit, self.total)
+            return _json_response({"data": _synthetic_records(end - start, start)})
+        finally:
+            with self._lock:
+                self.active -= 1
+
+
+class _RetryByOffsetTransport(httpx.BaseTransport):
+    """Falla una vez para un offset específico y luego responde OK."""
+
+    def __init__(self, retry_offset: int, total: int = 6, page_size: int = 2) -> None:
+        self.retry_offset = retry_offset
+        self.total = total
+        self.page_size = page_size
+        self.calls_by_offset: dict[int, int] = {}
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        params = dict(request.url.params)
+        limit = int(params.get("limit", self.page_size))
+        offset = int(params.get("offset", 0))
+        self.calls_by_offset[offset] = self.calls_by_offset.get(offset, 0) + 1
+        if offset == self.retry_offset and self.calls_by_offset[offset] == 1:
+            return _json_response({}, status_code=503)
+        start = min(offset, self.total)
+        end = min(offset + limit, self.total)
+        return _json_response(_make_page(_synthetic_records(end - start, start), self.total))
+
+
 class _RetryTransport(httpx.BaseTransport):
     """
     Devuelve errores 503 las primeras ``fail_times`` llamadas,
@@ -131,12 +215,14 @@ def _adapter_with_transport(
     transport: httpx.BaseTransport,
     page_size: int = 20,
     max_retries: int = 5,
+    max_concurrent_pages: int | None = 4,
 ) -> ApiAdapter:
     """Crea un ApiAdapter e inyecta el transport mock."""
     adapter = ApiAdapter(
         base_url="https://mock.test",
         page_size=page_size,
         max_retries=max_retries,
+        max_concurrent_pages=max_concurrent_pages,
         source_key="mock_source",
     )
     # Reemplazar el cliente interno con uno que usa el transport falso
@@ -168,6 +254,70 @@ class TestAdapterProtocol:
 # ---------------------------------------------------------------------------
 
 class TestFetchAllPagination:
+    def test_fetches_known_total_pages_with_bounded_parallelism(self) -> None:
+        transport = _ConcurrentPaginatedTransport(total=10, page_size=2)
+        adapter = _adapter_with_transport(
+            transport,
+            page_size=2,
+            max_concurrent_pages=2,
+        )
+
+        pages = list(adapter.fetch_all("/api/personas"))
+
+        assert [p["offset"] for p in pages] == [0, 2, 4, 6, 8]
+        assert sum(p["records_in_page"] for p in pages) == 10
+        assert sorted(transport.offsets) == [0, 2, 4, 6, 8]
+        assert transport.max_active <= 2
+        assert transport.max_active > 1
+
+    def test_missing_total_uses_sequential_fallback(self) -> None:
+        transport = _NoTotalTransport(total=5, page_size=2)
+        adapter = _adapter_with_transport(
+            transport,
+            page_size=2,
+            max_concurrent_pages=4,
+        )
+
+        pages = list(adapter.fetch_all("/api/personas"))
+
+        assert [p["offset"] for p in pages] == [0, 2, 4]
+        assert [p["records_in_page"] for p in pages] == [2, 2, 1]
+        assert transport.offsets == [0, 2, 4]
+        assert transport.max_active == 1
+
+    def test_retry_on_parallel_page_does_not_drop_other_pages(self) -> None:
+        transport = _RetryByOffsetTransport(retry_offset=2, total=6, page_size=2)
+        adapter = _adapter_with_transport(
+            transport,
+            page_size=2,
+            max_retries=3,
+            max_concurrent_pages=2,
+        )
+
+        with patch("scrapers.adapters.api_adapter.time.sleep"):
+            pages = list(adapter.fetch_all("/api/personas"))
+
+        assert [p["offset"] for p in pages] == [0, 2, 4]
+        assert sum(p["records_in_page"] for p in pages) == 6
+        assert transport.calls_by_offset[2] == 2
+        assert transport.calls_by_offset[4] == 1
+
+    def test_invalid_max_concurrent_pages_falls_back_to_one(self) -> None:
+        adapter = ApiAdapter(
+            base_url="https://mock.test",
+            max_concurrent_pages=0,
+        )
+        assert adapter.max_concurrent_pages == 1
+        adapter.close()
+
+    def test_none_max_concurrent_pages_uses_default(self) -> None:
+        adapter = ApiAdapter(
+            base_url="https://mock.test",
+            max_concurrent_pages=None,
+        )
+        assert adapter.max_concurrent_pages == 4
+        adapter.close()
+
     def test_collects_all_records_exact_multiple(self) -> None:
         """290 registros, 20 por página → 15 páginas (14×20 + 1×10)."""
         total = 290
@@ -405,6 +555,57 @@ class TestExtraParams:
         )
         page = next(adapter.fetch_all("/api/personas"))
         assert page["source_key"] == "encuentralos_tecnosoft"
+        adapter.close()
+
+
+class TestSourceConfigIntegration:
+    def test_loader_reads_max_concurrent_pages(self, tmp_path: Path) -> None:
+        config = tmp_path / "sources.yaml"
+        config.write_text(
+            """
+project:
+  event_id: 8f14e45f-ceea-467e-bd5d-0a4f2e0c1a3a
+sources:
+  - id: api_demo
+    name: API Demo
+    type: api_json
+    enabled: true
+    trust_tier: C
+    url: "https://example.org/api/personas"
+    refresh_minutes: 30
+    parser_asignado: encuentralos
+    max_concurrent_pages: 3
+""",
+            encoding="utf-8",
+        )
+
+        _project, sources = load_sources(config)
+
+        assert sources[0].max_concurrent_pages == 3
+
+    def test_get_adapter_passes_max_concurrent_pages(self) -> None:
+        from scrapers.models.source import SourceConfig
+
+        source = SourceConfig(
+            id="api_demo",
+            name="API Demo",
+            type="api_json",
+            enabled=True,
+            trust_tier="C",
+            url="https://example.org/api/personas",
+            refresh_minutes=30,
+            parser_asignado="encuentralos",
+            timeout_seconds=9.0,
+            max_retries=2,
+            max_concurrent_pages=3,
+        )
+
+        adapter = _get_adapter(source)
+
+        assert isinstance(adapter, ApiAdapter)
+        assert adapter.timeout == 9.0
+        assert adapter.max_retries == 2
+        assert adapter.max_concurrent_pages == 3
         adapter.close()
 
 

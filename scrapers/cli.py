@@ -27,6 +27,7 @@ def _cmd_run(args: argparse.Namespace) -> None:
         config_path=Path(args.config),
         output_dir=Path(args.output_dir),
         limit=args.limit,
+        max_workers=args.max_workers,
     )
     print("Pipeline finalizado")
     print(f"Fuentes procesadas: {summary['sources_processed']}")
@@ -165,6 +166,10 @@ def main() -> None:
         "--output-dir", default="scrapers/runtime_output", help="Output directory"
     )
     run_cmd.add_argument("--limit", type=int, default=None, help="Max documents per source")
+    run_cmd.add_argument(
+        "--max-workers", type=int, default=1,
+        help="Fuentes procesadas en paralelo (default 1 = secuencial)",
+    )
 
     # --- validate ---
     validate_cmd = sub.add_parser("validate", help="Validate source config")

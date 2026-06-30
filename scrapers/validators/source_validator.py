@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -23,36 +24,36 @@ REQUIRED_SOURCE_FIELDS = {
 }
 
 
-def _source_label(idx: int, source: dict) -> str:
+def _source_label(idx: int, source: dict[str, Any]) -> str:
     source_id = source.get("id")
     if source_id:
         return f"source #{idx} ({source_id})"
     return f"source #{idx}"
 
 
-def _normalize_legacy_parser(source: dict) -> None:
+def _normalize_legacy_parser(source: dict[str, Any]) -> None:
     if "parser_asignado" not in source and "parser" in source:
         source["parser_asignado"] = source["parser"]
 
 
-def _validate_non_empty_string(source: dict, field: str, label: str) -> None:
+def _validate_non_empty_string(source: dict[str, Any], field: str, label: str) -> None:
     value = source[field]
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{label} debe tener '{field}' como texto no vacio.")
 
 
-def _validate_bool(source: dict, field: str, label: str) -> None:
+def _validate_bool(source: dict[str, Any], field: str, label: str) -> None:
     if not isinstance(source[field], bool):
         raise ValueError(f"{label} debe tener '{field}' como booleano.")
 
 
-def _validate_positive_int(source: dict, field: str, label: str) -> None:
+def _validate_positive_int(source: dict[str, Any], field: str, label: str) -> None:
     value = source[field]
     if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
         raise ValueError(f"{label} debe tener '{field}' como entero positivo.")
 
 
-def _validate_optional_fields(source: dict, label: str) -> None:
+def _validate_optional_fields(source: dict[str, Any], label: str) -> None:
     required_keywords = source.get("required_keywords", [])
     if required_keywords is not None:
         if not isinstance(required_keywords, list) or not all(
@@ -86,8 +87,27 @@ def _validate_optional_fields(source: dict, label: str) -> None:
                 f"total de intentos; 0 dejaria el adapter sin ningun intento)."
             )
 
+    page_size = source.get("page_size")
+    if page_size is not None:
+        if isinstance(page_size, bool) or not isinstance(page_size, int) or page_size < 1:
+            raise ValueError(
+                f"{label} debe tener 'page_size' como entero positivo (registros por pagina "
+                f"en fuentes api_json paginadas)."
+            )
 
-def validate_sources_config(config_path: Path) -> dict:
+    max_concurrent_pages = source.get("max_concurrent_pages")
+    if max_concurrent_pages is not None:
+        if (
+            isinstance(max_concurrent_pages, bool)
+            or not isinstance(max_concurrent_pages, int)
+            or max_concurrent_pages < 1
+        ):
+            raise ValueError(
+                f"{label} debe tener 'max_concurrent_pages' como entero positivo."
+            )
+
+
+def validate_sources_config(config_path: Path) -> dict[str, Any]:
     payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
 
     if not isinstance(payload, dict):

@@ -31,6 +31,8 @@ Uso básico
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 import json
 import logging
 import time
@@ -49,15 +51,18 @@ log = logging.getLogger(__name__)
 # Constantes por defecto
 # ---------------------------------------------------------------------------
 
-_DEFAULT_PAGE_SIZE = 20
+_DEFAULT_PAGE_SIZE = 100
 _DEFAULT_TIMEOUT = 30.0          # segundos
 _MAX_RETRIES = 5
+_DEFAULT_MAX_CONCURRENT_PAGES = 4
 _RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 
 _DEFAULT_HEADERS: dict[str, str] = {
     "User-Agent": USER_AGENT,
     "Accept": "application/json",
 }
+
+_KNOWN_RECORD_KEYS = ("data", "results", "items", "personas", "records")
 
 # ---------------------------------------------------------------------------
 # Helpers internos
@@ -67,6 +72,51 @@ def _sha256(obj: Any) -> str:
     """Hash SHA-256 del contenido serializado como JSON compacto."""
     raw = json.dumps(obj, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
     return sha256_hex(raw.encode("utf-8"))
+
+
+def _coerce_max_concurrent_pages(value: Any) -> int:
+    """Normaliza el limite de concurrencia a un entero seguro."""
+    if value is None:
+        return _DEFAULT_MAX_CONCURRENT_PAGES
+    if isinstance(value, bool):
+        return 1
+    try:
+        normalized = int(value)
+    except (TypeError, ValueError):
+        return 1
+    return normalized if normalized > 0 else 1
+
+
+def _extract_records_and_total(data: Any) -> tuple[list[Any], int | None]:
+    """Extrae la lista de registros y el total reportado por APIs comunes."""
+    records: list[Any] = []
+    total: int | None = None
+
+    if isinstance(data, list):
+        return data, None
+
+    if isinstance(data, dict):
+        for key in _KNOWN_RECORD_KEYS:
+            if key in data and isinstance(data[key], list):
+                records = data[key]
+                break
+
+        for tkey in ("total", "count", "total_count", "totalCount"):
+            value = data.get(tkey)
+            if isinstance(value, int) and not isinstance(value, bool):
+                total = value
+                break
+
+    return records, total
+
+
+@dataclass(frozen=True)
+class _FetchedPage:
+    offset: int
+    response: httpx.Response
+    data: Any
+    records: list[Any]
+    total: int | None
 
 
 # ---------------------------------------------------------------------------
@@ -90,6 +140,9 @@ class ApiAdapter:
         Headers adicionales que se mezclan con los defaults.
     max_retries:
         Número máximo de reintentos ante errores retryables.
+    max_concurrent_pages:
+        Número máximo de páginas paginadas solicitadas en paralelo cuando la
+        primera respuesta reporta un total confiable.
     source_key:
         Identificador de la fuente para el campo ``source_key`` de RawContent.
         Si no se pasa, se usa el dominio del ``base_url``.
@@ -102,6 +155,7 @@ class ApiAdapter:
         timeout: float = _DEFAULT_TIMEOUT,
         extra_headers: dict[str, str] | None = None,
         max_retries: int = _MAX_RETRIES,
+        max_concurrent_pages: int | None = _DEFAULT_MAX_CONCURRENT_PAGES,
         source_key: str | None = None,
         default_path: str | None = None,
     ) -> None:
@@ -109,6 +163,7 @@ class ApiAdapter:
         self.page_size = page_size
         self.timeout = timeout
         self.max_retries = max_retries
+        self.max_concurrent_pages = _coerce_max_concurrent_pages(max_concurrent_pages)
         # Fix: default_path as constructor param instead of monkey-patching
         # a private attr after construction. Allows _run_source to know the
         # API path without coupling to internal attribute names.
@@ -253,108 +308,240 @@ class ApiAdapter:
         2. Si la lista de datos devuelta está vacía, se detiene.
         3. Si la lista tiene menos registros que ``page_size``, es la última página.
 
+        Comportamiento de fallos (path paralelo)
+        -----------------------------------------
+        Si una página falla tras agotar los reintentos, se omite del resultado
+        y se emite ``log.error`` con los offsets perdidos al terminar el batch.
+        Las páginas vacías que el servidor devuelve cuando ``total`` está
+        sobreestimado se descartan silenciosamente (``log.info``).
+
         Yields
         ------
         RawContent
             Un dict por página con ``page`` (base 1) y ``total_pages``.
         """
         extra_params = dict(params or {})
-        offset = 0
-        page_num = 0
+        first_page = self._fetch_page(url, extra_params, 0)
+
+        if isinstance(first_page.data, dict) and first_page.data and not any(k in first_page.data for k in _KNOWN_RECORD_KEYS):
+            self._log_unrecognized_schema(first_page.data, page_num=1)
+
+        total = first_page.total
+        total_pages = self._total_pages(total)
+        first_records = len(first_page.records)
+
+        yield self._raw_content_from_page(
+            first_page,
+            page_num=1,
+            total_pages=total_pages,
+        )
+
+        log.debug(
+            "Página %d — offset=%d, registros=%d, total=%s",
+            1, first_page.offset, first_records, total,
+        )
+
+        if self._is_last_page(
+            offset=first_page.offset,
+            records_in_page=first_records,
+            total=total,
+        ):
+            return
+
+        if total is None:
+            yield from self._fetch_remaining_sequential(url, extra_params, first_records)
+            return
+
+        yield from self._fetch_remaining_parallel(url, extra_params, total, total_pages)
+
+    def _fetch_page(
+        self,
+        url: str,
+        extra_params: dict[str, Any],
+        offset: int,
+    ) -> _FetchedPage:
+        query = {
+            "limit": self.page_size,
+            "offset": offset,
+            **extra_params,
+        }
+        resp = self._get_with_retry(url, query)
+        try:
+            data: Any = resp.json()
+        except Exception:
+            data = resp.text
+        records, total = _extract_records_and_total(data)
+        return _FetchedPage(
+            offset=offset,
+            response=resp,
+            data=data,
+            records=records,
+            total=total,
+        )
+
+    def _raw_content_from_page(
+        self,
+        page: _FetchedPage,
+        *,
+        page_num: int,
+        total_pages: int | None,
+    ) -> RawContent:
+        return RawContent(
+            source_key=self.source_key,
+            source_url=str(page.response.url),
+            fetched_at=now_utc(),
+            http_status=page.response.status_code,
+            content_type=page.response.headers.get("content-type", ""),
+            content_hash=_sha256(page.data),
+            raw_content=page.data,
+            page=page_num,
+            total_pages=total_pages,
+            offset=page.offset,
+            limit=self.page_size,
+            records_in_page=len(page.records),
+        )
+
+    def _total_pages(self, total: int | None) -> int | None:
+        if total is None:
+            return None
+        return (total + self.page_size - 1) // self.page_size
+
+    def _is_last_page(
+        self,
+        *,
+        offset: int,
+        records_in_page: int,
+        total: int | None,
+    ) -> bool:
+        if records_in_page == 0:
+            log.info("Paginación completa: página vacía en offset=%d", offset)
+            return True
+
+        next_offset = offset + records_in_page
+        if total is not None and next_offset >= total:
+            log.info(
+                "Paginación completa: %d registros obtenidos de %d",
+                next_offset, total,
+            )
+            return True
+
+        if records_in_page < self.page_size:
+            log.info(
+                "Paginación completa: última página parcial "
+                "(%d < %d) en offset=%d",
+                records_in_page, self.page_size, offset,
+            )
+            return True
+
+        return False
+
+    def _fetch_remaining_sequential(
+        self,
+        url: str,
+        extra_params: dict[str, Any],
+        first_records: int,
+    ) -> Iterator[RawContent]:
+        offset = first_records
+        page_num = 1
         total: int | None = None
         total_pages: int | None = None
 
         while True:
-            query = {
-                "limit": self.page_size,
-                "offset": offset,
-                **extra_params,
-            }
-
-            resp = self._get_with_retry(url, query)
-
-            try:
-                data: Any = resp.json()
-            except Exception:
-                data = resp.text
-
+            page = self._fetch_page(url, extra_params, offset)
             page_num += 1
+            if isinstance(page.data, dict) and page.data and not any(k in page.data for k in _KNOWN_RECORD_KEYS):
+                self._log_unrecognized_schema(page.data, page_num=page_num)
 
-            # ── Intentar extraer la lista de registros y el total ──────────
-            records: list[Any] = []
-            if isinstance(data, list):
-                records = data
-            elif isinstance(data, dict):
-                # Patrones comunes: {"data": [...], "total": N}
-                #                  {"results": [...], "count": N}
-                #                  {"items": [...]}
-                for key in ("data", "results", "items", "personas", "records"):
-                    if key in data and isinstance(data[key], list):
-                        records = data[key]
-                        break
-                else:
-                    # Ninguna clave conocida matcheó — distinguir "vacío real"
-                    # de "esquema no reconocido" para evitar pérdida silenciosa.
-                    if data:
-                        log.warning(
-                            "%s: dict no vacío en página %d no matchea ninguna "
-                            "clave conocida (claves presentes: %s) — "
-                            "records quedará vacío; verifica el esquema de la API.",
-                            self.source_key, page_num, list(data.keys())[:10],
-                        )
-                # Intentar extraer total
-                for tkey in ("total", "count", "total_count", "totalCount"):
-                    if tkey in data and isinstance(data[tkey], int):
-                        total = data[tkey]
-                        break
+            if page.total is not None:
+                total = page.total
+                total_pages = self._total_pages(total)
 
-            # Calcular total_pages si conocemos el total
-            if total is not None and total_pages is None:
-                total_pages = (total + self.page_size - 1) // self.page_size
-
-            records_in_page = len(records)
-
-            yield RawContent(
-                source_key=self.source_key,
-                source_url=str(resp.url),
-                fetched_at=now_utc(),
-                http_status=resp.status_code,
-                content_type=resp.headers.get("content-type", ""),
-                content_hash=_sha256(data),
-                raw_content=data,
-                page=page_num,
+            records_in_page = len(page.records)
+            yield self._raw_content_from_page(
+                page,
+                page_num=page_num,
                 total_pages=total_pages,
-                offset=offset,
-                limit=self.page_size,
-                records_in_page=records_in_page,
             )
 
             log.debug(
                 "Página %d — offset=%d, registros=%d, total=%s",
-                page_num, offset, records_in_page, total,
+                page_num, page.offset, records_in_page, total,
             )
 
-            # ── Condiciones de parada ──────────────────────────────────────
-            if records_in_page == 0:
-                log.info("Paginación completa: página vacía en offset=%d", offset)
+            if self._is_last_page(
+                offset=page.offset,
+                records_in_page=records_in_page,
+                total=total,
+            ):
                 break
 
             offset += records_in_page
 
-            if total is not None and offset >= total:
-                log.info(
-                    "Paginación completa: %d registros obtenidos de %d",
-                    offset, total,
-                )
-                break
+    def _fetch_remaining_parallel(
+        self,
+        url: str,
+        extra_params: dict[str, Any],
+        total: int,
+        total_pages: int | None,
+    ) -> Iterator[RawContent]:
+        offsets = list(range(self.page_size, total, self.page_size))
+        results: list[_FetchedPage] = []
 
-            if records_in_page < self.page_size:
+        failed_offsets: list[int] = []
+        with ThreadPoolExecutor(max_workers=self.max_concurrent_pages) as executor:
+            futures = {
+                executor.submit(self._fetch_page, url, extra_params, offset): offset
+                for offset in offsets
+            }
+            for future in as_completed(futures):
+                offset = futures[future]
+                try:
+                    results.append(future.result())
+                except Exception as exc:
+                    log.warning(
+                        "%s: página offset=%d omitida error_type=%s",
+                        self.source_key, offset, type(exc).__name__,
+                    )
+                    failed_offsets.append(offset)
+
+        if failed_offsets:
+            log.error(
+                "%s: %d página(s) perdidas tras agotar reintentos — "
+                "offsets=%s — el dataset está incompleto.",
+                self.source_key, len(failed_offsets), failed_offsets,
+            )
+
+        # Acumula todas las páginas en memoria para ordenarlas por offset.
+        # Aceptable porque el pipeline actual ya acumula antes de exportar.
+        # Si fetch_all se consume en streaming real, reemplazar por un heap de prioridad.
+        for page in sorted(results, key=lambda item: item.offset):
+            if not page.records:
                 log.info(
-                    "Paginación completa: última página parcial "
-                    "(%d < %d) en offset=%d",
-                    records_in_page, self.page_size, offset,
+                    "%s: página offset=%d vacía ignorada (total sobreestimado?)",
+                    self.source_key, page.offset,
                 )
-                break
+                continue
+            page_num = (page.offset // self.page_size) + 1
+            if isinstance(page.data, dict) and page.data and not any(k in page.data for k in _KNOWN_RECORD_KEYS):
+                self._log_unrecognized_schema(page.data, page_num=page_num)
+            records_in_page = len(page.records)
+            yield self._raw_content_from_page(
+                page,
+                page_num=page_num,
+                total_pages=total_pages,
+            )
+            log.debug(
+                "Página %d — offset=%d, registros=%d, total=%s",
+                page_num, page.offset, records_in_page, total,
+            )
+
+    def _log_unrecognized_schema(self, data: dict[str, Any], *, page_num: int) -> None:
+        log.warning(
+            "%s: dict no vacío en página %d no matchea ninguna "
+            "clave conocida (claves presentes: %s) — "
+            "records quedará vacío; verifica el esquema de la API.",
+            self.source_key, page_num, list(data.keys())[:10],
+        )
 
     # ------------------------------------------------------------------
     # Context manager
