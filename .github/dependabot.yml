@@ -13,14 +13,12 @@ updates:
     commit-message:
       prefix: "chore"
       include: "scope"
-    # Agrupa actualizaciones menores/patch en un solo PR para no inundar
-    # de PRs individuales; las major siguen viniendo separadas para
-    # revisión manual obligatoria.
+    # Agrupa TODAS las actualizaciones (incluidas major) en un solo PR
+    # semanal para no inundar de PRs individuales.
     groups:
-      python-minor-patch:
-        update-types:
-          - "minor"
-          - "patch"
+      python-deps:
+        patterns:
+          - "*"
 
   # Versiones de actions usadas en los workflows (actions/checkout@v4, etc.)
   - package-ecosystem: "github-actions"
@@ -35,3 +33,7 @@ updates:
     commit-message:
       prefix: "ci"
       include: "scope"
+    groups:
+      github-actions-deps:
+        patterns:
+          - "*"
