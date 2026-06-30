@@ -247,6 +247,21 @@ class StagingExporter:
             return str(payload.get("watermarkAt", _DEFAULT_WATERMARK))
         except (httpx.HTTPError, ValueError, AttributeError) as exc:
             log.warning("no se pudo leer watermark de %s: %s", source_slug, exc)
+            response = getattr(exc, "response", None)
+            if response is not None:
+                # Distingue un 403 propio de la API (key invalida/sin permiso
+                # para ese source_slug) de un bloqueo de Vercel a nivel de
+                # borde (Deployment Protection), que devuelve 403/401 antes
+                # de llegar al codigo de la app y nunca trae watermarkAt.
+                log.warning(
+                    "respuesta HTTP de %s: status=%s server=%s x-vercel-id=%s "
+                    "body=%r",
+                    source_slug,
+                    response.status_code,
+                    response.headers.get("server"),
+                    response.headers.get("x-vercel-id"),
+                    response.text[:300],
+                )
             return _DEFAULT_WATERMARK
 
     def _set_watermark(self, source_slug: str, watermark_at: str) -> bool:
