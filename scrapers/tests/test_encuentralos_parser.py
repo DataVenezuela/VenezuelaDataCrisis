@@ -32,7 +32,6 @@ import re
 from pathlib import Path
 from typing import Any
 
-from scrapers.adapters._shared import sha256_hex
 from scrapers.adapters.base import RawContent
 from scrapers.parsers.base import ParserProtocol
 from scrapers.parsers.encuentralos_parser import (
