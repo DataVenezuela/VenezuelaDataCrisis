@@ -1,6 +1,6 @@
 ---
 name: resolve-issue
-description: Resuelve un issue de GitHub de punta a punta en VZLA_DEDUP - crea rama desde master, implementa, prueba, autorevisa, abre el PR siguiendo CONTRIBUTING.MD, y vigila los checks de CI hasta dejarlos en verde. Usar cuando el usuario pide "resuelve el issue #N", "haz el PR del issue X" o similar.
+description: Resuelve un issue de GitHub de punta a punta en VZLA_DEDUP - crea rama desde master, implementa, prueba, autorevisa, abre el PR siguiendo CONTRIBUTING.md, y vigila los checks de CI hasta dejarlos en verde. Usar cuando el usuario pide "resuelve el issue #N", "haz el PR del issue X" o similar.
 ---
 
 # Resolve Issue
