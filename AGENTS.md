@@ -151,10 +151,12 @@ El `source_slug` siempre sale de `source.id` en `run_pipeline.py`, nunca de
 una env var. Si ves esa variable referenciada en algún workflow o doc viejo,
 es dead code — no la recrees.
 
-`PII_SALT` y `PII_HMAC_SECRET` se usan como sinónimos (ambas se setean en
-`ingest.yml:82-83`). Sin ellas en CI, `cedula_hmac` queda `None` y los campos
-PII crudos se eliminan antes de exportar — comportamiento esperado, el
-pipeline no falla.
+`PII_SALT` y `PII_HMAC_SECRET` se cargan del **mismo único secret** de
+GitHub Actions (`secrets.PII_HMAC_SECRET`, ver `ingest.yml:82-83`). No existe
+un `secrets.PII_SALT` separado. Si te piden rotar o auditar secretos, no
+busques ni crees un segundo secret. Sin ellas en CI, `cedula_hmac` queda
+`None` y los campos PII crudos se eliminan antes de exportar — comportamiento
+esperado, el pipeline no falla.
 
 ### `shared/config.py` está vacío
 
@@ -231,6 +233,16 @@ Estas partes de `docs/` están verificadas y no hace falta cuestionarlas:
   se documenta.
 
 ---
+
+## Antes de tocar código sensible
+
+Este repo maneja datos de personas desaparecidas en una crisis activa,
+incluyendo menores de edad. Si un issue te pide "deduplicar registros",
+"ajustar protección de menores", o tocar PII/fotos/ubicaciones exactas,
+detenete y confirmá con un issue explícito que cubra el alcance antes de
+implementar. No asumas que un campo "no importa". Lee `CONTRIBUTING.MD`
+completo — cubre el flujo de PR, las reglas de seguridad y el checklist
+de Definition of Done.
 
 ## Non-negotiables (resumen — ver CONTRIBUTING.md para el completo)
 
