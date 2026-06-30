@@ -38,8 +38,9 @@ jobs:
 
       - name: List enabled sources
         id: list
+        env:
+          CONFIG: ${{ inputs.config || 'scrapers/config/sources.venezuela.starter.yaml' }}
         run: |
-          CONFIG="${{ inputs.config || 'scrapers/config/sources.venezuela.starter.yaml' }}"
           SOURCES=$(python -m scrapers.cli list-enabled --config "$CONFIG" --json)
           echo "matrix={\"source_id\":$SOURCES}" >> "$GITHUB_OUTPUT"
 
@@ -83,11 +84,15 @@ jobs:
           STAGING_API_KEY: ${{ secrets.STAGING_API_KEY }}
           STAGING_BASE_URL: ${{ vars.STAGING_BASE_URL }}
           PYTHONUNBUFFERED: "1"
+          # Las expresiones ${{ }} se inyectan en variables de entorno (NO en el
+          # cuerpo del script) para evitar shell injection: un valor malicioso en
+          # inputs.config o en matrix.source_id se trataría como dato, no como código.
+          CONFIG: ${{ inputs.config || 'scrapers/config/sources.venezuela.starter.yaml' }}
+          SOURCE_ID: ${{ matrix.source_id }}
         run: |
-          CONFIG="${{ inputs.config || 'scrapers/config/sources.venezuela.starter.yaml' }}"
           python -m scrapers.cli --verbose ingest \
             --config "$CONFIG" \
-            --source "${{ matrix.source_id }}" \
+            --source "$SOURCE_ID" \
             --output-dir scrapers/runtime_output \
             --offset 40
 
