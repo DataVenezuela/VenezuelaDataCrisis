@@ -25,7 +25,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # TODO: implementar tools/build_public_index/ para proyectar Supabase → D1.
       # Una vez implementado, reemplazar este step por:
