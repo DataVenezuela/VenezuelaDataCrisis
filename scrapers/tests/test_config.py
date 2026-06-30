@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+from scrapers.sources.loader import load_sources
 from scrapers.validators.source_validator import validate_sources_config
 
 
@@ -114,6 +115,71 @@ sources:
 
     with pytest.raises(ValueError, match="max_retries"):
         validate_sources_config(config)
+
+
+def test_zero_page_size_is_rejected(tmp_path):
+    config = tmp_path / "zero_page_size.yaml"
+    config.write_text(
+        """
+sources:
+  - id: api_page_size_cero
+    name: API con page_size en cero
+    type: api_json
+    enabled: true
+    trust_tier: C
+    url: "https://example.org/api"
+    refresh_minutes: 30
+    parser_asignado: encuentralos
+    page_size: 0
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="page_size"):
+        validate_sources_config(config)
+
+
+def test_page_size_is_loaded_into_source_config(tmp_path):
+    config = tmp_path / "page_size.yaml"
+    config.write_text(
+        """
+sources:
+  - id: api_page_size_custom
+    name: API con page_size custom
+    type: api_json
+    enabled: true
+    trust_tier: C
+    url: "https://example.org/api"
+    refresh_minutes: 30
+    parser_asignado: encuentralos
+    page_size: 500
+""",
+        encoding="utf-8",
+    )
+
+    _project, sources = load_sources(config)
+    assert sources[0].page_size == 500
+
+
+def test_page_size_defaults_to_none(tmp_path):
+    config = tmp_path / "no_page_size.yaml"
+    config.write_text(
+        """
+sources:
+  - id: api_sin_page_size
+    name: API sin page_size declarado
+    type: api_json
+    enabled: true
+    trust_tier: C
+    url: "https://example.org/api"
+    refresh_minutes: 30
+    parser_asignado: encuentralos
+""",
+        encoding="utf-8",
+    )
+
+    _project, sources = load_sources(config)
+    assert sources[0].page_size is None
 
 
 def test_unsafe_source_id_is_rejected(tmp_path):

@@ -528,6 +528,113 @@ sources:
 
 
 # ---------------------------------------------------------------------------
+# Tests: paralelismo (max_workers)
+# ---------------------------------------------------------------------------
+
+class TestMaxWorkers:
+    def _make_n_sources_config(self, tmp_path: Path, n: int) -> Path:
+        sources_yaml = "\n".join(
+            f"""  - id: fuente_{i}
+    name: Fuente {i}
+    type: api_json
+    enabled: true
+    trust_tier: C
+    url: "https://fuente-{i}.test/api/personas"
+    refresh_minutes: 30
+    parser_asignado: encuentralos"""
+            for i in range(n)
+        )
+        return _make_demo_config(tmp_path, f"""project:
+  event_id: 8f14e45f-ceea-467e-bd5d-0a4f2e0c1a3a
+  default_country: Venezuela
+sources:
+{sources_yaml}
+""")
+
+    @staticmethod
+    def _unique_persons(suffix: str) -> list[Person]:
+        """Personas con nombre/ubicacion distintos por fuente para que el
+        external_id (deterministic_id, basado en nombre+ubicacion) no
+        coincida entre fuentes — si coincidiera, dataVenezuela las trataria
+        como la misma persona reportada por dos fuentes y devolveria 409
+        (comportamiento correcto de idempotencia, pero no lo que este test
+        quiere medir: throughput agregado de fuentes realmente distintas).
+        """
+        return [
+            Person(
+                full_name=f"PERSONA UNO {suffix}",
+                event_id=_EVENT_ID,
+                status="missing",
+                fuente=f"fuente_{suffix}",
+                last_known_location=f"Lara{suffix}, Venezuela",
+            ),
+            Person(
+                full_name=f"PERSONA DOS {suffix}",
+                event_id=_EVENT_ID,
+                status="found",
+                fuente=f"fuente_{suffix}",
+                last_known_location=f"Zulia{suffix}, Venezuela",
+            ),
+        ]
+
+    def _parser_for(self, source: Any, *_: Any) -> Any:
+        suffix = source.id.rsplit("_", 1)[-1]
+        return _mock_parser(self._unique_persons(suffix))
+
+    def test_five_sources_parallel_same_result_as_sequential(self, tmp_path: Path) -> None:
+        cfg = self._make_n_sources_config(tmp_path, 5)
+        transport = _StagingTransport()
+        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport), patch(
+            "scrapers.pipelines.run_pipeline._get_adapter", side_effect=lambda *_: _mock_adapter()
+        ), patch(
+            "scrapers.pipelines.run_pipeline._get_parser", side_effect=self._parser_for
+        ):
+            summary = run_pipeline(
+                config_path=cfg, output_dir=tmp_path / "out", max_workers=5
+            )
+        assert summary["sources_processed"] == 5
+        assert summary["staging_sent"] == 10  # 2 personas x 5 fuentes
+        assert summary["errors"] == []
+        slugs = {p["source_slug"] for p in transport.watermark_puts}
+        assert slugs == {f"fuente_{i}" for i in range(5)}
+
+    def test_max_workers_one_is_sequential_default(self, tmp_path: Path) -> None:
+        cfg = self._make_n_sources_config(tmp_path, 5)
+        transport = _StagingTransport()
+        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport), patch(
+            "scrapers.pipelines.run_pipeline._get_adapter", side_effect=lambda *_: _mock_adapter()
+        ), patch(
+            "scrapers.pipelines.run_pipeline._get_parser", side_effect=self._parser_for
+        ):
+            summary = run_pipeline(config_path=cfg, output_dir=tmp_path / "out")
+        assert summary["sources_processed"] == 5
+        assert summary["staging_sent"] == 10
+
+    def test_one_source_fatal_error_does_not_block_others_in_parallel(
+        self, tmp_path: Path
+    ) -> None:
+        cfg = self._make_n_sources_config(tmp_path, 5)
+        transport = _StagingTransport()
+
+        def _flaky_adapter(source: Any, *_: Any) -> Any:
+            if source.id == "fuente_2":
+                raise RuntimeError("adapter explota")
+            return _mock_adapter()
+
+        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport), patch(
+            "scrapers.pipelines.run_pipeline._get_adapter", side_effect=_flaky_adapter
+        ), patch(
+            "scrapers.pipelines.run_pipeline._get_parser", side_effect=self._parser_for
+        ):
+            summary = run_pipeline(
+                config_path=cfg, output_dir=tmp_path / "out", max_workers=5
+            )
+        assert summary["sources_processed"] == 4
+        assert any("fuente_2" in e for e in summary["errors"])
+        assert summary["staging_sent"] == 8  # 2 personas x 4 fuentes ok
+
+
+# ---------------------------------------------------------------------------
 # Tests: fuente deshabilitada
 # ---------------------------------------------------------------------------
 
@@ -664,6 +771,48 @@ sources:
         adapter.close.assert_called_once()
         assert summary["sources_processed"] == 0
         assert len(summary["errors"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# Tests: page_size por fuente (api_json)
+# ---------------------------------------------------------------------------
+
+class TestApiAdapterPageSize:
+    def test_custom_page_size_is_passed_to_adapter(self) -> None:
+        source = SourceConfig(
+            id="api_custom_page_size",
+            name="API con page_size custom",
+            type="api_json",
+            enabled=True,
+            trust_tier="C",
+            url="https://example.org/api/personas",
+            refresh_minutes=30,
+            parser_asignado="encuentralos",
+            page_size=500,
+        )
+        adapter = _get_adapter(source)
+        try:
+            assert adapter.page_size == 500
+        finally:
+            adapter.close()
+
+    def test_no_page_size_uses_adapter_default(self) -> None:
+        source = SourceConfig(
+            id="api_sin_page_size",
+            name="API sin page_size declarado",
+            type="api_json",
+            enabled=True,
+            trust_tier="C",
+            url="https://example.org/api/personas",
+            refresh_minutes=30,
+            parser_asignado="encuentralos",
+        )
+        adapter = _get_adapter(source)
+        try:
+            from scrapers.adapters.api_adapter import _DEFAULT_PAGE_SIZE
+            assert adapter.page_size == _DEFAULT_PAGE_SIZE
+        finally:
+            adapter.close()
 
 
 # ---------------------------------------------------------------------------

@@ -27,6 +27,7 @@ def load_sources(config_path: Path) -> tuple[dict[str, Any], list[SourceConfig]]
                 notes=source.get("notes"),
                 timeout_seconds=source.get("timeout_seconds"),
                 max_retries=source.get("max_retries"),
+                page_size=source.get("page_size"),
                 max_concurrent_pages=source.get("max_concurrent_pages"),
             )
         )

@@ -51,7 +51,7 @@ log = logging.getLogger(__name__)
 # Constantes por defecto
 # ---------------------------------------------------------------------------
 
-_DEFAULT_PAGE_SIZE = 20
+_DEFAULT_PAGE_SIZE = 100
 _DEFAULT_TIMEOUT = 30.0          # segundos
 _MAX_RETRIES = 5
 _DEFAULT_MAX_CONCURRENT_PAGES = 4

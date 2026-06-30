@@ -87,6 +87,14 @@ def _validate_optional_fields(source: dict[str, Any], label: str) -> None:
                 f"total de intentos; 0 dejaria el adapter sin ningun intento)."
             )
 
+    page_size = source.get("page_size")
+    if page_size is not None:
+        if isinstance(page_size, bool) or not isinstance(page_size, int) or page_size < 1:
+            raise ValueError(
+                f"{label} debe tener 'page_size' como entero positivo (registros por pagina "
+                f"en fuentes api_json paginadas)."
+            )
+
     max_concurrent_pages = source.get("max_concurrent_pages")
     if max_concurrent_pages is not None:
         if (
@@ -97,6 +105,7 @@ def _validate_optional_fields(source: dict[str, Any], label: str) -> None:
             raise ValueError(
                 f"{label} debe tener 'max_concurrent_pages' como entero positivo."
             )
+
 
 
 def validate_sources_config(config_path: Path) -> dict[str, Any]:
