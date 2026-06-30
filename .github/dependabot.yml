@@ -13,11 +13,14 @@ updates:
     commit-message:
       prefix: "chore"
       include: "scope"
-    # Agrupa actualizaciones menores/patch en un solo PR para no inundar
-    # de PRs individuales; las major siguen viniendo separadas para
-    # revisión manual obligatoria.
+    # Agrupa minor/patch en un solo PR semanal para no inundar de PRs
+    # individuales; las major siguen viniendo separadas para revisión
+    # manual obligatoria. "patterns: [*]" explícito evita un bug de
+    # agrupación visto en el primer run (ver PR #164).
     groups:
       python-minor-patch:
+        patterns:
+          - "*"
         update-types:
           - "minor"
           - "patch"
@@ -35,3 +38,10 @@ updates:
     commit-message:
       prefix: "ci"
       include: "scope"
+    groups:
+      github-actions-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
