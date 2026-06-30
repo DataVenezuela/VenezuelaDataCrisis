@@ -18,7 +18,7 @@
 # Documentación y archivos de configuración raíz
 /docs/                          @REPLACE_mathiasaiva @REPLACE_mayerlim
 /README.md                      @REPLACE_mathiasaiva @REPLACE_mayerlim
-/CONTRIBUTING.MD                @REPLACE_mathiasaiva @REPLACE_mayerlim
+/CONTRIBUTING.md                @REPLACE_mathiasaiva @REPLACE_mayerlim
 /AGENTS.md                      @REPLACE_mathiasaiva @REPLACE_mayerlim
 
 # Contexto y skills de agentes — cambios acá afectan cómo cualquier agente

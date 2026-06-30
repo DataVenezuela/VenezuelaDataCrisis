@@ -5,7 +5,7 @@ Tras los terremotos del 24 de junio, miles de familias buscan a sus seres querid
 
 Este proyecto recolecta esos registros, los unifica en una base de datos limpia y deduplicada, y los expone via API para que cualquier dev pueda construir encima.
 
-→ [Contribuir](./CONTRIBUTING.MD) · [Pipeline técnico](./docs/pipeline.md) · [Reportar un problema](../../issues)
+→ [Contribuir](./CONTRIBUTING.md) · [Pipeline técnico](./docs/pipeline.md) · [Reportar un problema](../../issues)
 
 ---
 
