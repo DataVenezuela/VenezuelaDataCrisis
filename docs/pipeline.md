@@ -1102,3 +1102,41 @@ python -m scrapers.cli validate --config scrapers/config/sources.demo.yaml
 | Consolidation job | ❌ Issue #82, bloqueado por #81 |
 | Build job (Supabase → D1) | ❌ bloqueado por canonical |
 | Cloudflare Worker | ❌ bloqueado por build job |
+
+---
+
+## Estado operacional — verificado en producción (30 jun 2026)
+
+Esta sección documenta hechos confirmados corriendo el pipeline contra
+`dataVenezuela` en producción, no diseño. Ver `AGENTS.md` para el contexto
+completo dirigido a agentes.
+
+**Confirmado funcionando:**
+- `encuentralos_tecnosoft` end-to-end: fetch → parse → PII → normalización →
+  POST `/api/aportes` → tabla `aportes` en Supabase.
+- Watermark filtering activo: el log de producción muestra
+  `updated_after=...` en la query real al adapter.
+- `ingest.yml` ya invoca `python -m scrapers.cli --verbose ingest` — el
+  progreso del fetch (páginas descargadas, entidades parseadas) sí se ve en
+  los logs de GitHub Actions.
+
+**Brecha activa — `page_size` no es configurable:**
+`encuentralos_tecnosoft` tiene **~98.830 registros**, no los ~290 que dice
+la nota original del YAML — la fuente escaló después de que se escribió esa
+estimación. Con `page_size=20` (hardcodeado, ver `docs/source_config.md`)
+eso son ~4.941 páginas. El timeout de 15 minutos en `ingest.yml` no alcanza
+para ese volumen ni para el fetch ni mucho menos para los ~98.830 POST
+individuales subsecuentes a `/api/aportes`. Subir `page_size` reduce el
+costo del fetch pero no toca el cuello de botella real, que es el POST
+secuencial por registro en `staging_exporter.export_source`. Cualquier
+solución de paralelismo ahí debe preservar la garantía de que el watermark
+solo avanza si **todos** los POST de la fuente terminaron en 200/201 (ver
+"Capa 4 — Staging exporter" arriba) — paralelizar sin preservar esa
+garantía rompe la semántica de at-least-once delivery documentada.
+
+**Infraestructura — Supabase y Vercel se gestionan por separado:**
+Mover el proyecto Supabase a otra organización no actualiza las env vars de
+Vercel automáticamente. Si `dataVenezuela` devuelve 403 o no refleja
+cambios hechos directo en Supabase, verificar primero que las env vars de
+Vercel (`SUPABASE_URL`, `PARTNER_API_SALT`) apunten al proyecto correcto
+antes de asumir que el bug está en el pipeline.
