@@ -103,7 +103,11 @@ def _get_adapter(source: SourceConfig) -> Any:
     stype = source.type
 
     if stype == "api_json":
-        from scrapers.adapters.api_adapter import ApiAdapter
+        from scrapers.adapters.api_adapter import (
+            ApiAdapter,
+            _DEFAULT_TIMEOUT,
+            _MAX_RETRIES,
+        )
         # base_url = esquema + host; el path se pasa en fetch_all
         import httpx
         parsed = httpx.URL(source.url)
@@ -115,8 +119,8 @@ def _get_adapter(source: SourceConfig) -> Any:
             "base_url": base_url,
             "source_key": source.id,
             "default_path": path,
-            "timeout": source.timeout_seconds if source.timeout_seconds is not None else 30.0,
-            "max_retries": source.max_retries if source.max_retries is not None else 5,
+            "timeout": source.timeout_seconds if source.timeout_seconds is not None else _DEFAULT_TIMEOUT,
+            "max_retries": source.max_retries if source.max_retries is not None else _MAX_RETRIES,
             "max_concurrent_pages": source.max_concurrent_pages,
         }
         # page_size es opcional: cada fuente declara el limite real que su
