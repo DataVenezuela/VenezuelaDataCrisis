@@ -126,6 +126,17 @@ jobs:
             exit 1
           fi
 
+  ci:
+    runs-on: ubuntu-latest
+    needs: [tests, lint-and-types, security]
+    if: always()
+    steps:
+      - name: All checks passed
+        run: |
+          if [[ "${{ needs.tests.result }}" != "success" || "${{ needs.lint-and-types.result }}" != "success" || "${{ needs.security.result }}" != "success" ]]; then
+            exit 1
+          fi
+
   # Job separado para que pull-requests: write no contamine los jobs de
   # arriba (tests, lint-and-types, security no necesitan ese permiso).
   dependency-review:
