@@ -88,8 +88,7 @@ jobs:
           python -m scrapers.cli --verbose ingest \
             --config "$CONFIG" \
             --source "${{ matrix.source_id }}" \
-            --output-dir scrapers/runtime_output \
-            --offset 40
+            --output-dir scrapers/runtime_output
 
       - name: Upload artifacts
         if: always()
