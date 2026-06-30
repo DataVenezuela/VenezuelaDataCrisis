@@ -86,7 +86,7 @@ Requiere al menos una aprobación antes de mergear. Branch protection activo: la
 
 ## Dónde aterriza cada cosa
 
-El pipeline **no escribe JSONL en disco**. El destino de las entidades procesadas es staging en Supabase vía `POST /api/v1/dedup/*`.
+El pipeline **no escribe JSONL en disco**. El destino de las entidades procesadas es staging en Supabase vía `POST /api/aportes` (auth `x-api-key`, payload camelCase — ver `dataVenezuela/docs/api-dedup.md`). El watermark por fuente vive en `PUT /api/source-watermarks/{slug}`, mismo auth.
 
 ```
 Adapter → Parser → PII → Normalización → staging exporter → aportes (Supabase)
@@ -234,4 +234,4 @@ Las credenciales de producción (Supabase, Cloudflare, PII_HMAC_SECRET real) sol
 
 Abre un Issue o escribe en el canal del equipo correspondiente.
 
-Si algo puede poner en riesgo a una persona, no lo implementes por tu cuenta. Pide revisión.
+Si algo puede poner en riesgo a una persona, no lo implementes por tu cuenta. Pide revisión./
