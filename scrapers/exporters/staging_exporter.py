@@ -90,9 +90,21 @@ class StagingConfig:
                 missing,
             )
             return None
+        base_url = str(values["STAGING_BASE_URL"]).rstrip("/")
+        # El cliente manda x-api-key y PII tokenizada en cada request. Sobre HTTP
+        # plano esos datos viajan en claro y son interceptables (MITM); exigir
+        # HTTPS evita exponer la credencial y los payloads. Config errada => dry-run,
+        # nunca enviar a un endpoint inseguro.
+        if not base_url.lower().startswith("https://"):
+            log.error(
+                "staging_exporter: STAGING_BASE_URL debe ser https:// (recibido %r); "
+                "entrando en dry-run para no enviar credenciales/PII en claro",
+                base_url,
+            )
+            return None
         return cls(
             api_key=str(values["STAGING_API_KEY"]),
-            base_url=str(values["STAGING_BASE_URL"]).rstrip("/"),
+            base_url=base_url,
         )
 
 
@@ -179,7 +191,12 @@ class StagingExporter:
                     "Content-Type": "application/json",
                 },
                 timeout=httpx.Timeout(30.0),
-                follow_redirects=True,
+                # follow_redirects=False a propósito: httpx NO descarta cabeceras
+                # custom como x-api-key al seguir un redirect cross-host, así que un
+                # 30x del servidor (o un MITM) hacia otro dominio filtraría la API
+                # key y la PII tokenizada. El endpoint /api/aportes es fijo y no
+                # debería redirigir; un redirect inesperado se trata como error.
+                follow_redirects=False,
             )
 
     # -- payload --------------------------------------------------------------
