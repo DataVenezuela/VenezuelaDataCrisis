@@ -12,5 +12,5 @@ phonetics>=1.0.0
 pdfplumber>=0.11.0
 types-PyYAML>=6.0.0
 types-defusedxml>=0.7.0
-playwright>=1.40.0
+playwright>=1.61.0
 mypy>=1.13.0
