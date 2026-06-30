@@ -41,6 +41,7 @@ from __future__ import annotations
 import logging
 import os
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -113,6 +114,9 @@ def _get_adapter(source: SourceConfig) -> Any:
             base_url=base_url,
             source_key=source.id,
             default_path=path,
+            timeout=source.timeout_seconds if source.timeout_seconds is not None else 30.0,
+            max_retries=source.max_retries if source.max_retries is not None else 5,
+            max_concurrent_pages=source.max_concurrent_pages,
         )
         return adapter
 
@@ -201,7 +205,7 @@ class _LocalFileAdapter:
             records_in_page=None,
         )
 
-    def fetch_all(self, url: str, **kwargs: Any):  # type: ignore[return]
+    def fetch_all(self, url: str, **kwargs: Any) -> Iterator[RawContent]:
         yield self.fetch(url)
 
 
@@ -264,7 +268,7 @@ _PII_FIELD_NAMES = {"cedula", "cédula", "identity_document", "documento_identid
                     "telefono", "teléfono", "phone", "mobile", "celular"}
 
 
-def _strip_raw_pii(d: dict) -> dict:
+def _strip_raw_pii(d: dict[str, Any]) -> dict[str, Any]:
     """Elimina campos PII crudos sin hashear (defensa en profundidad)."""
     return {k: v for k, v in d.items() if k.lower() not in _PII_FIELD_NAMES}
 
@@ -272,7 +276,7 @@ def _strip_raw_pii(d: dict) -> dict:
 def _apply_pii(
     entities: list[ParsedEntity],
     errors: list[str],
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """
     Convierte entidades tipadas a dicts y aplica tokenize_pii_fields.
 
@@ -288,7 +292,7 @@ def _apply_pii(
     """
     pii_salt_available = bool(os.getenv("PII_SALT"))
 
-    result: list[dict] = []
+    result: list[dict[str, Any]] = []
     for entity in entities:
         try:
             d = entity.model_dump()
@@ -314,7 +318,10 @@ def _apply_pii(
     return result
 
 
-def _enrich_records(records: list[dict], errors: list[str]) -> list[dict]:
+def _enrich_records(
+    records: list[dict[str, Any]],
+    errors: list[str],
+) -> list[dict[str, Any]]:
     """
     Normalizacion post-dump y computo de ``deterministic_id``.
 
@@ -329,7 +336,7 @@ def _enrich_records(records: list[dict], errors: list[str]) -> list[dict]:
         phonetic_hash as _compute_phonetic,
     )
 
-    enriched: list[dict] = []
+    enriched: list[dict[str, Any]] = []
     for rec in records:
         try:
             # Normalizar ubicacion si viene como string crudo sin objeto
@@ -365,12 +372,12 @@ def _enrich_records(records: list[dict], errors: list[str]) -> list[dict]:
 
 
 def _apply_confidence(
-    records: list[dict],
+    records: list[dict[str, Any]],
     errors: list[str],
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Calcula y escribe confidence_score en cada registro."""
     _MODEL_MAP = {"Person": Person, "AcopioCenter": AcopioCenter, "Event": Event}
-    result: list[dict] = []
+    result: list[dict[str, Any]] = []
     for rec in records:
         try:
             entity_type = rec.get("_entity_type", "Person")
@@ -387,15 +394,15 @@ def _apply_confidence(
 
 
 def _apply_minor_protection(
-    records: list[dict],
+    records: list[dict[str, Any]],
     errors: list[str],
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Reduce campos identificables en registros con is_minor=True antes de exportar.
 
     No afecta a Event/AcopioCenter (no tienen is_minor) ni a Person con
     is_minor en None/False — ver scrapers/sanitizers/minor_protection.py.
     """
-    result: list[dict] = []
+    result: list[dict[str, Any]] = []
     for rec in records:
         try:
             result.append(protect_minor_fields(rec))
@@ -522,7 +529,7 @@ def run_pipeline(
     config_path: Path,
     output_dir: Path,
     limit: int | None = None,
-) -> dict:
+) -> dict[str, Any]:
     """
     Orquestador principal del pipeline.
 
