@@ -545,6 +545,17 @@ class TestDryRun:
         assert cfg is not None
         assert cfg.base_url == "https://staging.test"  # rstrip('/')
 
+    def test_from_env_rejects_plain_http(self, caplog: Any) -> None:
+        # http:// expondría x-api-key y PII en claro: debe degradar a dry-run.
+        env = {
+            "STAGING_API_KEY": "k",
+            "STAGING_BASE_URL": "http://staging.test",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            with caplog.at_level("ERROR", logger="scrapers.exporters.staging_exporter"):
+                assert StagingConfig.from_env() is None
+        assert any("https" in r.getMessage() for r in caplog.records if r.levelname == "ERROR")
+
 
 # --- ciclo de vida ----------------------------------------------------------
 
