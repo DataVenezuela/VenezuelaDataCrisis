@@ -1,13 +1,13 @@
 ---
 name: resolve-issue
-description: Resuelve un issue de GitHub de punta a punta en VZLA_DEDUP - crea rama desde master, implementa, prueba, autorevisa, abre el PR siguiendo CONTRIBUTING.MD, y vigila los checks de CI hasta dejarlos en verde. Usar cuando el usuario pide "resuelve el issue #N", "haz el PR del issue X" o similar.
+description: Resuelve un issue de GitHub de punta a punta en VZLA_DEDUP - crea rama desde master, implementa, prueba, autorevisa, abre el PR siguiendo CONTRIBUTING.md, y vigila los checks de CI hasta dejarlos en verde. Usar cuando el usuario pide "resuelve el issue #N", "haz el PR del issue X" o similar.
 ---
 
 # Resolve Issue
 
 Resuelve un issue de GitHub completo: rama → implementación → tests →
 code review → PR → CI verde. Sigue siempre las reglas de
-`CONTRIBUTING.MD` (este repo maneja datos de personas desaparecidas; la
+`CONTRIBUTING.md` (este repo maneja datos de personas desaparecidas; la
 seguridad y la trazabilidad no son negociables).
 
 Argumento esperado: número o URL del issue (`/resolve-issue 103`).
@@ -109,7 +109,7 @@ hagas `-D` — es probable que sea trabajo de una corrida anterior (ver
 - Actualiza documentación (`README.md`, docs en `docs/`, docstrings de
   contrato) si el cambio toca contratos, schemas o comportamiento
   esperado de adapters/parsers/modelos.
-- Reglas de seguridad que no se pueden romper (CONTRIBUTING.MD):
+- Reglas de seguridad que no se pueden romper (CONTRIBUTING.md):
   - Nunca subas datos reales, dumps, CSVs, PDFs, JSONL ni imágenes con
     información real de personas.
   - Nunca loguees ni imprimas cédulas, teléfonos, direcciones o nombres

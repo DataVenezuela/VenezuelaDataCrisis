@@ -53,7 +53,7 @@ jobs:
           set -euo pipefail
           FORBIDDEN=$(git diff --name-only --diff-filter=ACMR "origin/${{ github.base_ref }}...HEAD" | grep -iE '\.(csv|jsonl|pdf|db|sqlite|xlsx)$' || true)
           if [ -n "$FORBIDDEN" ]; then
-            echo "::error::No se pueden subir archivos de datos reales (CONTRIBUTING.MD):"
+            echo "::error::No se pueden subir archivos de datos reales (CONTRIBUTING.md):"
             echo "$FORBIDDEN"
             exit 1
           fi
@@ -94,7 +94,7 @@ jobs:
           done
 
           if [ "$FOUND" -eq 1 ]; then
-            echo "Revisa CONTRIBUTING.MD (Reglas de seguridad obligatorias) antes de hacer commit."
+            echo "Revisa CONTRIBUTING.md (Reglas de seguridad obligatorias) antes de hacer commit."
             exit 1
           fi
 

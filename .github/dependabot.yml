@@ -1,0 +1,47 @@
+version: 2
+updates:
+  # Dependencias Python del pipeline
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "scrapers"
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+    # Agrupa minor/patch en un solo PR semanal para no inundar de PRs
+    # individuales; las major siguen viniendo separadas para revisión
+    # manual obligatoria. "patterns: [*]" explícito evita un bug de
+    # agrupación visto en el primer run (ver PR #164).
+    groups:
+      python-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  # Versiones de actions usadas en los workflows (actions/checkout@v4, etc.)
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "ci"
+    commit-message:
+      prefix: "ci"
+      include: "scope"
+    groups:
+      github-actions-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
