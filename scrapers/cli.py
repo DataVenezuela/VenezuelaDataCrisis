@@ -62,25 +62,20 @@ def _cmd_ingest(args: argparse.Namespace) -> None:
     if not source.enabled:
         print(f"WARN: fuente '{args.source}' está deshabilitada", file=sys.stderr)
 
-    # Write a temporary single-source config to reuse run_pipeline
+    # Write a temporary single-source config to reuse run_pipeline.
+    # Use dataclasses.asdict() to preserve ALL optional fields (probe_limit,
+    # max_concurrent_pages, max_concurrent_posts, etc.) instead of a manual
+    # dict that silently drops them.
+    import dataclasses
     import tempfile
 
     import yaml
 
+    source_dict = dataclasses.asdict(source)
+    source_dict["enabled"] = True  # force-enable for ingest
     single_config = {
         "project": project,
-        "sources": [
-            {
-                "id": source.id,
-                "name": source.name,
-                "type": source.type,
-                "enabled": True,
-                "trust_tier": source.trust_tier,
-                "url": source.url,
-                "refresh_minutes": source.refresh_minutes,
-                "parser_asignado": source.parser_asignado,
-            }
-        ],
+        "sources": [source_dict],
     }
 
     with tempfile.NamedTemporaryFile(

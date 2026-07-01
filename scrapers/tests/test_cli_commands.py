@@ -75,6 +75,36 @@ class TestIngest:
         assert result.returncode != 0
         assert "no encontrada" in result.stderr
 
+    def test_ingest_preserves_optional_source_fields(self, tmp_path: Path) -> None:
+        """El YAML temporal generado por _cmd_ingest debe preservar todos los campos
+        opcionales de SourceConfig (probe_limit, max_concurrent_posts, etc.)."""
+        import dataclasses
+
+        import yaml
+
+        from scrapers.sources.loader import load_sources
+
+        project, sources = load_sources(_STARTER_CONFIG)
+        source = next(s for s in sources if s.id == "encuentralos_tecnosoft")
+
+        # Reconstruir el YAML temporal igual que _cmd_ingest (post-fix)
+        source_dict = dataclasses.asdict(source)
+        source_dict["enabled"] = True
+        single_config = {"project": project, "sources": [source_dict]}
+
+        tmp_yaml = tmp_path / "test_config.yaml"
+        tmp_yaml.write_text(yaml.safe_dump(single_config))
+
+        # Recargar y verificar que los campos opcionales sobrevivieron
+        _, reloaded = load_sources(tmp_yaml)
+        assert len(reloaded) == 1
+        reloaded_source = reloaded[0]
+
+        assert reloaded_source.probe_limit == 1000
+        assert reloaded_source.max_concurrent_pages == 32
+        assert reloaded_source.max_concurrent_posts == 8
+        assert reloaded_source.id == "encuentralos_tecnosoft"
+
     def test_ingest_output_is_valid_json(self, tmp_path: Path) -> None:
         result = _run_cli(
             "ingest",
