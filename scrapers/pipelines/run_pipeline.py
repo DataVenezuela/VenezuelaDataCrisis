@@ -912,8 +912,6 @@ def run_pipeline(
         "staging_errors": staging_errors,
         "quarantined": quarantined,
         "quarantine_errors": quarantine_errors,
-        "quarantined": quarantined,
-        "quarantine_errors": quarantine_errors,
         "errors": all_errors,
     }
 
