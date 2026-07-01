@@ -70,7 +70,7 @@ def _make_raw(payload: Any, source_key: str = SOURCE_KEY) -> RawContent:
         fetched_at="2026-06-24T15:30:00Z",
         http_status=200,
         content_type="application/json",
-        content_hash="sha256:abc",
+        content_hash="abc",
         raw_content=payload,
         page=1,
         total_pages=1,
@@ -326,7 +326,7 @@ class TestNameNormalization:
             "fecha_reporte": None,
             "telefono_contacto": None,
         }
-        raw = _make_raw({"data": [record], "total": 1})
+        raw = _make_raw({"items": [record], "total": 1})
         p = _parser().parse(raw)[0]
         assert "de la" in p.full_name
 
@@ -404,7 +404,7 @@ class TestAgeRange:
             "status": "desaparecido", "observaciones": None,
             "foto": None, "fecha_reporte": None, "telefono_contacto": None,
         }]
-        raw = _make_raw({"data": records, "total": 1})
+        raw = _make_raw({"items": records, "total": 1})
         p = _parser().parse(raw)[0]
         assert p.age_range is None
 
@@ -454,7 +454,7 @@ class TestRobustness:
              "municipio": None, "status": "encontrado", "observaciones": None,
              "foto": None, "fecha_reporte": None, "telefono_contacto": None},
         ]
-        raw = _make_raw({"data": records, "total": 2})
+        raw = _make_raw({"items": records, "total": 2})
         result = _parser().parse(raw)
         assert len(result) == 1
         assert result[0].full_name == "Demo Valido"
@@ -463,11 +463,11 @@ class TestRobustness:
         records = [{"id": 99, "nombre": "   ", "cedula": None, "edad": None, "estado": None,
                     "municipio": None, "status": None, "observaciones": None,
                     "foto": None, "fecha_reporte": None, "telefono_contacto": None}]
-        raw = _make_raw({"data": records, "total": 1})
+        raw = _make_raw({"items": records, "total": 1})
         assert _parser().parse(raw) == []
 
     def test_empty_data_list(self) -> None:
-        raw = _make_raw({"data": [], "total": 0})
+        raw = _make_raw({"items": [], "total": 0})
         assert _parser().parse(raw) == []
 
     def test_malformed_raw_content_string(self) -> None:
@@ -500,7 +500,7 @@ class TestRobustness:
              "municipio": None, "status": "herido", "observaciones": None,
              "foto": None, "fecha_reporte": None, "telefono_contacto": None},
         ]
-        raw = _make_raw({"data": records, "total": 2})
+        raw = _make_raw({"items": records, "total": 2})
         result = _parser().parse(raw)
         assert len(result) == 1
         assert result[0].full_name == "Demo Ok"
@@ -526,9 +526,9 @@ class TestPagination:
         El parser se llama dos veces (una por página, como haría run_pipeline).
         """
         fixture = _load_fixture()
-        records = fixture["data"]
-        page1 = _make_raw({"data": records[:3], "total": 5})
-        page2 = _make_raw({"data": records[3:], "total": 5})
+        records = fixture["items"]
+        page1 = _make_raw({"items": records[:3], "total": 5})
+        page2 = _make_raw({"items": records[3:], "total": 5})
 
         parser = _parser()
         all_persons = parser.parse(page1) + parser.parse(page2)
@@ -536,9 +536,9 @@ class TestPagination:
 
     def test_status_preserved_across_pages(self) -> None:
         fixture = _load_fixture()
-        records = fixture["data"]
+        records = fixture["items"]
         parser = _parser()
-        p1 = parser.parse(_make_raw({"data": [records[0]], "total": 5}))
-        p2 = parser.parse(_make_raw({"data": [records[3]], "total": 5}))
+        p1 = parser.parse(_make_raw({"items": [records[0]], "total": 5}))
+        p2 = parser.parse(_make_raw({"items": [records[3]], "total": 5}))
         assert p1[0].status == "missing"
         assert p2[0].status == "deceased"
