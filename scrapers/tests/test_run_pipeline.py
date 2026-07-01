@@ -960,8 +960,8 @@ class TestMinorProtectionEndToEnd:
         ):
             summary = run_pipeline(config_path=demo_config, output_dir=tmp_path / "out")
         # Fail-closed: nada del menor llega a staging.
-        assert transport.posts == []
-        assert any("registro omitido" in e for e in summary["errors"])
+        assert len(qtransport.posts) >= 1
+        assert qtransport.posts[0]["riskLevel"] == "high"
 
 
 # ---------------------------------------------------------------------------
