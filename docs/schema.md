@@ -169,6 +169,7 @@ events
 | `depth_km`        | `NUMERIC(6,2)`    | `number`          |       sí | Profundidad en kilómetros              |
 | `status`          | `VARCHAR(30)`     | `string`          |       no | Enum definido                          |
 | `external_ids`    | `JSONB` / `JSON`  | `object`          |       sí | IDs externos asociados                 |
+| `dedup_hash`      | `VARCHAR(64)`     | `string`          |       sí | Hash estable para auto-merge exacto    |
 
 ### Enums
 
@@ -539,6 +540,7 @@ acopio_centers
 | `contact_masked`   | `VARCHAR(30)`    | `string`                   |       sí | Contacto parcialmente enmascarado |
 | `capacity`         | `INTEGER`        | `number` integer           |       sí | Capacidad                         |
 | `current_load`     | `INTEGER`        | `number` integer           |       sí | Carga actual                      |
+| `dedup_hash`       | `VARCHAR(64)`    | `string`                   |       sí | Hash estable para auto-merge exacto |
 
 ### Enums
 
@@ -597,6 +599,88 @@ otro
   "current_load": 283
 }
 ```
+
+---
+
+## 11. Consolidation / dedup SQL — Paso 1 (#90)
+
+El Paso 1 agrega soporte mínimo de consolidation sobre tablas existentes sin
+tocar todavía la ingesta a staging de #81.
+
+SQL versionado en el repo:
+
+```text
+tools/sql/issue_90_step1_consolidation.sql
+tools/sql/issue_90_step1_consolidation_rollback.sql
+```
+
+### Cambios implementados
+
+- `events.dedup_hash varchar(64)` para auto-merge exacto de eventos.
+- Índice único `events_dedup_uniq` sobre `events(dedup_hash)`.
+- `acopio_centers.dedup_hash varchar(64)` para auto-merge exacto de centros de acopio.
+- Índice único `acopio_centers_dedup_uniq` sobre `acopio_centers(dedup_hash)`.
+- Tabla `dedup_candidates` para candidatos de deduplicación de personas,
+  alineada con la salida documentada del pipeline.
+
+PostgreSQL permite múltiples `NULL` en índices `UNIQUE`, por lo que agregar
+`dedup_hash` nullable no rompe filas históricas ni bloquea migraciones aunque
+los hashes aún no estén backfilleados.
+
+### Tabla `dedup_candidates`
+
+| Campo                    | Tipo SQL       | Nullable | Valores / Notas                                      |
+| ------------------------ | -------------- | -------: | ---------------------------------------------------- |
+| `candidate_id`           | `uuid`         |       no | PK, `DEFAULT gen_random_uuid()`                      |
+| `event_id`               | `VARCHAR(36)`  |       no | FK a `public.events(event_id)`                       |
+| `left_person_record_id`  | `VARCHAR(36)`  |       no | FK a `public.persons(person_record_id)`              |
+| `right_person_record_id` | `VARCHAR(36)`  |       no | FK a `public.persons(person_record_id)`              |
+| `blocking_key`           | `text`         |       sí | Clave emitida por `person_block_keys`                |
+| `score`                  | `numeric(4,3)` |       no | Score de similitud candidato, `CHECK 0..1`           |
+| `reasons`                | `jsonb`        |       sí | Señales explicables usadas para generar el candidato |
+| `priority`               | `text`         |       no | Prioridad operativa del candidato                    |
+| `decision`               | `text`         |       no | Default `pending`                                    |
+| `created_at`             | `timestamptz`  |       no | Default `now()`                                      |
+
+`blocking_key` queda nullable para no bloquear migraciones con candidatos
+históricos o backfills parciales. La salida esperada del pipeline debe
+popularla con una de las claves devueltas por
+`scrapers/dedup/specs.py::person_block_keys`, por ejemplo
+`ced:{event_id}:{cedula_hmac}` o `phon:{event_id}:{estado}:{phonetic_hash}`.
+
+Restricción:
+
+```text
+CHECK (left_person_record_id <> right_person_record_id)
+UNIQUE INDEX dedup_candidates_pair_blocking_uniq
+  ON (
+    LEAST(left_person_record_id, right_person_record_id),
+    GREATEST(left_person_record_id, right_person_record_id),
+    blocking_key
+  )
+```
+
+El índice canónico evita insertar el mismo par invertido para la misma
+`blocking_key` como dos candidatos distintos (`A/B` y `B/A`). No bloquea que
+el mismo par aparezca por claves de bloqueo distintas, porque `person_block_keys`
+puede devolver más de una clave para la misma persona.
+
+### Pendiente
+
+Paso 2 queda pendiente hasta que #81 cree `aportes`. Esta PR no crea ni modifica
+`aportes`, no crea `dedup_decisions` y no implementa el job de consolidation.
+
+### Rollback
+
+El rollback documentado elimina solamente lo creado por Paso 1:
+
+- `public.dedup_candidates`
+- índice `events_dedup_uniq`
+- índice `acopio_centers_dedup_uniq`
+- columna `public.events.dedup_hash`
+- columna `public.acopio_centers.dedup_hash`
+
+No toca `aportes`, `dedup_decisions` ni jobs de consolidation.
 
 ---
 

@@ -52,6 +52,7 @@ import json
 import logging
 import os
 import uuid
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
@@ -239,7 +240,11 @@ def _get_adapter(source: SourceConfig) -> Any:
     stype = source.type
 
     if stype == "api_json":
-        from scrapers.adapters.api_adapter import ApiAdapter
+        from scrapers.adapters.api_adapter import (
+            ApiAdapter,
+            _DEFAULT_TIMEOUT,
+            _MAX_RETRIES,
+        )
         # base_url = esquema + host; el path se pasa en fetch_all
         import httpx
         parsed = httpx.URL(source.url)
@@ -251,6 +256,9 @@ def _get_adapter(source: SourceConfig) -> Any:
             "base_url": base_url,
             "source_key": source.id,
             "default_path": path,
+            "timeout": source.timeout_seconds if source.timeout_seconds is not None else _DEFAULT_TIMEOUT,
+            "max_retries": source.max_retries if source.max_retries is not None else _MAX_RETRIES,
+            "max_concurrent_pages": source.max_concurrent_pages,
         }
         # page_size es opcional: cada fuente declara el limite real que su
         # API soporta (algunas aceptan 1000+, otras capan en 50). Sin
@@ -345,7 +353,7 @@ class _LocalFileAdapter:
             records_in_page=None,
         )
 
-    def fetch_all(self, url: str, **kwargs: Any):  # type: ignore[return]
+    def fetch_all(self, url: str, **kwargs: Any) -> Iterator[RawContent]:
         yield self.fetch(url)
 
 
@@ -424,7 +432,7 @@ _PII_FIELD_NAMES = {"cedula", "cédula", "identity_document", "documento_identid
                     "telefono", "teléfono", "phone", "mobile", "celular"}
 
 
-def _strip_raw_pii(d: dict) -> dict:
+def _strip_raw_pii(d: dict[str, Any]) -> dict[str, Any]:
     """Elimina campos PII crudos sin hashear (defensa en profundidad)."""
     return {k: v for k, v in d.items() if k.lower() not in _PII_FIELD_NAMES}
 
@@ -450,7 +458,7 @@ def _apply_pii(
     """
     pii_salt_available = bool(os.getenv("PII_SALT"))
 
-    result: list[dict] = []
+    result: list[dict[str, Any]] = []
     for entity in entities:
         try:
             d = entity.model_dump()
@@ -493,7 +501,10 @@ def _apply_pii(
     return result
 
 
-def _enrich_records(records: list[dict], errors: list[str]) -> list[dict]:
+def _enrich_records(
+    records: list[dict[str, Any]],
+    errors: list[str],
+) -> list[dict[str, Any]]:
     """
     Normalizacion post-dump y computo de ``deterministic_id``.
 
@@ -508,7 +519,7 @@ def _enrich_records(records: list[dict], errors: list[str]) -> list[dict]:
         phonetic_hash as _compute_phonetic,
     )
 
-    enriched: list[dict] = []
+    enriched: list[dict[str, Any]] = []
     for rec in records:
         try:
             # Normalizar ubicacion si viene como string crudo sin objeto
@@ -544,12 +555,12 @@ def _enrich_records(records: list[dict], errors: list[str]) -> list[dict]:
 
 
 def _apply_confidence(
-    records: list[dict],
+    records: list[dict[str, Any]],
     errors: list[str],
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Calcula y escribe confidence_score en cada registro."""
     _MODEL_MAP = {"Person": Person, "AcopioCenter": AcopioCenter, "Event": Event}
-    result: list[dict] = []
+    result: list[dict[str, Any]] = []
     for rec in records:
         try:
             entity_type = rec.get("_entity_type", "Person")
@@ -566,7 +577,7 @@ def _apply_confidence(
 
 
 def _apply_minor_protection(
-    records: list[dict],
+    records: list[dict[str, Any]],
     errors: list[str],
     source: SourceConfig,
     quarantine_batch: list[QuarantineRecord],
@@ -576,7 +587,7 @@ def _apply_minor_protection(
     No afecta a Event/AcopioCenter (no tienen is_minor) ni a Person con
     is_minor en None/False — ver scrapers/sanitizers/minor_protection.py.
     """
-    result: list[dict] = []
+    result: list[dict[str, Any]] = []
     for rec in records:
         try:
             result.append(protect_minor_fields(rec))
@@ -788,7 +799,7 @@ def run_pipeline(
     output_dir: Path,
     limit: int | None = None,
     max_workers: int = 1,
-) -> dict:
+) -> dict[str, Any]:
     """
     Orquestador principal del pipeline.
 

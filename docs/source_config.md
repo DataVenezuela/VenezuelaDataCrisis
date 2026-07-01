@@ -32,6 +32,7 @@ sources:
     trust_tier: C
     enabled: true
     refresh_minutes: 30
+    max_concurrent_pages: 4  # opcional; solo aplica si la primera pagina reporta total
     # pagination:               # NO IMPLEMENTADO — ver advertencia arriba
     #   path: /api/personas
     #   limit_param: limit
@@ -62,6 +63,7 @@ sources:
 | `trust_tier` | sí | Letra A/B/C/D — nivel de confianza |
 | `enabled` | sí | `true`/`false`. Las deshabilitadas se ignoran |
 | `refresh_minutes` | no | Frecuencia mínima de scraping. Default: 60 |
+| `max_concurrent_pages` | no | Máximo de páginas API en vuelo cuando la primera respuesta reporta `total`, `count`, `total_count` o `totalCount`. Si se omite, `api_adapter.py` usa un default conservador. Sin total confiable, el adapter conserva paginación secuencial. |
 
 No se deben agregar campos nuevos al contrato sin actualizar este documento.
 
