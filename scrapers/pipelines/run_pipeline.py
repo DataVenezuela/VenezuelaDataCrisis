@@ -21,7 +21,7 @@ Cuarentena (Issue #88)
 NINGUN registro se descarta en silencio. Cada punto donde el pipeline antes
 perdia datos (parser ausente, parseo fallido, PII no tratable, fail-closed de
 proteccion de menores) ahora enruta el registro a la Quarantine DB via
-``QuarantineExporter`` (POST /api/v1/quarantine) para revision humana. El preview
+``QuarantineExporter`` (POST /api/quarantine) para revision humana. El preview
 va redactado; el run continua con las demas fuentes.
 
 La deduplicacion ya no ocurre por fuente: el dedup_hash/external_id deterministas
@@ -52,7 +52,6 @@ import json
 import logging
 import os
 import uuid
-from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
@@ -240,11 +239,7 @@ def _get_adapter(source: SourceConfig) -> Any:
     stype = source.type
 
     if stype == "api_json":
-        from scrapers.adapters.api_adapter import (
-            ApiAdapter,
-            _DEFAULT_TIMEOUT,
-            _MAX_RETRIES,
-        )
+        from scrapers.adapters.api_adapter import ApiAdapter
         # base_url = esquema + host; el path se pasa en fetch_all
         import httpx
         parsed = httpx.URL(source.url)
@@ -256,9 +251,6 @@ def _get_adapter(source: SourceConfig) -> Any:
             "base_url": base_url,
             "source_key": source.id,
             "default_path": path,
-            "timeout": source.timeout_seconds if source.timeout_seconds is not None else _DEFAULT_TIMEOUT,
-            "max_retries": source.max_retries if source.max_retries is not None else _MAX_RETRIES,
-            "max_concurrent_pages": source.max_concurrent_pages,
         }
         # page_size es opcional: cada fuente declara el limite real que su
         # API soporta (algunas aceptan 1000+, otras capan en 50). Sin
@@ -353,7 +345,7 @@ class _LocalFileAdapter:
             records_in_page=None,
         )
 
-    def fetch_all(self, url: str, **kwargs: Any) -> Iterator[RawContent]:
+    def fetch_all(self, url: str, **kwargs: Any):  # type: ignore[return]
         yield self.fetch(url)
 
 
@@ -432,7 +424,7 @@ _PII_FIELD_NAMES = {"cedula", "cédula", "identity_document", "documento_identid
                     "telefono", "teléfono", "phone", "mobile", "celular"}
 
 
-def _strip_raw_pii(d: dict[str, Any]) -> dict[str, Any]:
+def _strip_raw_pii(d: dict) -> dict:
     """Elimina campos PII crudos sin hashear (defensa en profundidad)."""
     return {k: v for k, v in d.items() if k.lower() not in _PII_FIELD_NAMES}
 
@@ -458,7 +450,7 @@ def _apply_pii(
     """
     pii_salt_available = bool(os.getenv("PII_SALT"))
 
-    result: list[dict[str, Any]] = []
+    result: list[dict] = []
     for entity in entities:
         try:
             d = entity.model_dump()
@@ -501,10 +493,7 @@ def _apply_pii(
     return result
 
 
-def _enrich_records(
-    records: list[dict[str, Any]],
-    errors: list[str],
-) -> list[dict[str, Any]]:
+def _enrich_records(records: list[dict], errors: list[str]) -> list[dict]:
     """
     Normalizacion post-dump y computo de ``deterministic_id``.
 
@@ -519,7 +508,7 @@ def _enrich_records(
         phonetic_hash as _compute_phonetic,
     )
 
-    enriched: list[dict[str, Any]] = []
+    enriched: list[dict] = []
     for rec in records:
         try:
             # Normalizar ubicacion si viene como string crudo sin objeto
@@ -555,12 +544,12 @@ def _enrich_records(
 
 
 def _apply_confidence(
-    records: list[dict[str, Any]],
+    records: list[dict],
     errors: list[str],
-) -> list[dict[str, Any]]:
+) -> list[dict]:
     """Calcula y escribe confidence_score en cada registro."""
     _MODEL_MAP = {"Person": Person, "AcopioCenter": AcopioCenter, "Event": Event}
-    result: list[dict[str, Any]] = []
+    result: list[dict] = []
     for rec in records:
         try:
             entity_type = rec.get("_entity_type", "Person")
@@ -577,7 +566,7 @@ def _apply_confidence(
 
 
 def _apply_minor_protection(
-    records: list[dict[str, Any]],
+    records: list[dict],
     errors: list[str],
     source: SourceConfig,
     quarantine_batch: list[QuarantineRecord],
@@ -587,7 +576,7 @@ def _apply_minor_protection(
     No afecta a Event/AcopioCenter (no tienen is_minor) ni a Person con
     is_minor en None/False — ver scrapers/sanitizers/minor_protection.py.
     """
-    result: list[dict[str, Any]] = []
+    result: list[dict] = []
     for rec in records:
         try:
             result.append(protect_minor_fields(rec))
@@ -716,7 +705,7 @@ def _run_source(
     fetched_ats = [str(p.get("fetched_at")) for p in pages if p.get("fetched_at")]
 
     # 4. Parse
-    entities, parse_errors = _parse_pages(parser, pages, limit, source, quarantine_batch)
+    entities, parse_errors = _parse_pages(parser, pages, limit)
     source_errors.extend(parse_errors)
     log.info("%s: %d entidades parseadas", source.id, len(entities))
     
@@ -765,8 +754,7 @@ def _process_source_safe(
     all_errors: list[str],
     event_id: str,
     exporter: StagingExporter,
-    
-) -> tuple[ExportResult, list[QuarantineRecord], bool]:
+) -> tuple[ExportResult,list[QuarantineRecord], bool]:
     """Ejecuta ``_run_source`` capturando cualquier excepcion fatal de la fuente.
 
     Aisla el manejo de errores fatales (try/except con log + acumulado en
@@ -777,11 +765,9 @@ def _process_source_safe(
     """
 
     quarantine_batch: list[QuarantineRecord] = []
-
-    quarantine_batch: list[QuarantineRecord] = []
     try:
         result = _run_source(source, limit, all_errors, event_id, exporter, quarantine_batch)
-        return result, quarantine_batch, True
+        return result,quarantine_batch, True
     except Exception as exc:
         msg = f"[{source.id}] Error fatal en fuente: {exc}"
         log.error(msg, exc_info=True)
@@ -799,7 +785,7 @@ def run_pipeline(
     output_dir: Path,
     limit: int | None = None,
     max_workers: int = 1,
-) -> dict[str, Any]:
+) -> dict:
     """
     Orquestador principal del pipeline.
 
@@ -876,7 +862,7 @@ def run_pipeline(
         if max_workers <= 1 or len(enabled) <= 1:
         
             for source in enabled:
-                result, thread_quarantine_batch, ok = _process_source_safe(source, limit, all_errors, event_id, exporter)
+                result,thread_quarantine_batch, ok = _process_source_safe(source, limit, all_errors, event_id, exporter)
                 staging_sent += result.sent
                 staging_duplicates += result.duplicates
                 staging_errors += len(result.errors)
@@ -892,7 +878,7 @@ def run_pipeline(
                     for source in enabled
                 ]
                 for future in as_completed(futures):
-                    result, thread_quarantine_batch, ok = future.result()
+                    result,thread_quarantine_batch, ok = future.result()
                     staging_sent += result.sent
                     staging_duplicates += result.duplicates
                     staging_errors += len(result.errors)
@@ -932,8 +918,6 @@ def run_pipeline(
     }
 
     log.info(
-        "Pipeline finalizado — fuentes=%d enviados=%d duplicados=%d cuarentena=%d errores=%d",
-        sources_processed, staging_sent, staging_duplicates, quarantined, len(all_errors),
         "Pipeline finalizado — fuentes=%d enviados=%d duplicados=%d cuarentena=%d errores=%d",
         sources_processed, staging_sent, staging_duplicates, quarantined, len(all_errors),
     )
