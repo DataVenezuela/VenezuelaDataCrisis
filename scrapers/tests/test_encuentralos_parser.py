@@ -436,7 +436,6 @@ class TestNota:
         fixture = _load_fixture()
         raw = _make_raw(fixture)
         p = _parser().parse(raw)[1]
-        
         assert p.nota == "[id:1002]"
 
 

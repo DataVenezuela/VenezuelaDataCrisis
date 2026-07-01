@@ -82,7 +82,7 @@ _STATUS_MAP: dict[str, str] = {
     "fallecida":     "deceased",
     "muerto":        "deceased",
     "muerta":        "deceased",
-    "sin_informacion": "unknown", 
+    "sin_informacion": "unknown",
 }
 
 
@@ -241,7 +241,6 @@ class EncuentralosParser:
         No lanza excepción — cualquier fallo de validación Pydantic se
         captura y loguea.
         """
-       
         rec_id = rec.get("id", "?")
 
         # ── full_name ─────────────────────────────────────────────────
@@ -304,7 +303,6 @@ class EncuentralosParser:
 
         # ── construir Person ──────────────────────────────────────────
         try:
-            
             return Person(
                 full_name=full_name,
                 event_id=self._event_id,
