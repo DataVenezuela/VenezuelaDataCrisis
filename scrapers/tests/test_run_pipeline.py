@@ -37,6 +37,10 @@ from scrapers.models import Person
 from scrapers.models.source import SourceConfig
 from scrapers.pipelines import run_pipeline as rp
 from scrapers.pipelines.run_pipeline import _get_adapter, run_pipeline
+from scrapers.exporters.quarantine_exporter import (
+   
+    QuarantineRecord,
+)
 
 # ---------------------------------------------------------------------------
 # Constantes y helpers
