@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from typing import Any
 from unittest.mock import patch
 
@@ -133,10 +134,10 @@ class TestPayload:
         _exporter(t).export_source([_person("Juan")], source_slug="demo", source_fetched_ats=["2026-06-24T15:00:00Z"])
         assert t.posts[0]["dedupVersion"] == "person-detid-v1"
 
-    def test_content_hash_has_sha256_prefix(self) -> None:
+    def test_content_hash_has_64_hexchars(self) -> None:
         t = _RecordingTransport()
         _exporter(t).export_source([_person("Juan")], source_slug="demo", source_fetched_ats=["2026-06-24T15:00:00Z"])
-        assert t.posts[0]["contentHash"].startswith("sha256:")
+        assert re.fullmatch(r"[0-9a-f]{64}", t.posts[0]["contentHash"])
 
     def test_dedup_hash_null_when_no_deterministic_id(self) -> None:
         t = _RecordingTransport()

@@ -83,7 +83,7 @@ def test_fetch_returns_rendered_html_as_raw_content() -> None:
     assert result["raw_content"] == "<html><body>Hola Caracas</body></html>"
     assert result["page"] is None
     assert result["total_pages"] is None
-    assert re.fullmatch(r"sha256:[0-9a-f]{64}", result["content_hash"])
+    assert re.fullmatch(r"[0-9a-f]{64}", result["content_hash"])
     assert page.closed is True
 
 

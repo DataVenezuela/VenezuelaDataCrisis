@@ -247,6 +247,7 @@ repomix-output.md
 .repomix/
 
 # AI assistant instruction files
+.agents
 CLAUDE.md
 CODEX.md
 GEMINI.md
