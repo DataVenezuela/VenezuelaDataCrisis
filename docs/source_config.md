@@ -34,6 +34,7 @@ sources:
     refresh_minutes: 30
     max_concurrent_pages: 4  # opcional; solo aplica si la primera pagina reporta total
     max_concurrent_posts: 8  # opcional; POSTs paralelos al staging API (default: 1)
+    probe_limit: 1000        # opcional; tamaño de la primera request para descubrir el límite real del API
     # pagination:               # NO IMPLEMENTADO — ver advertencia arriba
     #   path: /api/personas
     #   limit_param: limit
@@ -66,6 +67,7 @@ sources:
 | `refresh_minutes` | no | Frecuencia mínima de scraping. Default: 60 |
 | `max_concurrent_pages` | no | Máximo de páginas API en vuelo cuando la primera respuesta reporta `total`, `count`, `total_count` o `totalCount`. Si se omite, `api_adapter.py` usa un default conservador. Sin total confiable, el adapter conserva paginación secuencial. |
 | `max_concurrent_posts` | no | Máximo de POSTs en paralelo al staging API durante `export_source()`. Default: `1` (comportamiento secuencial original). Útil para fuentes con muchos registros donde la latencia de red domina. |
+| `probe_limit` | no | Entero positivo: tamaño de la primera request de paginación, usado para descubrir el límite real que soporta el API. Si el API devuelve ≥ `probe_limit` registros, ese valor se adopta como `page_size` efectivo; si devuelve menos y hay más datos, el cap detectado queda en los logs. La primera página se reutiliza como datos reales (sin requests extra). Sin este campo, `api_adapter.py` usa el `page_size` configurado o su default interno. Solo aplica a fuentes `api_json`. |
 | `allowed_domains` | no | Lista de hosts **exactos** permitidos para `url`. Si se define y el host de la URL no está en la lista, la fuente se omite **sin hacer ningún request** y el error queda visible en el summary. Match exacto, case-insensitive — no acepta subdominios. |
 | `rate_limit_per_minute` | no | Entero positivo: máximo de requests por ventana deslizante de 60s. Solo lo aplica `api_json` (es el único adapter que pagina dentro de una corrida); los demás fetchean una vez por corrida y su frecuencia la gobierna `refresh_minutes`. |
 
@@ -112,6 +114,7 @@ Cuando lleguen registros de una fuente sin parser registrado, el pipeline los en
 - La URL no debe contener credenciales, tokens o secretos
 - Si `allowed_domains` está presente, el host de `url` debe coincidir exactamente con uno de sus valores
 - Si `rate_limit_per_minute` está presente, debe ser un entero positivo
+- Si `probe_limit` está presente, debe ser un entero positivo; solo tiene efecto en fuentes `api_json`
 - Si la fuente no es pública, su uso debe revisarse antes de agregarse (ver `scrapers/security/SOURCE_POLICY.md`)
 - El `id` debe ser único en el archivo
 - `trust_tier` = letra, nunca entero en el YAML
