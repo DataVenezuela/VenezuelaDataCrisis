@@ -257,6 +257,12 @@ def _get_adapter(source: SourceConfig) -> Any:
         # override, ApiAdapter usa su propio default (_DEFAULT_PAGE_SIZE).
         if source.page_size is not None:
             adapter_kwargs["page_size"] = source.page_size
+        if source.timeout_seconds is not None:
+            adapter_kwargs["timeout"] = source.timeout_seconds
+        if source.max_retries is not None:
+            adapter_kwargs["max_retries"] = source.max_retries
+        if source.max_concurrent_pages is not None:
+            adapter_kwargs["max_concurrent_pages"] = source.max_concurrent_pages
         adapter = ApiAdapter(**adapter_kwargs)
         return adapter
 
@@ -353,7 +359,7 @@ class _LocalFileAdapter:
 # Etapas del pipeline
 # ---------------------------------------------------------------------------
 
-def _fetch_pages(adapter: Any, source: SourceConfig, updated_after: str) -> list[RawContent]:
+def _fetch_pages(adapter: Any, source: SourceConfig, updated_after: str, limit: int | None = None) -> list[RawContent]:
     """Llama a fetch_all del adapter y recopila todas las paginas.
 
     ``updated_after`` es el watermark actual de la fuente; se pasa como query
@@ -364,14 +370,15 @@ def _fetch_pages(adapter: Any, source: SourceConfig, updated_after: str) -> list
     url = source.url
     pages: list[RawContent] = []
     params = {"updated_after": updated_after}
+    kwargs = {"limit": limit} if limit is not None else {}
 
     # ApiAdapter expone default_path separado de base_url
     if hasattr(adapter, "default_path") and adapter.default_path:
         path = adapter.default_path
-        for page in adapter.fetch_all(path, params=params):
+        for page in adapter.fetch_all(path, params=params, **kwargs):
             pages.append(page)
     else:
-        for page in adapter.fetch_all(url, params=params):
+        for page in adapter.fetch_all(url, params=params, **kwargs):
             pages.append(page)
 
     return pages
@@ -582,7 +589,7 @@ def _apply_minor_protection(
             result.append(protect_minor_fields(rec))
         except Exception as exc:
             log.error("Error en proteccion de menores: %s", exc)
-            errors.append(f"Error en proteccion de menores: {exc}")
+            errors.append(f"Error en proteccion de menores (registro omitido): {exc}")
             # Fail-closed para STAGING: el registro sin redactar NO se exporta.
             # Pero NO se descarta: va a cuarentena con riesgo alto para redaccion
             # manual (review_status 'needs_manual_redaction' en el backend). El
@@ -705,12 +712,12 @@ def _run_source(
     fetched_ats = [str(p.get("fetched_at")) for p in pages if p.get("fetched_at")]
 
     # 4. Parse
-    entities, parse_errors = _parse_pages(parser, pages, limit)
+    entities, parse_errors = _parse_pages(parser, pages, limit, source, quarantine_batch)
     source_errors.extend(parse_errors)
     log.info("%s: %d entidades parseadas", source.id, len(entities))
     
     if len(entities) ==  0 and len(pages) > 0: 
-        log.warn("%s: No se parsearon entidades de %d paginas descargadas", source.id, len(pages))
+        log.warning("%s: No se parsearon entidades de %d paginas descargadas", source.id, len(pages))
 
     if not entities:
         all_errors.extend([f"[{source.id}] {e}" for e in source_errors])
@@ -874,7 +881,7 @@ def run_pipeline(
         else:
             with ThreadPoolExecutor(max_workers=max_workers) as pool:
                 futures = [
-                    pool.submit(_process_source_safe, source, limit, all_errors, event_id, exporter, quarantine_batch)
+                    pool.submit(_process_source_safe, source, limit, all_errors, event_id, exporter)
                     for source in enabled
                 ]
                 for future in as_completed(futures):
