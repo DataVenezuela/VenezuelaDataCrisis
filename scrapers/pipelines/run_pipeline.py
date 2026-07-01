@@ -161,63 +161,6 @@ def _quarantine_from_text(
     )
 
 
-# ---------------------------------------------------------------------------
-# Cuarentena: construccion de registros no procesables
-# ---------------------------------------------------------------------------
-# Principio inamovible (Issue #88): NINGUN registro se descarta en silencio. En
-# una crisis donde cada registro puede ser una vida, todo lo que hoy se perderia
-# (parser ausente, error de parseo, PII no redactable, fail-closed de menores)
-# va a la Quarantine DB para que pase por ojo humano. El preview se manda SIEMPRE
-# redactado; pii_findings_summary lleva conteos por tipo, nunca valores en claro.
-
-def _to_text(value: object) -> str:
-    """Coacciona el contenido crudo (str | dict | list) a texto para preview/hash."""
-    if isinstance(value, str):
-        return value
-    try:
-        return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
-    except Exception:
-        return str(value)
-
-
-def _pii_summary(text: str) -> dict[str, object] | None:
-    """Resumen de hallazgos PII como conteos por tipo. Sin valores en claro.
-
-    Devuelve None si no hay hallazgos (la columna jsonb queda null).
-    """
-    summary: dict[str, int] = {}
-    for finding in detect_pii(text):
-        kind = str(finding.get("kind", "unknown"))
-        summary[kind] = summary.get(kind, 0) + 1
-    return dict(summary) if summary else None
-
-
-def _quarantine_from_text(
-    *,
-    source: SourceConfig,
-    text: str,
-    reason_code: str,
-    risk_level: str,
-    detail: str,
-    source_url: str | None = None,
-) -> QuarantineRecord:
-    """Arma un QuarantineRecord desde contenido crudo o serializado.
-
-    ``payload_hash`` se calcula sobre el texto ORIGINAL (permite verificar el
-    payload exacto aun tras destruirlo). ``payload_preview_redacted`` se redacta
-    con ``redact_pii`` para no filtrar PII en claro al revisor.
-    """
-    return QuarantineRecord(
-        source_slug=source.id,
-        reason_code=reason_code,
-        risk_level=risk_level,
-        source_url=source_url or source.url,
-        reason_detail=detail,
-        payload_preview_redacted=redact_pii(text),
-        payload_hash=quarantine_payload_hash(text),
-        pii_findings_summary=_pii_summary(text),
-    )
-
 
 # ---------------------------------------------------------------------------
 # Registry: adapters y parsers
@@ -240,8 +183,11 @@ def _get_adapter(source: SourceConfig) -> Any:
     stype = source.type
 
     if stype == "api_json":
+        from scrapers.adapters._shared import RateLimiter
         from scrapers.adapters.api_adapter import (
             ApiAdapter,
+            _DEFAULT_TIMEOUT,
+            _MAX_RETRIES,
         )
         # base_url = esquema + host; el path se pasa en fetch_all
         import httpx
@@ -254,18 +200,19 @@ def _get_adapter(source: SourceConfig) -> Any:
             "base_url": base_url,
             "source_key": source.id,
             "default_path": path,
+            "timeout": source.timeout_seconds if source.timeout_seconds is not None else _DEFAULT_TIMEOUT,
+            "max_retries": source.max_retries if source.max_retries is not None else _MAX_RETRIES,
+            "max_concurrent_pages": source.max_concurrent_pages,
         }
         # page_size es opcional: cada fuente declara el limite real que su
         # API soporta (algunas aceptan 1000+, otras capan en 50). Sin
         # override, ApiAdapter usa su propio default (_DEFAULT_PAGE_SIZE).
         if source.page_size is not None:
             adapter_kwargs["page_size"] = source.page_size
-        if source.timeout_seconds is not None:
-            adapter_kwargs["timeout"] = source.timeout_seconds
-        if source.max_retries is not None:
-            adapter_kwargs["max_retries"] = source.max_retries
-        if source.max_concurrent_pages is not None:
-            adapter_kwargs["max_concurrent_pages"] = source.max_concurrent_pages
+        # ApiAdapter es el unico que hace multiples requests por corrida
+        # (paginacion), asi que es el unico que aplica rate_limit_per_minute.
+        if source.rate_limit_per_minute is not None:
+            adapter_kwargs["rate_limiter"] = RateLimiter(source.rate_limit_per_minute)
         adapter = ApiAdapter(**adapter_kwargs)
         return adapter
 
@@ -861,7 +808,6 @@ def run_pipeline(
     -------
     dict con keys: sources_processed, staging_sent, staging_duplicates,
                    staging_errors, quarantined, quarantine_errors, errors.
-                   staging_errors, quarantined, quarantine_errors, errors.
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -911,14 +857,12 @@ def run_pipeline(
         
             for source in enabled:
                 result,thread_quarantine_batch, ok = _process_source_safe(source, limit, all_errors, event_id, exporter)
+                thread_quarantine_batch = thread_quarantine_batch or []
                 staging_sent += result.sent
                 staging_duplicates += result.duplicates
                 staging_errors += len(result.errors)
                 sources_processed += int(ok)
-                if(len(quarantine_batch) > 0):
-                    quarantine_batch.extend(thread_quarantine_batch)
-                else:
-                    quarantine_batch = thread_quarantine_batch
+                quarantine_batch.extend(thread_quarantine_batch)
         else:
             with ThreadPoolExecutor(max_workers=max_workers) as pool:
                 futures = [
@@ -927,14 +871,12 @@ def run_pipeline(
                 ]
                 for future in as_completed(futures):
                     result,thread_quarantine_batch, ok = future.result()
+                    thread_quarantine_batch = thread_quarantine_batch or []
                     staging_sent += result.sent
                     staging_duplicates += result.duplicates
                     staging_errors += len(result.errors)
                     sources_processed += int(ok)
-                    if(len(quarantine_batch) > 0):
-                        quarantine_batch.extend(thread_quarantine_batch)
-                    else:
-                        quarantine_batch = thread_quarantine_batch
+                    quarantine_batch.extend(thread_quarantine_batch)
     
      
     finally:
@@ -943,7 +885,7 @@ def run_pipeline(
             quarantined += qres.sent
             quarantine_errors += len(qres.errors)
             all_errors.extend(
-                f"[{source.id}] cuarentena: {e}" for e in qres.errors
+                f"cuarentena: {e}" for e in qres.errors
             )
             log.info(
                 "%s: %d a cuarentena (%d duplicados, %d errores)",
