@@ -5,8 +5,10 @@ Tests del StagingExporter, 100% offline.
 
 Ningun test hace red real: el httpx.Client se construye con un
 ``_RecordingTransport`` (subclase de httpx.BaseTransport) inyectado via el
-parametro ``client`` del constructor. El transport responde a /api/aportes y
-a /api/source-watermarks/{slug} y registra los bodies para los asserts.
+parametro ``client`` del constructor. El transport responde a
+POST /rest/v1/aportes (upsert masivo, body = array JSON) y a
+GET/POST /rest/v1/source_watermarks (lectura/escritura del watermark via
+PostgREST) y registra los bodies para los asserts.
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ from scrapers.exporters.staging_exporter import (
     StagingConfig,
     StagingExporter,
     _apply_safety_margin,
+    _BATCH_SIZE,
     compute_external_id,
 )
 
@@ -32,34 +35,47 @@ _EVENT_ID = "8f14e45f-ceea-467e-bd5d-0a4f2e0c1a3a"
 
 
 class _RecordingTransport(httpx.BaseTransport):
-    """Captura POSTs a /api/aportes y PUTs a /api/source-watermarks/{slug}."""
+    """Captura upserts a /rest/v1/aportes y lecturas/escrituras de watermark.
+
+    ``posts`` queda aplanado (un item por record, en el orden en que llegaron
+    los batches) para que los tests de payload/idempotencia/block-keys que
+    solo mandan 1 record no tengan que lidiar con la estructura de batch.
+    ``batches`` conserva la agrupacion real (una lista por request de POST).
+    """
 
     def __init__(self, aportes_status: int = 201, watermark_status: int = 200) -> None:
         self.aportes_status = aportes_status
         self.watermark_status = watermark_status
         self.posts: list[dict[str, Any]] = []
-        # source_slug se infiere del path (no va en el body del PUT real).
+        self.batches: list[list[dict[str, Any]]] = []
+        # source_slug se infiere del body del POST (columna "slug").
         self.watermark_puts: list[dict[str, Any]] = []
         self.watermark_gets: list[str] = []
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
-        if path == "/api/aportes":
-            self.posts.append(json.loads(request.content))
+        if path == "/rest/v1/aportes":
+            batch = json.loads(request.content)
+            self.batches.append(batch)
+            self.posts.extend(batch)
             return httpx.Response(self.aportes_status, json={"ok": True})
-        if path.startswith("/api/source-watermarks/"):
-            slug = path.rsplit("/", 1)[-1]
+        if path == "/rest/v1/source_watermarks":
             if request.method == "GET":
-                self.watermark_gets.append(path)
-                return httpx.Response(404)
+                slug = request.url.params.get("slug", "")
+                self.watermark_gets.append(slug.removeprefix("eq."))
+                return httpx.Response(200, json=[])
             body = json.loads(request.content)
-            self.watermark_puts.append({"source_slug": slug, **body})
+            self.watermark_puts.append(
+                {"source_slug": body.get("slug"), "watermarkAt": body.get("watermark_at")}
+            )
             return httpx.Response(self.watermark_status, json={"ok": True})
         return httpx.Response(404)
 
 
 def _exporter(transport: httpx.BaseTransport) -> StagingExporter:
-    cfg = StagingConfig(api_key="k", base_url="https://staging.test")
+    cfg = StagingConfig(
+        supabase_url="https://staging.test", supabase_service_role_key="k"
+    )
     client = httpx.Client(base_url="https://staging.test", transport=transport)
     return StagingExporter(cfg, client=client, run_id="run-1")
 
@@ -105,75 +121,75 @@ class TestPayload:
         t = _RecordingTransport()
         _exporter(t).export_source([_person("Juan")], source_slug="demo", source_fetched_ats=["2026-06-24T15:00:00Z"])
         body = t.posts[0]
-        # Claves siempre presentes (no pueden ser None).
         always_present = {
-            "runId", "entityType", "externalId", "dedupVersion",
-            "blockKeys", "contentHash", "sourceSlug", "rawJson",
+            "run_id", "entity_type", "external_id", "dedup_version",
+            "block_keys", "content_hash", "source_slug", "raw_json",
         }
         assert always_present.issubset(body.keys())
-        # Claves opcionales: ausentes (omitidas) cuando None, no enviadas como null.
-        optional_when_none = {"dedupHash", "sourceRecordId", "sourceUrl", "parserVersion", "normalizerVersion"}
-        for key in optional_when_none:
-            assert body.get(key) is not None or key not in body, f"{key} no debe ser null en el payload"
+
+    def test_optional_keys_present_as_null_not_omitted(self) -> None:
+        """A diferencia del contrato Zod anterior, PostgREST exige que todas
+        las filas de un mismo batch tengan las mismas keys: los opcionales se
+        mandan siempre presentes, con null cuando faltan."""
+        t = _RecordingTransport()
+        _exporter(t).export_source(
+            [_person("Juan", det=None)], source_slug="demo", source_fetched_ats=["2026-06-24T15:00:00Z"]
+        )
+        body = t.posts[0]
+        for key in ("dedup_hash", "source_record_id", "source_url", "parser_version", "normalizer_version"):
+            assert key in body
 
     def test_data_strips_internal_keys(self) -> None:
         t = _RecordingTransport()
         _exporter(t).export_source([_person("Juan")], source_slug="demo", source_fetched_ats=["2026-06-24T15:00:00Z"])
-        data = t.posts[0]["rawJson"]
+        data = t.posts[0]["raw_json"]
         assert all(not k.startswith("_") for k in data)
         assert "full_name" in data
 
     def test_entity_type_is_slug(self) -> None:
         t = _RecordingTransport()
         _exporter(t).export_source([_person("Juan")], source_slug="demo", source_fetched_ats=["2026-06-24T15:00:00Z"])
-        assert t.posts[0]["entityType"] == "person"
+        assert t.posts[0]["entity_type"] == "person"
 
     def test_run_id_propagated(self) -> None:
         t = _RecordingTransport()
         _exporter(t).export_source([_person("Juan")], source_slug="demo", source_fetched_ats=["2026-06-24T15:00:00Z"])
-        assert t.posts[0]["runId"] == "run-1"
+        assert t.posts[0]["run_id"] == "run-1"
 
     def test_dedup_version_person(self) -> None:
         t = _RecordingTransport()
         _exporter(t).export_source([_person("Juan")], source_slug="demo", source_fetched_ats=["2026-06-24T15:00:00Z"])
-        assert t.posts[0]["dedupVersion"] == "person-detid-v1"
+        assert t.posts[0]["dedup_version"] == "person-detid-v1"
 
     def test_content_hash_has_64_hexchars(self) -> None:
         t = _RecordingTransport()
         _exporter(t).export_source([_person("Juan")], source_slug="demo", source_fetched_ats=["2026-06-24T15:00:00Z"])
-        assert re.fullmatch(r"[0-9a-f]{64}", t.posts[0]["contentHash"])
+        assert re.fullmatch(r"[0-9a-f]{64}", t.posts[0]["content_hash"])
 
-    def test_dedup_hash_absent_when_no_deterministic_id(self) -> None:
+    def test_dedup_hash_null_when_no_deterministic_id(self) -> None:
         t = _RecordingTransport()
         _exporter(t).export_source(
             [_person("Juan", det=None)], source_slug="demo", source_fetched_ats=["2026-06-24T15:00:00Z"]
         )
-        # Zod optional() acepta undefined (ausente) pero NO null; omitir la clave.
-        assert "dedupHash" not in t.posts[0]
+        assert t.posts[0]["dedup_hash"] is None
 
     def test_entity_type_acopio_uses_acopio_slug(self) -> None:
         # Verifica que AcopioCenter mapea a "acopio" (no "acopio_center")
-        # porque el Zod schema de dataVenezuela espera "event"|"acopio"|"person"
         t = _RecordingTransport()
         _exporter(t).export_source([_acopio()], source_slug="demo", source_fetched_ats=["2026-06-24T15:00:00Z"])
-        assert t.posts[0]["entityType"] == "acopio"
+        assert t.posts[0]["entity_type"] == "acopio"
 
 
 # --- fingerprint compartido Event/AcopioCenter (eficiencia, issue #125) ------
 
 class TestSharedFingerprint:
-    """Event/AcopioCenter: external_id y dedup_hash derivan del mismo fingerprint.
-
-    El fingerprint se calcula una sola vez en _build_payload; estos tests
-    verifican que los valores resultantes no cambian (siguen siendo el
-    fingerprint v1) y que ambas keys coinciden entre si.
-    """
+    """Event/AcopioCenter: external_id y dedup_hash derivan del mismo fingerprint."""
 
     def test_event_external_id_equals_dedup_hash(self) -> None:
         t = _RecordingTransport()
         _exporter(t).export_source([_event()], source_slug="demo", source_fetched_ats=["2026-06-24T15:00:00Z"])
         body = t.posts[0]
-        assert body["externalId"] == body["dedupHash"]
+        assert body["external_id"] == body["dedup_hash"]
 
     def test_event_external_id_is_fingerprint_v1(self) -> None:
         rec = _event()
@@ -181,14 +197,14 @@ class TestSharedFingerprint:
         _exporter(t).export_source([rec], source_slug="demo", source_fetched_ats=["2026-06-24T15:00:00Z"])
         body = t.posts[0]
         expected = specs.event_dedup_key(rec)
-        assert body["externalId"] == expected
-        assert body["dedupHash"] == expected
+        assert body["external_id"] == expected
+        assert body["dedup_hash"] == expected
 
     def test_acopio_external_id_equals_dedup_hash(self) -> None:
         t = _RecordingTransport()
         _exporter(t).export_source([_acopio()], source_slug="demo", source_fetched_ats=["2026-06-24T15:00:00Z"])
         body = t.posts[0]
-        assert body["externalId"] == body["dedupHash"]
+        assert body["external_id"] == body["dedup_hash"]
 
     def test_acopio_external_id_is_fingerprint_v1(self) -> None:
         rec = _acopio()
@@ -196,8 +212,8 @@ class TestSharedFingerprint:
         _exporter(t).export_source([rec], source_slug="demo", source_fetched_ats=["2026-06-24T15:00:00Z"])
         body = t.posts[0]
         expected = specs.acopio_dedup_key(rec)
-        assert body["externalId"] == expected
-        assert body["dedupHash"] == expected
+        assert body["external_id"] == expected
+        assert body["dedup_hash"] == expected
 
     def test_values_match_legacy_separate_computation(self) -> None:
         """Equivalencia exacta con el computo separado previo (sin cambios)."""
@@ -206,8 +222,8 @@ class TestSharedFingerprint:
             t = _RecordingTransport()
             _exporter(t).export_source([rec], source_slug="demo", source_fetched_ats=["2026-06-24T15:00:00Z"])
             body = t.posts[0]
-            assert body["externalId"] == compute_external_id(rec, entity_type)
-            assert body["dedupHash"] == specs.dedup_key(rec, entity_type)
+            assert body["external_id"] == compute_external_id(rec, entity_type)
+            assert body["dedup_hash"] == specs.dedup_key(rec, entity_type)
 
 
 # --- idempotencia -----------------------------------------------------------
@@ -217,7 +233,7 @@ class TestIdempotency:
         t1, t2 = _RecordingTransport(), _RecordingTransport()
         _exporter(t1).export_source([_person("Juan")], source_slug="demo", source_fetched_ats=["2026-06-24T15:00:00Z"])
         _exporter(t2).export_source([_person("Juan")], source_slug="demo", source_fetched_ats=["2026-06-24T15:00:00Z"])
-        assert t1.posts[0]["externalId"] == t2.posts[0]["externalId"]
+        assert t1.posts[0]["external_id"] == t2.posts[0]["external_id"]
 
     def test_person_external_id_is_deterministic_id(self) -> None:
         rec = _person("Juan", det="abc999")
@@ -227,7 +243,6 @@ class TestIdempotency:
         rec = _person("Juan", hmac="hmac-1", det=None)
         eid = compute_external_id(rec, "Person")
         assert eid and len(eid) == 64  # sha256 hex
-        # estable
         assert compute_external_id(_person("Juan", hmac="hmac-1", det=None), "Person") == eid
 
     def test_person_external_id_fallback_distinguishes_records(self) -> None:
@@ -242,13 +257,13 @@ class TestBlockKeys:
     def test_person_with_hmac_has_ced_block_key(self) -> None:
         t = _RecordingTransport()
         _exporter(t).export_source([_person("Juan", hmac="abc")], source_slug="demo", source_fetched_ats=["2026-06-24T15:00:00Z"])
-        keys = t.posts[0]["blockKeys"]
+        keys = t.posts[0]["block_keys"]
         assert any(k.startswith(f"ced:{_EVENT_ID}:abc") for k in keys)
 
     def test_person_without_hmac_only_phonetic_block_key(self) -> None:
         t = _RecordingTransport()
         _exporter(t).export_source([_person("Juan")], source_slug="demo", source_fetched_ats=["2026-06-24T15:00:00Z"])
-        keys = t.posts[0]["blockKeys"]
+        keys = t.posts[0]["block_keys"]
         assert all(not k.startswith("ced:") for k in keys)
         assert any(k.startswith("phon:") for k in keys)
 
@@ -263,7 +278,6 @@ class TestWatermark:
             source_slug="demo", source_fetched_ats=["2026-06-24T15:00:00Z", "2026-06-24T16:00:00Z"],
         )
         assert t.watermark_puts
-        # max(fetched_ats) menos el margen de seguridad de 5 minutos.
         assert t.watermark_puts[-1]["watermarkAt"] == "2026-06-24T15:55:00Z"
         assert t.watermark_puts[-1]["source_slug"] == "demo"
 
@@ -282,9 +296,6 @@ class TestWatermark:
         assert t.watermark_puts == []
 
     def test_watermark_advance_is_monotonic_across_runs(self) -> None:
-        """El margen resta una constante: una secuencia de fetched_at creciente
-        (como en corridas reales sucesivas) sigue produciendo watermarks
-        crecientes, nunca retrocede."""
         t = _RecordingTransport(aportes_status=201)
         exp = _exporter(t)
         exp.export_source(
@@ -298,28 +309,28 @@ class TestWatermark:
             "2026-06-24T15:56:00Z",
         ]
 
-    def test_put_targets_slug_path_with_camelcase_body(self) -> None:
-        """Contrato real de dataVenezuela: PUT /api/source-watermarks/{slug}
-        con body {"watermarkAt": ...} (sin source_slug en el body, va en la URL).
-        """
+    def test_post_targets_watermarks_table_with_snake_case_body(self) -> None:
+        """Contrato PostgREST: POST /rest/v1/source_watermarks con body
+        {"slug": ..., "watermark_at": ...} y Prefer: resolution=merge-duplicates."""
         captured: dict[str, Any] = {}
 
         class _Transport(httpx.BaseTransport):
             def handle_request(self, request: httpx.Request) -> httpx.Response:
-                if request.url.path == "/api/aportes":
+                if request.url.path == "/rest/v1/aportes":
                     return httpx.Response(201, json={"ok": True})
-                if request.method == "PUT":
+                if request.method == "POST" and request.url.path == "/rest/v1/source_watermarks":
                     captured["path"] = request.url.path
                     captured["body"] = json.loads(request.content)
+                    captured["prefer"] = request.headers.get("prefer")
                     return httpx.Response(200, json={"ok": True})
                 return httpx.Response(404)
 
         _exporter(_Transport()).export_source(
             [_person("Juan")], source_slug="fuente-x", source_fetched_ats=["2026-06-24T16:00:00Z"]
         )
-        assert captured["path"] == "/api/source-watermarks/fuente-x"
-        # max(fetched_ats) menos el margen de seguridad de 5 minutos.
-        assert captured["body"] == {"watermarkAt": "2026-06-24T15:55:00Z"}
+        assert captured["path"] == "/rest/v1/source_watermarks"
+        assert captured["body"] == {"slug": "fuente-x", "watermark_at": "2026-06-24T15:55:00Z"}
+        assert "resolution=merge-duplicates" in captured["prefer"]
 
     def test_watermark_is_per_source_slug(self) -> None:
         """Dos fuentes en la misma corrida avanzan watermarks independientes."""
@@ -354,15 +365,19 @@ class TestSafetyMargin:
 # --- get_watermark (lectura previa al fetch) ---------------------------------
 
 class TestGetWatermark:
-    def test_returns_default_on_404(self) -> None:
+    def test_returns_default_when_no_row_matches(self) -> None:
+        """PostgREST responde 200 con lista vacia cuando el filtro no matchea
+        ninguna fila (a diferencia del 404 de la vieja API de dataVenezuela)."""
         t = _RecordingTransport()
         assert _exporter(t).get_watermark("fuente-nueva") == "1970-01-01T00:00:00Z"
+        assert t.watermark_gets == ["fuente-nueva"]
 
     def test_returns_persisted_value(self) -> None:
         class _Transport(httpx.BaseTransport):
             def handle_request(self, request: httpx.Request) -> httpx.Response:
-                if request.url.path == "/api/source-watermarks/fuente-a":
-                    return httpx.Response(200, json={"watermarkAt": "2026-06-20T00:00:00Z"})
+                if request.url.path == "/rest/v1/source_watermarks":
+                    assert request.url.params.get("slug") == "eq.fuente-a"
+                    return httpx.Response(200, json=[{"watermark_at": "2026-06-20T00:00:00Z"}])
                 return httpx.Response(404)
 
         assert _exporter(_Transport()).get_watermark("fuente-a") == "2026-06-20T00:00:00Z"
@@ -386,11 +401,11 @@ class TestGetWatermark:
 
         assert _exporter(_Transport()).get_watermark("fuente-a") == "1970-01-01T00:00:00Z"
 
-    def test_returns_default_on_non_dict_json_body(self) -> None:
-        """200 con JSON valido pero no-dict (ej. lista) tampoco debe propagar."""
+    def test_returns_default_on_non_list_json_body(self) -> None:
+        """200 con JSON valido pero no-lista (ej. dict de error) tampoco debe propagar."""
         class _Transport(httpx.BaseTransport):
             def handle_request(self, request: httpx.Request) -> httpx.Response:
-                return httpx.Response(200, json=["watermarkAt", "2026-06-20T00:00:00Z"])
+                return httpx.Response(200, json={"watermark_at": "2026-06-20T00:00:00Z"})
 
         assert _exporter(_Transport()).get_watermark("fuente-a") == "1970-01-01T00:00:00Z"
 
@@ -398,13 +413,15 @@ class TestGetWatermark:
 # --- auth ---------------------------------------------------------------
 
 class TestAuth:
-    def test_uses_x_api_key_header(self) -> None:
-        """Contrato real de dataVenezuela: auth via x-api-key, no Bearer."""
-        cfg = StagingConfig(api_key="secret-key", base_url="https://staging.test")
+    def test_uses_apikey_and_bearer_headers(self) -> None:
+        """Contrato Supabase/PostgREST: apikey + Authorization: Bearer con la
+        service_role key, no x-api-key."""
+        cfg = StagingConfig(supabase_url="https://staging.test", supabase_service_role_key="secret-key")
         exp = StagingExporter(cfg, run_id="run-1")
         assert exp._client is not None
-        assert exp._client.headers["x-api-key"] == "secret-key"
-        assert "authorization" not in exp._client.headers
+        assert exp._client.headers["apikey"] == "secret-key"
+        assert exp._client.headers["authorization"] == "Bearer secret-key"
+        assert "x-api-key" not in exp._client.headers
         exp.close()
 
 
@@ -416,10 +433,11 @@ class TestResponseClassification:
         res = _exporter(t).export_source([_person("Juan")], source_slug="demo", source_fetched_ats=["2026-06-24T15:00:00Z"])
         assert res.sent == 1 and res.duplicates == 0 and res.errors == []
 
-    def test_409_counts_as_duplicate(self) -> None:
-        t = _RecordingTransport(aportes_status=409)
+    def test_204_counts_as_sent(self) -> None:
+        """return=minimal tipicamente responde 201; 204 tambien se acepta."""
+        t = _RecordingTransport(aportes_status=204)
         res = _exporter(t).export_source([_person("Juan")], source_slug="demo", source_fetched_ats=["2026-06-24T15:00:00Z"])
-        assert res.duplicates == 1 and res.sent == 0
+        assert res.sent == 1 and res.errors == []
 
     def test_500_counts_as_error_without_raising(self) -> None:
         t = _RecordingTransport(aportes_status=500)
@@ -430,7 +448,7 @@ class TestResponseClassification:
 # --- retry del POST ---------------------------------------------------------
 
 class _FlakyTransport(httpx.BaseTransport):
-    """Devuelve los status de ``aportes_sequence`` en orden para /api/aportes."""
+    """Devuelve los status de ``aportes_sequence`` en orden para /rest/v1/aportes."""
 
     def __init__(self, aportes_sequence: list[int]) -> None:
         self.aportes_sequence = aportes_sequence
@@ -439,14 +457,14 @@ class _FlakyTransport(httpx.BaseTransport):
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
-        if path == "/api/aportes":
+        if path == "/rest/v1/aportes":
             idx = min(self.attempts, len(self.aportes_sequence) - 1)
             status = self.aportes_sequence[idx]
             self.attempts += 1
             return httpx.Response(status, json={"ok": True})
-        if path.startswith("/api/source-watermarks/"):
+        if path == "/rest/v1/source_watermarks":
             if request.method == "GET":
-                return httpx.Response(404)
+                return httpx.Response(200, json=[])
             self.watermark_puts.append(json.loads(request.content))
             return httpx.Response(200, json={"ok": True})
         return httpx.Response(404)
@@ -455,7 +473,7 @@ class _FlakyTransport(httpx.BaseTransport):
 class TestPostRetry:
     def test_503_then_200_ends_as_sent(self) -> None:
         t = _FlakyTransport([503, 200])
-        cfg = StagingConfig(api_key="k", base_url="https://staging.test")
+        cfg = StagingConfig(supabase_url="https://staging.test", supabase_service_role_key="k")
         client = httpx.Client(base_url="https://staging.test", transport=t)
         exp = StagingExporter(cfg, client=client, run_id="run-1")
         with patch("scrapers.exporters.staging_exporter.time.sleep", lambda *_: None):
@@ -468,7 +486,7 @@ class TestPostRetry:
 
     def test_persistent_503_ends_as_error(self) -> None:
         t = _FlakyTransport([503])
-        cfg = StagingConfig(api_key="k", base_url="https://staging.test")
+        cfg = StagingConfig(supabase_url="https://staging.test", supabase_service_role_key="k")
         client = httpx.Client(base_url="https://staging.test", transport=t)
         exp = StagingExporter(cfg, client=client, run_id="run-1")
         with patch("scrapers.exporters.staging_exporter.time.sleep", lambda *_: None):
@@ -490,7 +508,6 @@ class TestSourceErrorsWatermark:
             source_slug="demo", source_fetched_ats=["2026-06-24T16:00:00Z"],
             source_errors=["menor descartado por proteccion fail-closed"],
         )
-        # El POST fue exitoso, pero el watermark NO avanza por source_errors.
         assert res.sent == 1
         assert t.watermark_puts == []
 
@@ -505,11 +522,30 @@ class TestSourceErrorsWatermark:
         assert t.watermark_puts[-1]["watermarkAt"] == "2026-06-24T15:55:00Z"
 
 
-# --- paralelismo de POSTs ---------------------------------------------------
+# --- batching y paralelismo --------------------------------------------------
 
-class TestConcurrentPosts:
+class TestBatching:
+    def test_records_chunked_into_batches_of_default_size(self) -> None:
+        n = _BATCH_SIZE * 2 + 7
+        records = [_person(f"P{i}", det=f"det{i}") for i in range(n)]
+        t = _RecordingTransport(aportes_status=201)
+        res = _exporter(t).export_source(
+            records, source_slug="demo", source_fetched_ats=["2026-06-24T15:00:00Z"]
+        )
+        assert res.sent == n
+        assert res.errors == []
+        assert len(t.batches) == 3
+        assert [len(b) for b in t.batches] == [_BATCH_SIZE, _BATCH_SIZE, 7]
+
+    def test_single_batch_for_small_source(self) -> None:
+        records = [_person(f"P{i}", det=f"det{i}") for i in range(5)]
+        t = _RecordingTransport(aportes_status=201)
+        _exporter(t).export_source(records, source_slug="demo", source_fetched_ats=["2026-06-24T15:00:00Z"])
+        assert len(t.batches) == 1
+        assert len(t.batches[0]) == 5
+
     def test_contadores_correctos_con_multiples_workers(self) -> None:
-        records = [_person(f"P{i}", det=f"det{i}") for i in range(20)]
+        records = [_person(f"P{i}", det=f"det{i}") for i in range(_BATCH_SIZE * 4)]
         t = _RecordingTransport(aportes_status=201)
         res = _exporter(t).export_source(
             records,
@@ -517,23 +553,37 @@ class TestConcurrentPosts:
             source_fetched_ats=["2026-06-24T15:00:00Z"],
             max_concurrent_posts=4,
         )
-        assert res.sent == 20
+        assert res.sent == _BATCH_SIZE * 4
         assert res.duplicates == 0
         assert res.errors == []
-        assert len(t.posts) == 20
+        assert len(t.batches) == 4
 
-    def test_errores_acumulan_con_multiples_workers(self) -> None:
+    def test_batch_failure_counts_whole_batch_as_error(self) -> None:
+        """PostgREST inserta el batch como una sola transaccion: falla atomico,
+        no hay exito parcial fila-por-fila como con el POST individual viejo."""
         records = [_person(f"P{i}", det=f"det{i}") for i in range(10)]
-        t = _RecordingTransport(aportes_status=409)
+        t = _RecordingTransport(aportes_status=500)
         res = _exporter(t).export_source(
-            records,
-            source_slug="demo",
-            source_fetched_ats=["2026-06-24T15:00:00Z"],
-            max_concurrent_posts=4,
+            records, source_slug="demo", source_fetched_ats=["2026-06-24T15:00:00Z"], max_concurrent_posts=2
         )
-        assert res.duplicates == 10
         assert res.sent == 0
-        assert res.errors == []
+        assert len(res.errors) == 1
+        assert "10 registros" in res.errors[0]
+
+    def test_upsert_uses_merge_duplicates_prefer_header(self) -> None:
+        captured_headers: list[str | None] = []
+
+        class _Transport(httpx.BaseTransport):
+            def handle_request(self, request: httpx.Request) -> httpx.Response:
+                if request.url.path == "/rest/v1/aportes":
+                    captured_headers.append(request.headers.get("prefer"))
+                    return httpx.Response(201, json={"ok": True})
+                return httpx.Response(200, json=[])
+
+        _exporter(_Transport()).export_source(
+            [_person("Juan")], source_slug="demo", source_fetched_ats=["2026-06-24T15:00:00Z"]
+        )
+        assert captured_headers == ["resolution=merge-duplicates,return=minimal"]
 
 
 # --- dry-run ----------------------------------------------------------------
@@ -563,29 +613,29 @@ class TestDryRun:
         assert not any(r.levelname == "ERROR" for r in caplog.records)
 
     def test_from_env_partial_config_logs_error(self, caplog: Any) -> None:
-        env = {"STAGING_API_KEY": "k"}
+        env = {"SUPABASE_URL": "https://x.supabase.co"}
         with patch.dict(os.environ, env, clear=True):
             with caplog.at_level("ERROR", logger="scrapers.exporters.staging_exporter"):
                 assert StagingConfig.from_env() is None
         errors = [r for r in caplog.records if r.levelname == "ERROR"]
         assert errors
-        assert "STAGING_BASE_URL" in errors[0].getMessage()
+        assert "SUPABASE_SERVICE_ROLE_KEY" in errors[0].getMessage()
 
     def test_from_env_builds_config_when_present(self) -> None:
         env = {
-            "STAGING_API_KEY": "k",
-            "STAGING_BASE_URL": "https://staging.test/",
+            "SUPABASE_URL": "https://x.supabase.co/",
+            "SUPABASE_SERVICE_ROLE_KEY": "k",
         }
         with patch.dict(os.environ, env, clear=True):
             cfg = StagingConfig.from_env()
         assert cfg is not None
-        assert cfg.base_url == "https://staging.test"  # rstrip('/')
+        assert cfg.supabase_url == "https://x.supabase.co"  # rstrip('/')
 
     def test_from_env_rejects_plain_http(self, caplog: Any) -> None:
-        # http:// expondría x-api-key y PII en claro: debe degradar a dry-run.
+        # http:// expondría la service_role key y PII en claro: debe degradar a dry-run.
         env = {
-            "STAGING_API_KEY": "k",
-            "STAGING_BASE_URL": "http://staging.test",
+            "SUPABASE_URL": "http://x.supabase.co",
+            "SUPABASE_SERVICE_ROLE_KEY": "k",
         }
         with patch.dict(os.environ, env, clear=True):
             with caplog.at_level("ERROR", logger="scrapers.exporters.staging_exporter"):
@@ -600,11 +650,11 @@ class TestLifecycle:
         t = _RecordingTransport()
         client = httpx.Client(base_url="https://staging.test", transport=t)
         exp = StagingExporter(
-            StagingConfig(api_key="k", base_url="https://staging.test"),
+            StagingConfig(supabase_url="https://staging.test", supabase_service_role_key="k"),
             client=client,
         )
         exp.close()
         # El cliente inyectado sigue usable (no fue cerrado por el exporter).
-        resp = client.get("/api/source-watermarks/demo")
-        assert resp.status_code == 404
+        resp = client.get("/rest/v1/source_watermarks", params={"slug": "eq.demo"})
+        assert resp.status_code == 200
         client.close()

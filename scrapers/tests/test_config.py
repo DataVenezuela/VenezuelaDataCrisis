@@ -267,7 +267,7 @@ sources:
 
 
 def test_unsafe_source_id_is_rejected(tmp_path):
-    """id se usa como segmento de URL en /api/source-watermarks/{id}."""
+    """id se usa como source_slug/external_id contra Supabase (staging_exporter)."""
     config = tmp_path / "unsafe_id.yaml"
     config.write_text(
         """

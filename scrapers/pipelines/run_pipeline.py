@@ -14,7 +14,7 @@ Flujo por fuente habilitada
 5. **Score**     — ``confidence_score`` sobre cada entidad
 6. **Minor protection** — ``protect_minor_fields`` reduce campos identificables
                    cuando is_minor=True (foto, cedula_masked, ubicacion exacta)
-7. **Staging**   — ``StagingExporter`` hace POST a /api/aportes de dataVenezuela
+7. **Staging**   — ``StagingExporter`` hace upsert directo a /rest/v1/aportes de Supabase
 
 La deduplicacion ya no ocurre por fuente: el dedup_hash/external_id deterministas
 y las block keys (scrapers/dedup/specs.py) la trasladan al backend (upsert por
@@ -624,8 +624,9 @@ def run_pipeline(
         Ruta al YAML de configuracion de fuentes.
     output_dir:
         Reservado para artefactos/logs. El export a JSONL desaparecio; el
-        destino ahora es la tabla aportes via /api/aportes. Se conserva en la
-        firma por compatibilidad con la CLI.
+        destino ahora es la tabla aportes via upsert directo a Supabase
+        (/rest/v1/aportes). Se conserva en la firma por compatibilidad con la
+        CLI.
     limit:
         Numero maximo de entidades por fuente (None = sin limite).
     max_workers:

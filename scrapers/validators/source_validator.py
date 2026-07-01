@@ -9,8 +9,10 @@ import yaml
 
 SUPPORTED_TYPES = {"html_static", "api_json", "rss", "manual_file", "webapp_js", "pdf"}
 SUPPORTED_TRUST_TIERS = {"A", "B", "C", "D"}
-# id se usa como segmento de URL en /api/source-watermarks/{id} (staging_exporter);
-# debe ser seguro para una ruta REST sin escapar.
+# id viaja como valor de fuente_slug (columna source_slug de aportes, filtro
+# slug=eq.{id} contra /rest/v1/source_watermarks en Supabase/PostgREST) y
+# como fuente de external_id/idempotencia; se restringe a un charset seguro
+# por buena práctica aunque ya no sea un segmento de URL sin escapar.
 _SOURCE_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
 REQUIRED_SOURCE_FIELDS = {
     "id",
@@ -182,7 +184,7 @@ def validate_sources_config(config_path: Path) -> dict[str, Any]:
         if not _SOURCE_ID_PATTERN.match(source_id):
             raise ValueError(
                 f"{label}: 'id' debe contener solo letras, numeros, '-' o '_' "
-                f"(se usa como segmento de URL en /api/source-watermarks/{{id}})."
+                f"(se usa como source_slug/external_id en Supabase)."
             )
         if source_id in seen_ids:
             raise ValueError(f"{label}: 'id' duplicado ({source_id!r}); debe ser unico.")

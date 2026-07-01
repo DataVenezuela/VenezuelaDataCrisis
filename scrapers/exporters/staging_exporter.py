@@ -1,14 +1,22 @@
-"""Staging exporter: POST de aportes a /api/aportes de dataVenezuela.
+"""Staging exporter: upsert de aportes directo a Supabase (PostgREST).
 
 Reemplaza el export JSONL en disco. Cada record sanitizado (post-PII,
-post-score, post-minor-protection) se manda como un aporte idempotente:
-el external_id determinista permite al backend hacer upsert sin duplicar.
+post-score, post-minor-protection) se agrupa en batches y se manda como
+upsert idempotente a ``/rest/v1/aportes``: el external_id determinista
+(columna UNIQUE) permite a PostgREST hacer merge sin duplicar.
+
+Hasta #187 el destino era `dataVenezuela` (Vercel) via `POST /api/aportes`
+individual, auth `x-api-key`, payload camelCase. Vercel actuaba como proxy
+HTTP fino entre el pipeline y Supabase; con ~108k registros por fuente, esto
+significaba 108k invocaciones de function (cold starts, timeouts, 500s). Este
+modulo ahora escribe directo a la REST API de Supabase (PostgREST) en batches
+de ``_BATCH_SIZE`` registros, sin intermediario.
 
 Sin red real en tests: el httpx.Client es inyectable via el parametro
 ``client`` del constructor (los tests pasan httpx.Client(transport=...)).
-Si faltan las env vars STAGING_*, el exporter entra en dry-run silencioso:
-no abre cliente, calcula payloads para validarlos, loguea a INFO lo que
-enviaria, y devuelve ExportResult vacio.
+Si faltan las env vars SUPABASE_URL/SUPABASE_SERVICE_ROLE_KEY, el exporter
+entra en dry-run silencioso: no abre cliente, calcula payloads para
+validarlos, loguea a INFO lo que enviaria, y devuelve ExportResult vacio.
 """
 
 from __future__ import annotations
@@ -33,8 +41,17 @@ from scrapers.dedup import specs
 log = logging.getLogger(__name__)
 
 _DEFAULT_WATERMARK = "1970-01-01T00:00:00Z"
-_APORTES_PATH = "/api/aportes"
-_WATERMARKS_PATH = "/api/source-watermarks"
+_APORTES_PATH = "/rest/v1/aportes"
+_WATERMARKS_PATH = "/rest/v1/source_watermarks"
+
+# Cuantos records van en cada request de upsert masivo a /rest/v1/aportes.
+# Con 108k registros por fuente, esto son ~1080 requests en vez de 108k.
+_BATCH_SIZE = 100
+
+# Prefer header para upsert (merge-duplicates = ON CONFLICT DO UPDATE sobre el
+# unique constraint de external_id) + return=minimal (no necesitamos el body
+# de vuelta, ahorra ancho de banda con batches de 100 filas).
+_UPSERT_PREFER = "resolution=merge-duplicates,return=minimal"
 
 # fetched_at es el wall-clock local de cuando el adapter termino de
 # descargar la pagina, no el updated_at del registro en el servidor de la
@@ -42,12 +59,12 @@ _WATERMARKS_PATH = "/api/source-watermarks"
 # fetch esta en vuelo y no quedar reflejado en la respuesta que ya recibimos;
 # si el watermark avanza exactamente hasta fetched_at, la siguiente corrida
 # (updated_after=watermark) nunca volveria a pedirlo. Este margen crea una
-# ventana de overlap; la idempotencia por external_id en dataVenezuela
-# absorbe los registros re-enviados en ese overlap sin duplicar.
+# ventana de overlap; la idempotencia por external_id en Supabase absorbe
+# los registros re-enviados en ese overlap sin duplicar.
 _WATERMARK_SAFETY_MARGIN = timedelta(minutes=5)
 _FETCHED_AT_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
-# Status HTTP transitorios que ameritan reintento del POST a /api/aportes.
+# Status HTTP transitorios que ameritan reintento del upsert a /rest/v1/aportes.
 # Definido localmente (no se mueve a _shared para no chocar con PR #61).
 _RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
 _MAX_POST_RETRIES = 4
@@ -62,26 +79,27 @@ class StagingConfig:
     get_watermark/export_source recibe su propio source_slug (source.id).
     """
 
-    api_key: str
-    base_url: str
+    supabase_url: str
+    supabase_service_role_key: str
 
     @classmethod
     def from_env(cls) -> StagingConfig | None:
-        """Construye la config desde STAGING_*; None si falta alguna.
+        """Construye la config desde SUPABASE_*; None si falta alguna.
 
-        Distingue el dry-run intencional (NINGUNA STAGING_* seteada, dev local)
-        de una config parcial en prod (algunas seteadas, otras no): la primera
-        loguea a INFO, la segunda a ERROR listando las faltantes. En ambos casos
-        devuelve None (gatilla el dry-run) sin abortar el pipeline.
+        Distingue el dry-run intencional (NINGUNA SUPABASE_* seteada, dev
+        local) de una config parcial en prod (algunas seteadas, otras no): la
+        primera loguea a INFO, la segunda a ERROR listando las faltantes. En
+        ambos casos devuelve None (gatilla el dry-run) sin abortar el
+        pipeline.
         """
         values = {
-            "STAGING_API_KEY": os.getenv("STAGING_API_KEY"),
-            "STAGING_BASE_URL": os.getenv("STAGING_BASE_URL"),
+            "SUPABASE_URL": os.getenv("SUPABASE_URL"),
+            "SUPABASE_SERVICE_ROLE_KEY": os.getenv("SUPABASE_SERVICE_ROLE_KEY"),
         }
         present = [k for k, v in values.items() if v]
         if not present:
             log.info(
-                "staging_exporter deshabilitado: ninguna STAGING_* seteada "
+                "staging_exporter deshabilitado: ninguna SUPABASE_* seteada "
                 "(dry-run intencional)"
             )
             return None
@@ -92,27 +110,35 @@ class StagingConfig:
                 missing,
             )
             return None
-        base_url = str(values["STAGING_BASE_URL"]).rstrip("/")
-        # El cliente manda x-api-key y PII tokenizada en cada request. Sobre HTTP
-        # plano esos datos viajan en claro y son interceptables (MITM); exigir
-        # HTTPS evita exponer la credencial y los payloads. Config errada => dry-run,
-        # nunca enviar a un endpoint inseguro.
-        if not base_url.lower().startswith("https://"):
+        supabase_url = str(values["SUPABASE_URL"]).rstrip("/")
+        # El cliente manda la service_role key y PII tokenizada en cada
+        # request. Sobre HTTP plano esos datos viajan en claro y son
+        # interceptables (MITM); exigir HTTPS evita exponer la credencial y
+        # los payloads. Config errada => dry-run, nunca enviar a un endpoint
+        # inseguro.
+        if not supabase_url.lower().startswith("https://"):
             log.error(
-                "staging_exporter: STAGING_BASE_URL debe ser https:// (recibido %r); "
+                "staging_exporter: SUPABASE_URL debe ser https:// (recibido %r); "
                 "entrando en dry-run para no enviar credenciales/PII en claro",
-                base_url,
+                supabase_url,
             )
             return None
         return cls(
-            api_key=str(values["STAGING_API_KEY"]),
-            base_url=base_url,
+            supabase_url=supabase_url,
+            supabase_service_role_key=str(values["SUPABASE_SERVICE_ROLE_KEY"]),
         )
 
 
 @dataclass
 class ExportResult:
-    """Resultado agregado de exportar los records de una fuente."""
+    """Resultado agregado de exportar los records de una fuente.
+
+    ``duplicates`` se conserva por compatibilidad de la interfaz, pero con
+    upsert por batch (resolution=merge-duplicates + return=minimal) Supabase
+    no distingue insert de update en la respuesta: no hay forma barata de
+    saber cuantas filas de un batch de 100 eran nuevas vs ya existentes sin
+    pedir el body completo de vuelta. Se deja siempre en 0.
+    """
 
     sent: int = 0
     duplicates: int = 0
@@ -169,7 +195,7 @@ def compute_external_id(rec: dict[str, object], entity_type: str) -> str:
 
 
 class StagingExporter:
-    """Envia aportes a /api/aportes y avanza el watermark de la fuente."""
+    """Hace upsert de aportes a Supabase y avanza el watermark de la fuente."""
 
     def __init__(
         self,
@@ -185,19 +211,21 @@ class StagingExporter:
         self._client: httpx.Client | None = client
         if self.enabled and config is not None and client is None:
             self._client = httpx.Client(
-                base_url=config.base_url,
+                base_url=config.supabase_url,
                 headers={
-                    "x-api-key": config.api_key,
+                    "apikey": config.supabase_service_role_key,
+                    "Authorization": f"Bearer {config.supabase_service_role_key}",
                     "User-Agent": USER_AGENT,
                     "Accept": "application/json",
                     "Content-Type": "application/json",
                 },
                 timeout=httpx.Timeout(30.0),
                 # follow_redirects=False a propósito: httpx NO descarta cabeceras
-                # custom como x-api-key al seguir un redirect cross-host, así que un
-                # 30x del servidor (o un MITM) hacia otro dominio filtraría la API
-                # key y la PII tokenizada. El endpoint /api/aportes es fijo y no
-                # debería redirigir; un redirect inesperado se trata como error.
+                # custom como Authorization al seguir un redirect cross-host, así
+                # que un 30x del servidor (o un MITM) hacia otro dominio filtraría
+                # la service_role key y la PII tokenizada. El endpoint REST de
+                # Supabase es fijo y no debería redirigir; un redirect inesperado
+                # se trata como error.
                 follow_redirects=False,
             )
 
@@ -226,28 +254,28 @@ class StagingExporter:
             external_id = compute_external_id(rec, entity_type)
             dedup_hash = specs.dedup_key(rec, entity_type)
 
-        payload: dict[str, object] = {
-            "runId": self.run_id,
-            "entityType": _entity_type_slug(entity_type),
-            "externalId": external_id,
-            "dedupVersion": spec.version,
-            "blockKeys": specs.block_keys(rec, entity_type),
-            "contentHash": _content_hash(clean),
-            "sourceSlug": source_slug,
-            "rawJson": clean,
+        # A diferencia del contrato Zod de la vieja API de dataVenezuela (que
+        # exigia OMITIR una clave opcional para no violar optional() con
+        # null), aca el destino es una tabla Postgres con columnas NULLABLE
+        # insertada via upsert masivo: PostgREST exige que todas las filas de
+        # un mismo batch tengan las mismas keys, asi que los campos opcionales
+        # se mandan siempre presentes (None -> null explicito) en vez de
+        # omitidos.
+        return {
+            "external_id": external_id,
+            "run_id": self.run_id,
+            "entity_type": _entity_type_slug(entity_type),
+            "dedup_hash": dedup_hash,
+            "dedup_version": spec.version,
+            "block_keys": specs.block_keys(rec, entity_type),
+            "content_hash": _content_hash(clean),
+            "source_slug": source_slug,
+            "source_record_id": _opt_str(rec.get("_source_record_id")),
+            "source_url": _opt_str(rec.get("_source_url")),
+            "parser_version": _opt_str(rec.get("_parser_version")),
+            "normalizer_version": _opt_str(rec.get("_normalizer_version")),
+            "raw_json": clean,
         }
-        # Campos opcionales: el schema Zod usa optional() (acepta undefined/ausente,
-        # pero NO null). Omitir la clave en lugar de enviar null evita el 422.
-        for key, value in (
-            ("dedupHash", dedup_hash),
-            ("sourceRecordId", _opt_str(rec.get("_source_record_id"))),
-            ("sourceUrl", _opt_str(rec.get("_source_url"))),
-            ("parserVersion", _opt_str(rec.get("_parser_version"))),
-            ("normalizerVersion", _opt_str(rec.get("_normalizer_version"))),
-        ):
-            if value is not None:
-                payload[key] = value
-        return payload
 
     # -- watermark ------------------------------------------------------------
 
@@ -259,46 +287,55 @@ class StagingExporter:
         deshabilitado (dry-run) o si la lectura falla: nunca debe bloquear el
         fetch, y re-fetchear de mas es preferible a perder registros. Cubre
         tanto errores de red/HTTP como respuestas 2xx con body invalido (ej.
-        JSON malformado), que no son httpx.HTTPError pero igual deben
-        degradar al default en vez de propagarse.
+        JSON malformado o sin filas), que no son httpx.HTTPError pero igual
+        deben degradar al default en vez de propagarse.
+
+        PostgREST responde 200 con una lista vacia cuando el filtro no
+        matchea ninguna fila (a diferencia del 404 que devolvia la vieja API
+        de dataVenezuela para una fuente sin watermark previo).
         """
         if not self.enabled or self._client is None:
             return _DEFAULT_WATERMARK
         try:
-            resp = self._client.get(f"{_WATERMARKS_PATH}/{source_slug}")
+            resp = self._client.get(
+                _WATERMARKS_PATH,
+                params={"slug": f"eq.{source_slug}", "select": "watermark_at"},
+            )
             if resp.status_code == 404:
                 return _DEFAULT_WATERMARK
             resp.raise_for_status()
-            payload = resp.json()
-            return str(payload.get("watermarkAt", _DEFAULT_WATERMARK))
-        except (httpx.HTTPError, ValueError, AttributeError) as exc:
+            rows = resp.json()
+            if isinstance(rows, list) and rows and isinstance(rows[0], dict):
+                return str(rows[0].get("watermark_at") or _DEFAULT_WATERMARK)
+            return _DEFAULT_WATERMARK
+        except (httpx.HTTPError, ValueError, AttributeError, TypeError) as exc:
             log.warning("no se pudo leer watermark de %s: %s", source_slug, exc)
             response = getattr(exc, "response", None)
             if response is not None:
-                # Distingue un 403 propio de la API (key invalida/sin permiso
-                # para ese source_slug) de un bloqueo de Vercel a nivel de
-                # borde (Deployment Protection), que devuelve 403/401 antes
-                # de llegar al codigo de la app y nunca trae watermarkAt.
                 log.warning(
-                    "respuesta HTTP de %s: status=%s server=%s x-vercel-id=%s "
-                    "body=%r",
+                    "respuesta HTTP de %s: status=%s body=%r",
                     source_slug,
                     response.status_code,
-                    response.headers.get("server"),
-                    response.headers.get("x-vercel-id"),
                     response.text[:300],
                 )
             return _DEFAULT_WATERMARK
 
     def _set_watermark(self, source_slug: str, watermark_at: str) -> bool:
         assert self._client is not None
-        resp = self._client.put(
-            f"{_WATERMARKS_PATH}/{source_slug}",
-            json={"watermarkAt": watermark_at},
+        resp = self._client.post(
+            _WATERMARKS_PATH,
+            json={"slug": source_slug, "watermark_at": watermark_at},
+            headers={"Prefer": _UPSERT_PREFER},
         )
-        return resp.status_code in (200, 201)
+        return resp.status_code in (200, 201, 204)
 
-    def _post_with_retry(self, path: str, payload: dict[str, object]) -> httpx.Response:
+    def _post_with_retry(
+        self,
+        path: str,
+        payload: object,
+        *,
+        headers: dict[str, str] | None = None,
+    ) -> httpx.Response:
         """POST con exponential backoff en status transitorios y errores de red.
 
         Reintenta en 429/500/502/503/504 y en TimeoutException/NetworkError
@@ -310,7 +347,7 @@ class StagingExporter:
         resp: httpx.Response | None = None
         for attempt in range(1, _MAX_POST_RETRIES + 1):
             try:
-                resp = self._client.post(path, json=payload)
+                resp = self._client.post(path, json=payload, headers=headers)
             except (httpx.TimeoutException, httpx.NetworkError) as exc:
                 last_exc = exc
                 if attempt < _MAX_POST_RETRIES:
@@ -335,6 +372,22 @@ class StagingExporter:
         assert last_exc is not None
         raise last_exc
 
+    def _upsert_batch(self, batch: list[dict[str, object]], source_slug: str) -> httpx.Response:
+        """Upsert masivo de un batch de records a /rest/v1/aportes.
+
+        Un solo POST con un array JSON de hasta ``_BATCH_SIZE`` filas;
+        PostgREST lo ejecuta como un INSERT ... ON CONFLICT (external_id) DO
+        UPDATE dentro de una sola transaccion (atomico: o el batch completo
+        entra, o falla completo — no hay exito parcial fila-por-fila como en
+        el POST individual anterior).
+        """
+        payloads = [self._build_payload(rec, source_slug) for rec in batch]
+        return self._post_with_retry(
+            _APORTES_PATH,
+            payloads,
+            headers={"Prefer": _UPSERT_PREFER},
+        )
+
     # -- export ---------------------------------------------------------------
 
     def export_source(
@@ -354,8 +407,10 @@ class StagingExporter:
         avanza: evita perder silenciosamente registros descartados que nunca
         llegaron a staging (p.ej. un menor) saltando su fetched_at.
 
-        ``max_concurrent_posts`` controla el paralelismo del loop de POSTs.
-        El default ``None`` equivale a 1 worker (comportamiento secuencial original).
+        Los records se agrupan en batches de ``_BATCH_SIZE`` y cada batch se
+        manda como un upsert masivo. ``max_concurrent_posts`` controla cuantos
+        batches se mandan en paralelo (ThreadPoolExecutor). El default
+        ``None`` equivale a 1 worker (batches secuenciales).
         """
         result = ExportResult()
 
@@ -363,51 +418,53 @@ class StagingExporter:
             for rec in records:
                 payload = self._build_payload(rec, source_slug)
                 log.info(
-                    "DRY-RUN staging_exporter: enviaria entityType=%s externalId=%s",
-                    payload["entityType"],
-                    payload["externalId"],
+                    "DRY-RUN staging_exporter: enviaria entity_type=%s external_id=%s",
+                    payload["entity_type"],
+                    payload["external_id"],
                 )
             return result
 
-        def _post_one(rec: dict[str, object]) -> None:
+        batches = [records[i : i + _BATCH_SIZE] for i in range(0, len(records), _BATCH_SIZE)]
+
+        def _upsert_one(batch: list[dict[str, object]]) -> None:
             try:
-                payload = self._build_payload(rec, source_slug)
-                resp = self._post_with_retry(_APORTES_PATH, payload)
+                resp = self._upsert_batch(batch, source_slug)
             except httpx.HTTPError as exc:
                 with _lock:
-                    result.errors.append(f"POST {_APORTES_PATH} fallo: {exc}")
+                    result.errors.append(
+                        f"POST {_APORTES_PATH} batch de {len(batch)} fallo: {exc}"
+                    )
                 return
             except Exception as exc:
                 with _lock:
-                    result.errors.append(f"POST {_APORTES_PATH} error inesperado: {exc}")
+                    result.errors.append(
+                        f"POST {_APORTES_PATH} batch de {len(batch)} error inesperado: {exc}"
+                    )
                 return
-            if resp.status_code in (200, 201):
+            if resp.status_code in (200, 201, 204):
                 with _lock:
-                    result.sent += 1
-            elif resp.status_code == 409:
-                with _lock:
-                    result.duplicates += 1
+                    result.sent += len(batch)
             else:
                 log.warning(
-                    "POST %s status=%s externalId=%s body=%s",
+                    "POST %s status=%s batch_size=%d body=%s",
                     _APORTES_PATH,
                     resp.status_code,
-                    payload["externalId"],
+                    len(batch),
                     resp.text[:300],
                 )
                 with _lock:
                     result.errors.append(
                         f"{_APORTES_PATH} status {resp.status_code} "
-                        f"para externalId={payload['externalId']}"
+                        f"para batch de {len(batch)} registros"
                     )
 
         _lock = threading.Lock()
         workers = max(1, max_concurrent_posts or 0)
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            list(pool.map(_post_one, records))
+            list(pool.map(_upsert_one, batches))
 
-        # El watermark solo avanza si no hubo NINGUN error: ni de POST/PUT ni
-        # previo de la fuente (source_errors).
+        # El watermark solo avanza si no hubo NINGUN error: ni de upsert/PUT
+        # ni previo de la fuente (source_errors).
         has_source_errors = bool(source_errors)
         if not result.errors and not has_source_errors and source_fetched_ats:
             new_watermark = _apply_safety_margin(max(source_fetched_ats))
@@ -441,10 +498,11 @@ def _opt_str(value: object) -> str | None:
 
 
 # Nombre interno del tipo (Event/AcopioCenter/Person) -> slug de la columna
-# aportes.entity_type.
+# aportes.entity_type. Convencion consumida rio abajo por el consolidation
+# job (Issue #82), no solo por este exporter.
 _ENTITY_TYPE_SLUGS = {
     "Event": "event",
-    "AcopioCenter": "acopio",   # Zod enum: "event" | "acopio" | "person"
+    "AcopioCenter": "acopio",
     "Person": "person",
 }
 

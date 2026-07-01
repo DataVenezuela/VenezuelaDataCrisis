@@ -86,7 +86,7 @@ Requiere al menos una aprobación antes de mergear. Branch protection activo: la
 
 ## Dónde aterriza cada cosa
 
-El pipeline **no escribe JSONL en disco**. El destino de las entidades procesadas es staging en Supabase vía `POST /api/aportes` (auth `x-api-key`, payload camelCase — ver `dataVenezuela/docs/api-dedup.md`). El watermark por fuente vive en `PUT /api/source-watermarks/{slug}`, mismo auth.
+El pipeline **no escribe JSONL en disco**. El destino de las entidades procesadas es staging en Supabase vía upsert batch directo a `/rest/v1/aportes` (PostgREST, auth `apikey` + `Authorization: Bearer <service_role_key>`, payload snake_case). El watermark por fuente vive en `/rest/v1/source_watermarks`, mismo auth. Hasta #187 el destino pasaba por `dataVenezuela` (Vercel) vía `POST /api/aportes`; ese proxy fue eliminado del path de ingest.
 
 ```
 Adapter → Parser → PII → Normalización → staging exporter → aportes (Supabase)

@@ -9,13 +9,14 @@ Todos los tests son 100% offline: ninguno hace llamadas de red.
 - Las fuentes de red (api_json) se mockean inyectando adapters/parsers
   falsos en el registry del pipeline via monkeypatch.
 - La fuente demo (manual_file) se construye en ``tmp_path``.
-- El destino staging (/api/aportes) se intercepta con un
-  ``_StagingTransport`` (httpx.BaseTransport) inyectado en el StagingExporter
-  que construye run_pipeline, parcheando ``StagingExporter`` por una factory
-  de test y exportando las STAGING_* via patch.dict(os.environ).
+- El destino staging (upsert directo a Supabase, /rest/v1/aportes) se
+  intercepta con un ``_StagingTransport`` (httpx.BaseTransport) inyectado en
+  el StagingExporter que construye run_pipeline, parcheando
+  ``StagingExporter`` por una factory de test y exportando las SUPABASE_*
+  via patch.dict(os.environ).
 
 El JSONL en disco desaparecio: ya no se leen persons.jsonl ni se asserta
-documents_exported. Se asserta sobre los POSTs capturados y sobre
+documents_exported. Se asserta sobre los upserts capturados y sobre
 summary['staging_sent'].
 """
 
@@ -43,40 +44,41 @@ from scrapers.pipelines.run_pipeline import _get_adapter, run_pipeline
 
 _EVENT_ID = "8f14e45f-ceea-467e-bd5d-0a4f2e0c1a3a"
 
-_STAGING_ENV = {
-    "STAGING_API_KEY": "test-key",
-    "STAGING_BASE_URL": "https://staging.test",
+_SUPABASE_ENV = {
+    "SUPABASE_URL": "https://staging.test",
+    "SUPABASE_SERVICE_ROLE_KEY": "test-key",
 }
 
 
 class _StagingTransport(httpx.BaseTransport):
-    """Intercepta POSTs a /api/aportes y el watermark, idempotente por external_id."""
+    """Intercepta upserts batch a /rest/v1/aportes y el watermark en /rest/v1/source_watermarks.
+
+    A diferencia del viejo POST individual a Vercel, PostgREST no distingue
+    insert de update en un upsert (resolution=merge-duplicates): re-enviar el
+    mismo external_id no produce un 409 distinguible, solo otro 200/201. Este
+    transport ya no emula duplicados via status code.
+    """
 
     def __init__(self, aportes_status: int = 201) -> None:
         self.aportes_status = aportes_status
         self.posts: list[dict[str, Any]] = []
-        self._seen_external_ids: set[str] = set()
+        self.batches: list[list[dict[str, Any]]] = []
         self.watermark_puts: list[dict[str, Any]] = []
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
-        if path == "/api/aportes":
-            body = json.loads(request.content)
-            self.posts.append(body)
-            external_id = body.get("externalId")
-            if external_id in self._seen_external_ids:
-                return httpx.Response(409, json={"duplicate": True})
-            # Solo se marca como visto si el envio fue exitoso: un status de
-            # error (p.ej. 500) puede reintentarse y debe seguir fallando.
-            if self.aportes_status in (200, 201):
-                self._seen_external_ids.add(external_id)
+        if path == "/rest/v1/aportes":
+            batch = json.loads(request.content)
+            self.batches.append(batch)
+            self.posts.extend(batch)
             return httpx.Response(self.aportes_status, json={"ok": True})
-        if path.startswith("/api/source-watermarks/"):
-            slug = path.rsplit("/", 1)[-1]
+        if path == "/rest/v1/source_watermarks":
             if request.method == "GET":
-                return httpx.Response(404)
+                return httpx.Response(200, json=[])
             body = json.loads(request.content)
-            self.watermark_puts.append({"source_slug": slug, **body})
+            self.watermark_puts.append(
+                {"source_slug": body.get("slug"), "watermarkAt": body.get("watermark_at")}
+            )
             return httpx.Response(200, json={"ok": True})
         return httpx.Response(404)
 
@@ -92,14 +94,14 @@ def _patch_exporter(transport: httpx.BaseTransport) -> Any:
     """Factory que reemplaza StagingExporter por uno con client mockeado.
 
     run_pipeline llama ``StagingExporter(StagingConfig.from_env(), run_id=...)``.
-    La factory ignora el config recibido (que viene de las STAGING_* del
+    La factory ignora el config recibido (que viene de las SUPABASE_* del
     entorno) y construye un exporter con un httpx.Client(transport=...) para
     que ningun POST salga a la red.
     """
     def _factory(config: StagingConfig | None, *, run_id: str | None = None) -> StagingExporter:
         if config is None:
             return StagingExporter(None, run_id=run_id)
-        client = httpx.Client(base_url=config.base_url, transport=transport)
+        client = httpx.Client(base_url=config.supabase_url, transport=transport)
         return StagingExporter(config, client=client, run_id=run_id)
 
     return patch.object(rp, "StagingExporter", side_effect=_factory)
@@ -209,7 +211,7 @@ class TestAdapterCleanup:
         """Fuente con parser no registrado: el adapter se cierra igual, no se filtra."""
         adapter = _mock_adapter()
         transport = _StagingTransport()
-        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport), patch(
+        with patch.dict(os.environ, _SUPABASE_ENV, clear=False), _patch_exporter(transport), patch(
             "scrapers.pipelines.run_pipeline._get_adapter", return_value=adapter
         ), patch(
             "scrapers.pipelines.run_pipeline._get_parser", return_value=None
@@ -226,7 +228,7 @@ class TestAdapterCleanup:
         """
         adapter = _mock_adapter()
         transport = _StagingTransport()
-        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport), patch(
+        with patch.dict(os.environ, _SUPABASE_ENV, clear=False), _patch_exporter(transport), patch(
             "scrapers.pipelines.run_pipeline._get_adapter", return_value=adapter
         ), patch(
             "scrapers.pipelines.run_pipeline._get_parser", return_value=_mock_parser()
@@ -246,7 +248,7 @@ class TestAdapterCleanup:
 class TestSummaryShape:
     def test_returns_summary_dict(self, tmp_path: Path, demo_config: Path) -> None:
         transport = _StagingTransport()
-        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport), patch(
+        with patch.dict(os.environ, _SUPABASE_ENV, clear=False), _patch_exporter(transport), patch(
             "scrapers.pipelines.run_pipeline._get_adapter", return_value=_mock_adapter()
         ), patch(
             "scrapers.pipelines.run_pipeline._get_parser", return_value=_mock_parser()
@@ -256,7 +258,7 @@ class TestSummaryShape:
 
     def test_summary_has_required_keys(self, tmp_path: Path, demo_config: Path) -> None:
         transport = _StagingTransport()
-        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport), patch(
+        with patch.dict(os.environ, _SUPABASE_ENV, clear=False), _patch_exporter(transport), patch(
             "scrapers.pipelines.run_pipeline._get_adapter", return_value=_mock_adapter()
         ), patch(
             "scrapers.pipelines.run_pipeline._get_parser", return_value=_mock_parser()
@@ -273,7 +275,7 @@ class TestSummaryShape:
 
     def test_errors_is_list(self, tmp_path: Path, demo_config: Path) -> None:
         transport = _StagingTransport()
-        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport), patch(
+        with patch.dict(os.environ, _SUPABASE_ENV, clear=False), _patch_exporter(transport), patch(
             "scrapers.pipelines.run_pipeline._get_adapter", return_value=_mock_adapter()
         ), patch(
             "scrapers.pipelines.run_pipeline._get_parser", return_value=_mock_parser()
@@ -284,7 +286,7 @@ class TestSummaryShape:
     def test_output_dir_created(self, tmp_path: Path, demo_config: Path) -> None:
         out = tmp_path / "nested" / "output"
         transport = _StagingTransport()
-        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport), patch(
+        with patch.dict(os.environ, _SUPABASE_ENV, clear=False), _patch_exporter(transport), patch(
             "scrapers.pipelines.run_pipeline._get_adapter", return_value=_mock_adapter()
         ), patch(
             "scrapers.pipelines.run_pipeline._get_parser", return_value=_mock_parser()
@@ -300,7 +302,7 @@ class TestSummaryShape:
 class TestStagingSend:
     def test_sources_processed_is_one(self, tmp_path: Path, demo_config: Path) -> None:
         transport = _StagingTransport()
-        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport), patch(
+        with patch.dict(os.environ, _SUPABASE_ENV, clear=False), _patch_exporter(transport), patch(
             "scrapers.pipelines.run_pipeline._get_adapter", return_value=_mock_adapter()
         ), patch(
             "scrapers.pipelines.run_pipeline._get_parser", return_value=_mock_parser()
@@ -310,7 +312,7 @@ class TestStagingSend:
 
     def test_staging_sent_matches_records(self, tmp_path: Path, demo_config: Path) -> None:
         transport = _StagingTransport()
-        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport), patch(
+        with patch.dict(os.environ, _SUPABASE_ENV, clear=False), _patch_exporter(transport), patch(
             "scrapers.pipelines.run_pipeline._get_adapter", return_value=_mock_adapter()
         ), patch(
             "scrapers.pipelines.run_pipeline._get_parser", return_value=_mock_parser()
@@ -321,25 +323,25 @@ class TestStagingSend:
 
     def test_no_entity_type_in_payload_data(self, tmp_path: Path, demo_config: Path) -> None:
         transport = _StagingTransport()
-        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport), patch(
+        with patch.dict(os.environ, _SUPABASE_ENV, clear=False), _patch_exporter(transport), patch(
             "scrapers.pipelines.run_pipeline._get_adapter", return_value=_mock_adapter()
         ), patch(
             "scrapers.pipelines.run_pipeline._get_parser", return_value=_mock_parser()
         ):
             run_pipeline(config_path=demo_config, output_dir=tmp_path / "out")
         for post in transport.posts:
-            assert "_entity_type" not in post["rawJson"]
+            assert "_entity_type" not in post["raw_json"]
 
     def test_confidence_score_in_range(self, tmp_path: Path, demo_config: Path) -> None:
         transport = _StagingTransport()
-        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport), patch(
+        with patch.dict(os.environ, _SUPABASE_ENV, clear=False), _patch_exporter(transport), patch(
             "scrapers.pipelines.run_pipeline._get_adapter", return_value=_mock_adapter()
         ), patch(
             "scrapers.pipelines.run_pipeline._get_parser", return_value=_mock_parser()
         ):
             run_pipeline(config_path=demo_config, output_dir=tmp_path / "out")
         for post in transport.posts:
-            score = post["rawJson"].get("confidence_score", -1)
+            score = post["raw_json"].get("confidence_score", -1)
             assert 0.0 <= score <= 1.0
 
 
@@ -351,35 +353,37 @@ class TestIdempotency:
     def test_rerun_same_external_ids(self, tmp_path: Path, demo_config: Path) -> None:
         transport = _StagingTransport()
         for _ in range(2):
-            with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport), patch(
+            with patch.dict(os.environ, _SUPABASE_ENV, clear=False), _patch_exporter(transport), patch(
                 "scrapers.pipelines.run_pipeline._get_adapter", return_value=_mock_adapter()
             ), patch(
                 "scrapers.pipelines.run_pipeline._get_parser", return_value=_mock_parser()
             ):
                 run_pipeline(config_path=demo_config, output_dir=tmp_path / "out")
         # Cuatro POSTs en total (2 por corrida) pero solo 2 external_id unicos.
-        unique = {p["externalId"] for p in transport.posts}
+        unique = {p["external_id"] for p in transport.posts}
         assert len(transport.posts) == 4
         assert len(unique) == 2
 
-    def test_second_run_all_duplicates(self, tmp_path: Path, demo_config: Path) -> None:
+    def test_second_run_upserts_without_reporting_duplicates(self, tmp_path: Path, demo_config: Path) -> None:
+        """A diferencia de la vieja API de dataVenezuela (409 por duplicado),
+        el upsert masivo a PostgREST (resolution=merge-duplicates) no
+        distingue insert de update en la respuesta: re-correr la misma fuente
+        sigue contando como "enviado", nunca como "duplicado"."""
         transport = _StagingTransport()
-        # Primera corrida: todos nuevos.
-        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport), patch(
+        with patch.dict(os.environ, _SUPABASE_ENV, clear=False), _patch_exporter(transport), patch(
             "scrapers.pipelines.run_pipeline._get_adapter", return_value=_mock_adapter()
         ), patch(
             "scrapers.pipelines.run_pipeline._get_parser", return_value=_mock_parser()
         ):
             run_pipeline(config_path=demo_config, output_dir=tmp_path / "out")
-        # Segunda corrida: el transport responde 409 a los external_id ya vistos.
-        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport), patch(
+        with patch.dict(os.environ, _SUPABASE_ENV, clear=False), _patch_exporter(transport), patch(
             "scrapers.pipelines.run_pipeline._get_adapter", return_value=_mock_adapter()
         ), patch(
             "scrapers.pipelines.run_pipeline._get_parser", return_value=_mock_parser()
         ):
             summary = run_pipeline(config_path=demo_config, output_dir=tmp_path / "out")
-        assert summary["staging_sent"] == 0
-        assert summary["staging_duplicates"] == 2
+        assert summary["staging_sent"] == 2
+        assert summary["staging_duplicates"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -406,15 +410,15 @@ class TestPersonBlockKeysEndToEnd:
             ),
         ]
         transport = _StagingTransport()
-        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport), patch(
+        with patch.dict(os.environ, _SUPABASE_ENV, clear=False), _patch_exporter(transport), patch(
             "scrapers.pipelines.run_pipeline._get_adapter", return_value=_mock_adapter()
         ), patch(
             "scrapers.pipelines.run_pipeline._get_parser", return_value=_mock_parser(persons)
         ):
             run_pipeline(config_path=demo_config, output_dir=tmp_path / "out")
-        by_name = {p["rawJson"]["full_name"]: p for p in transport.posts}
-        juan_keys = by_name["JUAN DEMO PEREZ"]["blockKeys"]
-        ana_keys = by_name["ANA DEMO GARCIA"]["blockKeys"]
+        by_name = {p["raw_json"]["full_name"]: p for p in transport.posts}
+        juan_keys = by_name["JUAN DEMO PEREZ"]["block_keys"]
+        ana_keys = by_name["ANA DEMO GARCIA"]["block_keys"]
         assert any(k.startswith(f"ced:{_EVENT_ID}:hmac-abc") for k in juan_keys)
         assert all(not k.startswith("ced:") for k in ana_keys)
 
@@ -426,10 +430,10 @@ class TestPersonBlockKeysEndToEnd:
 class TestStagingDisabled:
     def test_no_env_vars_dry_run(self, tmp_path: Path, demo_config: Path) -> None:
         transport = _StagingTransport()
-        # Sin STAGING_*: el exporter entra en dry-run; el transport no debe
+        # Sin SUPABASE_*: el exporter entra en dry-run; el transport no debe
         # recibir ningun POST aunque la factory este parcheada.
         env = {k: v for k, v in os.environ.items()
-               if k not in ("STAGING_API_KEY", "STAGING_BASE_URL")}
+               if k not in ("SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY")}
         with patch.dict(os.environ, env, clear=True), _patch_exporter(transport), patch(
             "scrapers.pipelines.run_pipeline._get_adapter", return_value=_mock_adapter()
         ), patch(
@@ -448,7 +452,7 @@ class TestStagingDisabled:
 class TestWatermarkEndToEnd:
     def test_watermark_advances_on_success(self, tmp_path: Path, demo_config: Path) -> None:
         transport = _StagingTransport(aportes_status=201)
-        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport), patch(
+        with patch.dict(os.environ, _SUPABASE_ENV, clear=False), _patch_exporter(transport), patch(
             "scrapers.pipelines.run_pipeline._get_adapter", return_value=_mock_adapter()
         ), patch(
             "scrapers.pipelines.run_pipeline._get_parser", return_value=_mock_parser()
@@ -460,7 +464,7 @@ class TestWatermarkEndToEnd:
 
     def test_watermark_not_advanced_on_failure(self, tmp_path: Path, demo_config: Path) -> None:
         transport = _StagingTransport(aportes_status=500)
-        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport), patch(
+        with patch.dict(os.environ, _SUPABASE_ENV, clear=False), _patch_exporter(transport), patch(
             "scrapers.exporters.staging_exporter.time.sleep", lambda *_: None
         ), patch(
             "scrapers.pipelines.run_pipeline._get_adapter", return_value=_mock_adapter()
@@ -478,13 +482,13 @@ class TestWatermarkEndToEnd:
 
         class _PersistedWatermarkTransport(_StagingTransport):
             def handle_request(self, request: httpx.Request) -> httpx.Response:
-                if request.url.path.startswith("/api/source-watermarks/") and request.method == "GET":
-                    return httpx.Response(200, json={"watermarkAt": "2026-06-01T00:00:00Z"})
+                if request.url.path == "/rest/v1/source_watermarks" and request.method == "GET":
+                    return httpx.Response(200, json=[{"watermark_at": "2026-06-01T00:00:00Z"}])
                 return super().handle_request(request)
 
         transport = _PersistedWatermarkTransport()
         adapter = _mock_adapter()
-        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport), patch(
+        with patch.dict(os.environ, _SUPABASE_ENV, clear=False), _patch_exporter(transport), patch(
             "scrapers.pipelines.run_pipeline._get_adapter", return_value=adapter
         ), patch(
             "scrapers.pipelines.run_pipeline._get_parser", return_value=_mock_parser()
@@ -517,7 +521,7 @@ sources:
     parser_asignado: encuentralos
 """)
         transport = _StagingTransport(aportes_status=201)
-        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport), patch(
+        with patch.dict(os.environ, _SUPABASE_ENV, clear=False), _patch_exporter(transport), patch(
             "scrapers.pipelines.run_pipeline._get_adapter", side_effect=lambda *_: _mock_adapter()
         ), patch(
             "scrapers.pipelines.run_pipeline._get_parser", side_effect=lambda *_: _mock_parser()
@@ -555,10 +559,11 @@ sources:
     def _unique_persons(suffix: str) -> list[Person]:
         """Personas con nombre/ubicacion distintos por fuente para que el
         external_id (deterministic_id, basado en nombre+ubicacion) no
-        coincida entre fuentes — si coincidiera, dataVenezuela las trataria
-        como la misma persona reportada por dos fuentes y devolveria 409
-        (comportamiento correcto de idempotencia, pero no lo que este test
-        quiere medir: throughput agregado de fuentes realmente distintas).
+        coincida entre fuentes — si coincidiera, el upsert las trataria como
+        la misma persona reportada por dos fuentes y las mergearia en una
+        sola fila (comportamiento correcto de idempotencia, pero no lo que
+        este test quiere medir: throughput agregado de fuentes realmente
+        distintas).
         """
         return [
             Person(
@@ -584,7 +589,7 @@ sources:
     def test_five_sources_parallel_same_result_as_sequential(self, tmp_path: Path) -> None:
         cfg = self._make_n_sources_config(tmp_path, 5)
         transport = _StagingTransport()
-        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport), patch(
+        with patch.dict(os.environ, _SUPABASE_ENV, clear=False), _patch_exporter(transport), patch(
             "scrapers.pipelines.run_pipeline._get_adapter", side_effect=lambda *_: _mock_adapter()
         ), patch(
             "scrapers.pipelines.run_pipeline._get_parser", side_effect=self._parser_for
@@ -601,7 +606,7 @@ sources:
     def test_max_workers_one_is_sequential_default(self, tmp_path: Path) -> None:
         cfg = self._make_n_sources_config(tmp_path, 5)
         transport = _StagingTransport()
-        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport), patch(
+        with patch.dict(os.environ, _SUPABASE_ENV, clear=False), _patch_exporter(transport), patch(
             "scrapers.pipelines.run_pipeline._get_adapter", side_effect=lambda *_: _mock_adapter()
         ), patch(
             "scrapers.pipelines.run_pipeline._get_parser", side_effect=self._parser_for
@@ -621,7 +626,7 @@ sources:
                 raise RuntimeError("adapter explota")
             return _mock_adapter()
 
-        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport), patch(
+        with patch.dict(os.environ, _SUPABASE_ENV, clear=False), _patch_exporter(transport), patch(
             "scrapers.pipelines.run_pipeline._get_adapter", side_effect=_flaky_adapter
         ), patch(
             "scrapers.pipelines.run_pipeline._get_parser", side_effect=self._parser_for
@@ -656,7 +661,7 @@ sources:
     parser_asignado: encuentralos
 """)
         transport = _StagingTransport()
-        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport):
+        with patch.dict(os.environ, _SUPABASE_ENV, clear=False), _patch_exporter(transport):
             summary = run_pipeline(config_path=cfg, output_dir=tmp_path / "out")
         assert summary["sources_processed"] == 0
         assert summary["staging_sent"] == 0
@@ -716,7 +721,7 @@ sources:
     parser_asignado: text
 """)
         transport = _StagingTransport()
-        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport):
+        with patch.dict(os.environ, _SUPABASE_ENV, clear=False), _patch_exporter(transport):
             summary = run_pipeline(config_path=cfg, output_dir=tmp_path / "out")
         # La fuente se procesa sin error fatal pero no envia nada (parser None).
         assert summary["sources_processed"] == 1
@@ -726,7 +731,7 @@ sources:
     def test_repo_demo_config_processes_synthetic_record(self, tmp_path: Path) -> None:
         """El quickstart debe procesar el fixture sintético, no solo validar YAML."""
         transport = _StagingTransport()
-        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport):
+        with patch.dict(os.environ, _SUPABASE_ENV, clear=False), _patch_exporter(transport):
             summary = run_pipeline(
                 config_path=Path("scrapers/config/sources.demo.yaml"),
                 output_dir=tmp_path / "out",
@@ -735,7 +740,7 @@ sources:
         assert summary["sources_processed"] == 1
         assert summary["staging_sent"] == 1
         assert len(transport.posts) == 1
-        assert transport.posts[0]["rawJson"]["full_name"] == "Juan Demo"
+        assert transport.posts[0]["raw_json"]["full_name"] == "Juan Demo"
 
     def test_unimplemented_parser_visible_in_summary(self, tmp_path: Path) -> None:
         """Una fuente con parser no registrado aparece VISIBLE en el resumen.
@@ -760,7 +765,7 @@ sources:
     parser_asignado: parser_inexistente
 """)
         transport = _StagingTransport()
-        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport):
+        with patch.dict(os.environ, _SUPABASE_ENV, clear=False), _patch_exporter(transport):
             summary = run_pipeline(config_path=cfg, output_dir=tmp_path / "out")
         omissions = [
             e for e in summary["errors"]
@@ -776,7 +781,7 @@ sources:
         adapter = _mock_adapter()
         adapter.fetch_all.side_effect = RuntimeError("fetch agotado tras reintentos")
         transport = _StagingTransport()
-        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport), patch(
+        with patch.dict(os.environ, _SUPABASE_ENV, clear=False), _patch_exporter(transport), patch(
             "scrapers.pipelines.run_pipeline._get_adapter", return_value=adapter
         ), patch(
             "scrapers.pipelines.run_pipeline._get_parser", return_value=_mock_parser()
@@ -836,7 +841,7 @@ class TestApiAdapterPageSize:
 class TestLimit:
     def test_limit_zero_sends_nothing(self, tmp_path: Path, demo_config: Path) -> None:
         transport = _StagingTransport()
-        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport), patch(
+        with patch.dict(os.environ, _SUPABASE_ENV, clear=False), _patch_exporter(transport), patch(
             "scrapers.pipelines.run_pipeline._get_adapter", return_value=_mock_adapter()
         ), patch(
             "scrapers.pipelines.run_pipeline._get_parser", return_value=_mock_parser()
@@ -846,7 +851,7 @@ class TestLimit:
 
     def test_limit_one_sends_at_most_one(self, tmp_path: Path, demo_config: Path) -> None:
         transport = _StagingTransport()
-        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport), patch(
+        with patch.dict(os.environ, _SUPABASE_ENV, clear=False), _patch_exporter(transport), patch(
             "scrapers.pipelines.run_pipeline._get_adapter", return_value=_mock_adapter()
         ), patch(
             "scrapers.pipelines.run_pipeline._get_parser", return_value=_mock_parser()
@@ -873,14 +878,14 @@ class TestMinorProtectionEndToEnd:
             )
         ]
         transport = _StagingTransport()
-        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport), patch(
+        with patch.dict(os.environ, _SUPABASE_ENV, clear=False), _patch_exporter(transport), patch(
             "scrapers.pipelines.run_pipeline._get_adapter", return_value=_mock_adapter()
         ), patch(
             "scrapers.pipelines.run_pipeline._get_parser", return_value=_mock_parser(persons)
         ):
             run_pipeline(config_path=demo_config, output_dir=tmp_path / "out")
         assert len(transport.posts) == 1
-        data = transport.posts[0]["rawJson"]
+        data = transport.posts[0]["raw_json"]
         assert data["foto"] is None
         assert data["cedula_masked"] is None
         assert data["last_known_location"] == "Lara"
@@ -897,7 +902,7 @@ class TestMinorProtectionEndToEnd:
             )
         ]
         transport = _StagingTransport()
-        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport), patch(
+        with patch.dict(os.environ, _SUPABASE_ENV, clear=False), _patch_exporter(transport), patch(
             "scrapers.pipelines.run_pipeline._get_adapter", return_value=_mock_adapter()
         ), patch(
             "scrapers.pipelines.run_pipeline._get_parser", return_value=_mock_parser(persons)
@@ -916,7 +921,7 @@ class TestMinorProtectionEndToEnd:
 class TestPIISalt:
     def test_pipeline_works_with_pii_salt(self, tmp_path: Path, demo_config: Path) -> None:
         transport = _StagingTransport()
-        env = {**_STAGING_ENV, "PII_SALT": "test-salt-pipeline"}
+        env = {**_SUPABASE_ENV, "PII_SALT": "test-salt-pipeline"}
         with patch.dict(os.environ, env, clear=False), _patch_exporter(transport), patch(
             "scrapers.pipelines.run_pipeline._get_adapter", return_value=_mock_adapter()
         ), patch(
@@ -939,7 +944,7 @@ class TestNoRealNetwork:
         def _factory(config: StagingConfig | None, *, run_id: str | None = None) -> StagingExporter:
             if config is None:
                 return StagingExporter(None, run_id=run_id)
-            client = httpx.Client(base_url=config.base_url, transport=transport)
+            client = httpx.Client(base_url=config.supabase_url, transport=transport)
             return StagingExporter(config, client=client, run_id=run_id)
 
         # Fuente deshabilitada -> dry-run efectivo -> no debe tocar el transport.
@@ -949,7 +954,7 @@ project:
   default_country: Venezuela
 sources: []
 """)
-        with patch.dict(os.environ, _STAGING_ENV, clear=False), patch.object(
+        with patch.dict(os.environ, _SUPABASE_ENV, clear=False), patch.object(
             rp, "StagingExporter", side_effect=_factory
         ):
             summary = run_pipeline(config_path=cfg, output_dir=tmp_path / "out")

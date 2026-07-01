@@ -105,9 +105,10 @@ En producción, el pipeline corre vía `.github/workflows/ingest.yml` (cron`*/10
 export PII_HMAC_SECRET="valor-secreto"
 export PII_SALT="$PII_HMAC_SECRET"   # alias legacy, mismo valor — no son dos secrets distintos
 
-# Credenciales de dataVenezuela (staging exporter)
-export STAGING_API_KEY="x-api-key del scraper"
-export STAGING_BASE_URL="https://..."
+# Credenciales de Supabase (staging exporter — upsert directo a /rest/v1/aportes,
+# ya no pasa por Vercel/dataVenezuela, ver #187)
+export SUPABASE_URL="https://<project>.supabase.co"
+export SUPABASE_SERVICE_ROLE_KEY="service_role key, no la anon key"
 ```
 
 ---
