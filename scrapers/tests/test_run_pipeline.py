@@ -1028,14 +1028,16 @@ def _api_source(url: str, **kw: Any) -> SourceConfig:
 class TestDomainAllowlist:
     def test_blocks_disallowed_domain_without_fetching(self, monkeypatch):
         built: list[str] = []
+        quarantine_batch: list[QuarantineRecord] = []
         monkeypatch.setattr(rp, "_get_adapter", lambda s: built.append(s.id))
         source = _api_source(
             "https://evil.example.com/api",
             allowed_domains=["encuentralos.tecnosoft.dev"],
         )
         all_errors: list[str] = []
+        
 
-        result = rp._run_source(source, None, all_errors, _EVENT_ID, MagicMock())
+        result = rp._run_source(source, None, all_errors, _EVENT_ID, MagicMock(), quarantine_batch)
 
         # Nunca se intentó construir el adapter → ningún request.
         assert built == []
@@ -1046,7 +1048,7 @@ class TestDomainAllowlist:
 
     def test_allows_matching_domain_case_insensitive(self, monkeypatch):
         built: list[str] = []
-
+        quarantine_batch: list[QuarantineRecord] = []
         def fake_adapter(s):
             built.append(s.id)
             return None  # corta limpio tras pasar el gate de dominio
@@ -1057,7 +1059,7 @@ class TestDomainAllowlist:
             allowed_domains=["Encuentralos.Tecnosoft.Dev"],  # mayúsculas
         )
 
-        result = rp._run_source(source, None, [], _EVENT_ID, MagicMock())
+        result = rp._run_source(source, None, [], _EVENT_ID, MagicMock(), quarantine_batch)
 
         assert built == ["test_src"]  # pasó el gate, intentó construir adapter
         assert not any("dominio no permitido" in e for e in result.errors)
@@ -1066,8 +1068,8 @@ class TestDomainAllowlist:
         built: list[str] = []
         monkeypatch.setattr(rp, "_get_adapter", lambda s: built.append(s.id))
         source = _api_source("https://anything.example.org/api")  # sin allowlist
-
-        rp._run_source(source, None, [], _EVENT_ID, MagicMock())
+        quarantine_batch: list[QuarantineRecord] = []
+        rp._run_source(source, None, [], _EVENT_ID, MagicMock(), quarantine_batch)
 
         # Comportamiento retrocompatible: pasa el gate como hoy.
         assert built == ["test_src"]
