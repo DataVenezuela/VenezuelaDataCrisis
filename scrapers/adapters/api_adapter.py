@@ -155,6 +155,7 @@ class ApiAdapter:
         self,
         base_url: str,
         page_size: int = _DEFAULT_PAGE_SIZE,
+        probe_limit: int | None = None,
         timeout: float = _DEFAULT_TIMEOUT,
         extra_headers: dict[str, str] | None = None,
         max_retries: int = _MAX_RETRIES,
@@ -165,6 +166,7 @@ class ApiAdapter:
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.page_size = page_size
+        self.probe_limit = probe_limit
         self.timeout = timeout
         self.max_retries = max_retries
         self.max_concurrent_pages = _coerce_max_concurrent_pages(max_concurrent_pages)
@@ -313,7 +315,16 @@ class ApiAdapter:
         1. Si la respuesta tiene ``"total"`` (int), se detiene cuando
            ``offset >= total``.
         2. Si la lista de datos devuelta está vacía, se detiene.
-        3. Si la lista tiene menos registros que ``page_size``, es la última página.
+        3. Si la lista tiene menos registros que ``effective_page_size``, es la última página.
+
+        Probe de limit
+        --------------
+        Antes de paginar, el primer request usa ``max(page_size, _PROBE_LIMIT)``
+        para descubrir el límite real que el API acepta. Funciona en ambas
+        direcciones: si el API soporta el probe completo se usa ese valor;
+        si lo capea, se detecta y se ajusta. El resultado se loguea
+        explícitamente y la primera página se reutiliza como datos reales
+        (no es un request extra).
 
         Comportamiento de fallos (path paralelo)
         -----------------------------------------
@@ -328,26 +339,15 @@ class ApiAdapter:
             Un dict por página con ``page`` (base 1) y ``total_pages``.
         """
         extra_params = dict(params or {})
-        first_page = self._fetch_page(url, extra_params, 0)
+        probe_limit = self.probe_limit if self.probe_limit is not None else self.page_size
+        first_page = self._fetch_page(url, extra_params, 0, effective_page_size=probe_limit)
 
         if isinstance(first_page.data, dict) and first_page.data and not any(k in first_page.data for k in _KNOWN_RECORD_KEYS):
             self._log_unrecognized_schema(first_page.data, page_num=1)
 
         total = first_page.total
         first_records = len(first_page.records)
-
-        # Auto-detect the effective page size the API actually honors.
-        # If the API caps our requested limit (e.g. we ask 100, get 20) and
-        # there are more records remaining, use the returned count as step size
-        # for offset calculation — otherwise parallel offsets would skip records.
-        effective_page_size = self.page_size
-        if total is not None and 0 < first_records < self.page_size and first_records < total:
-            effective_page_size = first_records
-            log.info(
-                "%s: API capea limit en %d (pedimos %d) — "
-                "usando effective_page_size=%d para offsets",
-                self.source_key, first_records, self.page_size, effective_page_size,
-            )
+        effective_page_size = self._discover_effective_page_size(first_page, probe_limit)
 
         total_pages = self._total_pages(total, effective_page_size)
 
@@ -372,7 +372,7 @@ class ApiAdapter:
             return
 
         if total is None:
-            yield from self._fetch_remaining_sequential(url, extra_params, first_records)
+            yield from self._fetch_remaining_sequential(url, extra_params, first_records, effective_page_size)
             return
 
         yield from self._fetch_remaining_parallel(url, extra_params, total, total_pages, effective_page_size)
@@ -463,32 +463,68 @@ class ApiAdapter:
 
         return False
 
+    def _discover_effective_page_size(self, first_page: _FetchedPage, probe_limit: int) -> int:
+        """Determina el page_size efectivo a partir de la primera página (probe).
+
+        Funciona en ambas direcciones:
+        - Si el API devolvió >= probe_limit registros: soporta ese límite.
+        - Si devolvió < probe_limit y hay más registros (total conocido): el API
+          capea en el valor devuelto.
+        - Si devolvió < probe_limit sin total conocido, o todos los registros
+          caben en una página: usa el conteo devuelto como step size.
+        """
+        returned = len(first_page.records)
+        total = first_page.total
+
+        if returned == 0:
+            return self.page_size
+
+        if returned >= probe_limit:
+            log.info(
+                "%s: probe limit=%d — API soporta ≥%d registros/página",
+                self.source_key, probe_limit, probe_limit,
+            )
+            return probe_limit
+
+        if total is not None and returned < total:
+            log.info(
+                "%s: probe limit=%d — API capea en %d registros/página",
+                self.source_key, probe_limit, returned,
+            )
+            return returned
+
+        # Todos los registros caben en una página, o total desconocido.
+        return returned
+
     def _fetch_remaining_sequential(
         self,
         url: str,
         extra_params: dict[str, Any],
         first_records: int,
+        effective_page_size: int | None = None,
     ) -> Iterator[RawContent]:
         offset = first_records
         page_num = 1
         total: int | None = None
         total_pages: int | None = None
+        size = effective_page_size or self.page_size
 
         while True:
-            page = self._fetch_page(url, extra_params, offset)
+            page = self._fetch_page(url, extra_params, offset, effective_page_size=size)
             page_num += 1
             if isinstance(page.data, dict) and page.data and not any(k in page.data for k in _KNOWN_RECORD_KEYS):
                 self._log_unrecognized_schema(page.data, page_num=page_num)
 
             if page.total is not None:
                 total = page.total
-                total_pages = self._total_pages(total)
+                total_pages = self._total_pages(total, size)
 
             records_in_page = len(page.records)
             yield self._raw_content_from_page(
                 page,
                 page_num=page_num,
                 total_pages=total_pages,
+                effective_page_size=size,
             )
 
             log.debug(
@@ -500,6 +536,7 @@ class ApiAdapter:
                 offset=page.offset,
                 records_in_page=records_in_page,
                 total=total,
+                effective_page_size=size,
             ):
                 break
 

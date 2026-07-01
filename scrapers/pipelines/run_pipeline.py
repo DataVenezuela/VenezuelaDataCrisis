@@ -130,6 +130,8 @@ def _get_adapter(source: SourceConfig) -> Any:
         # override, ApiAdapter usa su propio default (_DEFAULT_PAGE_SIZE).
         if source.page_size is not None:
             adapter_kwargs["page_size"] = source.page_size
+        if source.probe_limit is not None:
+            adapter_kwargs["probe_limit"] = source.probe_limit
         # ApiAdapter es el unico que hace multiples requests por corrida
         # (paginacion), asi que es el unico que aplica rate_limit_per_minute.
         if source.rate_limit_per_minute is not None:

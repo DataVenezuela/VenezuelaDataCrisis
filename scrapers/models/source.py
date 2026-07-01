@@ -18,6 +18,7 @@ class SourceConfig:
     timeout_seconds: float | None = None
     max_retries: int | None = None
     page_size: int | None = None
+    probe_limit: int | None = None
     max_concurrent_pages: int | None = None
     max_concurrent_posts: int | None = None
     # Allowlist de hosts exactos para `url` (match exacto, case-insensitive).
