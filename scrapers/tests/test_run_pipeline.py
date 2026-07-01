@@ -1079,3 +1079,25 @@ class TestDomainAllowlist:
 
         # Comportamiento retrocompatible: pasa el gate como hoy.
         assert built == ["test_src"]
+
+
+class TestExporterParallelismWiring:
+    def test_run_source_passes_max_concurrent_posts_to_exporter(self, monkeypatch):
+        source = _api_source(
+            "https://encuentralos.tecnosoft.dev/api/personas",
+            max_concurrent_posts=32,
+        )
+        adapter = _mock_adapter()
+        parser = _mock_parser()
+        exporter = MagicMock()
+        exporter.get_watermark.return_value = "1970-01-01T00:00:00Z"
+        exporter.export_source.return_value = rp.ExportResult(sent=2)
+
+        monkeypatch.setattr(rp, "_get_adapter", lambda s: adapter)
+        monkeypatch.setattr(rp, "_get_parser", lambda s, event_id: parser)
+
+        result = rp._run_source(source, None, [], _EVENT_ID, exporter)
+
+        assert result.sent == 2
+        exporter.export_source.assert_called_once()
+        assert exporter.export_source.call_args.kwargs["max_concurrent_posts"] == 32

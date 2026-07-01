@@ -58,7 +58,7 @@ class _RecordingTransport(httpx.BaseTransport):
         return httpx.Response(404)
 
 
-def _exporter(transport: _RecordingTransport) -> StagingExporter:
+def _exporter(transport: httpx.BaseTransport) -> StagingExporter:
     cfg = StagingConfig(api_key="k", base_url="https://staging.test")
     client = httpx.Client(base_url="https://staging.test", transport=transport)
     return StagingExporter(cfg, client=client, run_id="run-1")
@@ -105,12 +105,16 @@ class TestPayload:
         t = _RecordingTransport()
         _exporter(t).export_source([_person("Juan")], source_slug="demo", source_fetched_ats=["2026-06-24T15:00:00Z"])
         body = t.posts[0]
-        required = {
-            "runId", "entityType", "externalId", "dedupHash", "dedupVersion",
-            "blockKeys", "contentHash", "sourceSlug", "sourceRecordId",
-            "sourceUrl", "parserVersion", "normalizerVersion", "rawJson",
+        # Claves siempre presentes (no pueden ser None).
+        always_present = {
+            "runId", "entityType", "externalId", "dedupVersion",
+            "blockKeys", "contentHash", "sourceSlug", "rawJson",
         }
-        assert required.issubset(body.keys())
+        assert always_present.issubset(body.keys())
+        # Claves opcionales: ausentes (omitidas) cuando None, no enviadas como null.
+        optional_when_none = {"dedupHash", "sourceRecordId", "sourceUrl", "parserVersion", "normalizerVersion"}
+        for key in optional_when_none:
+            assert body.get(key) is not None or key not in body, f"{key} no debe ser null en el payload"
 
     def test_data_strips_internal_keys(self) -> None:
         t = _RecordingTransport()
@@ -139,13 +143,13 @@ class TestPayload:
         _exporter(t).export_source([_person("Juan")], source_slug="demo", source_fetched_ats=["2026-06-24T15:00:00Z"])
         assert re.fullmatch(r"[0-9a-f]{64}", t.posts[0]["contentHash"])
 
-    def test_dedup_hash_null_when_no_deterministic_id(self) -> None:
+    def test_dedup_hash_absent_when_no_deterministic_id(self) -> None:
         t = _RecordingTransport()
         _exporter(t).export_source(
             [_person("Juan", det=None)], source_slug="demo", source_fetched_ats=["2026-06-24T15:00:00Z"]
         )
-        # dedup_hash None se serializa como JSON null.
-        assert t.posts[0]["dedupHash"] is None
+        # Zod optional() acepta undefined (ausente) pero NO null; omitir la clave.
+        assert "dedupHash" not in t.posts[0]
 
     def test_entity_type_acopio_uses_acopio_slug(self) -> None:
         # Verifica que AcopioCenter mapea a "acopio" (no "acopio_center")

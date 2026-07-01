@@ -226,21 +226,28 @@ class StagingExporter:
             external_id = compute_external_id(rec, entity_type)
             dedup_hash = specs.dedup_key(rec, entity_type)
 
-        return {
+        payload: dict[str, object] = {
             "runId": self.run_id,
             "entityType": _entity_type_slug(entity_type),
             "externalId": external_id,
-            "dedupHash": dedup_hash,
             "dedupVersion": spec.version,
             "blockKeys": specs.block_keys(rec, entity_type),
             "contentHash": _content_hash(clean),
             "sourceSlug": source_slug,
-            "sourceRecordId": _opt_str(rec.get("_source_record_id")),
-            "sourceUrl": _opt_str(rec.get("_source_url")),
-            "parserVersion": _opt_str(rec.get("_parser_version")),
-            "normalizerVersion": _opt_str(rec.get("_normalizer_version")),
             "rawJson": clean,
         }
+        # Campos opcionales: el schema Zod usa optional() (acepta undefined/ausente,
+        # pero NO null). Omitir la clave en lugar de enviar null evita el 422.
+        for key, value in (
+            ("dedupHash", dedup_hash),
+            ("sourceRecordId", _opt_str(rec.get("_source_record_id"))),
+            ("sourceUrl", _opt_str(rec.get("_source_url"))),
+            ("parserVersion", _opt_str(rec.get("_parser_version"))),
+            ("normalizerVersion", _opt_str(rec.get("_normalizer_version"))),
+        ):
+            if value is not None:
+                payload[key] = value
+        return payload
 
     # -- watermark ------------------------------------------------------------
 
@@ -381,6 +388,13 @@ class StagingExporter:
                 with _lock:
                     result.duplicates += 1
             else:
+                log.warning(
+                    "POST %s status=%s externalId=%s body=%s",
+                    _APORTES_PATH,
+                    resp.status_code,
+                    payload["externalId"],
+                    resp.text[:300],
+                )
                 with _lock:
                     result.errors.append(
                         f"{_APORTES_PATH} status {resp.status_code} "

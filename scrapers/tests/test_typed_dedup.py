@@ -108,7 +108,7 @@ def test_existing_claim_fingerprint_and_dedup_remain_compatible(tmp_path) -> Non
             normalize_for_match(description)[:300],
         ]
     )
-    items = [
+    items: list[dict[str, object]] = [
         {"fingerprint": fingerprint, "description": "uno"},
         {"fingerprint": fingerprint, "description": "dos"},
         {"description": "sin fingerprint"},

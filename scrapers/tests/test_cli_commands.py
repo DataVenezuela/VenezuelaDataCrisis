@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import subprocess  # nosec B404
 import sys
 from pathlib import Path
+from typing import Any
+
+import pytest
 
 _DEMO_CONFIG = Path("scrapers/config/sources.demo.yaml")
 _STARTER_CONFIG = Path("scrapers/config/sources.venezuela.starter.yaml")
@@ -74,6 +78,104 @@ class TestIngest:
         )
         assert result.returncode != 0
         assert "no encontrada" in result.stderr
+
+    def test_ingest_preserves_optional_source_fields(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """_cmd_ingest debe preservar opcionales en su YAML temporal real."""
+        import scrapers.pipelines.run_pipeline as pipeline_module
+
+        from scrapers.cli import _cmd_ingest
+        from scrapers.sources.loader import load_sources
+
+        config_path = tmp_path / "sources.yaml"
+        config_path.write_text(
+            """
+project:
+  event_id: test-event
+  default_country: Venezuela
+sources:
+  - id: optional_api
+    name: Optional API
+    type: api_json
+    enabled: false
+    trust_tier: C
+    url: https://example.org/api/items
+    refresh_minutes: 60
+    parser_asignado: encuentralos
+    required_keywords:
+      - agua
+      - refugio
+    notes: "Fuente sintetica para probar CLI ingest."
+    timeout_seconds: 12.5
+    max_retries: 3
+    page_size: 50
+    probe_limit: 1000
+    max_concurrent_pages: 7
+    max_concurrent_posts: 8
+    allowed_domains:
+      - example.org
+    rate_limit_per_minute: 60
+""",
+            encoding="utf-8",
+        )
+        captured: dict[str, Any] = {}
+
+        def fake_run_pipeline(
+            config_path: Path,
+            output_dir: Path,
+            limit: int | None = None,
+            max_workers: int = 1,
+        ) -> dict[str, Any]:
+            assert config_path.exists()
+            _project, sources = load_sources(config_path)
+            captured["source"] = sources[0]
+            captured["config_path"] = config_path
+            captured["output_dir"] = output_dir
+            captured["limit"] = limit
+            captured["max_workers"] = max_workers
+            return {
+                "sources_processed": 1,
+                "staging_sent": 0,
+                "staging_duplicates": 0,
+                "staging_errors": 0,
+                "errors": [],
+            }
+
+        monkeypatch.setattr(pipeline_module, "run_pipeline", fake_run_pipeline)
+
+        _cmd_ingest(
+            argparse.Namespace(
+                config=str(config_path),
+                source="optional_api",
+                output_dir=str(tmp_path / "out"),
+                limit=5,
+            )
+        )
+
+        command_output = json.loads(capsys.readouterr().out)
+        assert command_output["source_id"] == "optional_api"
+        assert command_output["status"] == "ok"
+        assert command_output["records_exported"] == 0
+        assert command_output["errors"] == []
+        captured_source = captured["source"]
+        assert captured_source.id == "optional_api"
+        assert captured_source.enabled is True
+        assert captured_source.required_keywords == ["agua", "refugio"]
+        assert captured_source.notes == "Fuente sintetica para probar CLI ingest."
+        assert captured_source.timeout_seconds == 12.5
+        assert captured_source.max_retries == 3
+        assert captured_source.page_size == 50
+        assert captured_source.probe_limit == 1000
+        assert captured_source.max_concurrent_pages == 7
+        assert captured_source.max_concurrent_posts == 8
+        assert captured_source.allowed_domains == ["example.org"]
+        assert captured_source.rate_limit_per_minute == 60
+        assert captured["limit"] == 5
+        assert not captured["config_path"].exists()
 
     def test_ingest_output_is_valid_json(self, tmp_path: Path) -> None:
         result = _run_cli(

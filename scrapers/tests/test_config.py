@@ -182,6 +182,90 @@ sources:
     assert sources[0].page_size is None
 
 
+def test_max_concurrent_posts_is_loaded_into_source_config(tmp_path):
+    config = tmp_path / "max_concurrent_posts.yaml"
+    config.write_text(
+        """
+sources:
+  - id: api_parallel_posts
+    name: API con POSTs paralelos
+    type: api_json
+    enabled: true
+    trust_tier: C
+    url: "https://example.org/api"
+    refresh_minutes: 30
+    parser_asignado: encuentralos
+    max_concurrent_posts: 32
+""",
+        encoding="utf-8",
+    )
+
+    _project, sources = load_sources(config)
+
+    assert sources[0].max_concurrent_posts == 32
+
+
+def test_max_concurrent_posts_defaults_to_none(tmp_path):
+    config = tmp_path / "no_max_concurrent_posts.yaml"
+    config.write_text(
+        """
+sources:
+  - id: api_without_parallel_posts
+    name: API sin POSTs paralelos
+    type: api_json
+    enabled: true
+    trust_tier: C
+    url: "https://example.org/api"
+    refresh_minutes: 30
+    parser_asignado: encuentralos
+""",
+        encoding="utf-8",
+    )
+
+    _project, sources = load_sources(config)
+
+    assert sources[0].max_concurrent_posts is None
+
+
+def test_encuentralos_parallelism_config_is_loaded():
+    config = (
+        Path(__file__).resolve().parents[1]
+        / "config"
+        / "sources.venezuela.starter.yaml"
+    )
+
+    _project, sources = load_sources(config)
+    encuentralos = next(
+        source for source in sources if source.id == "encuentralos_tecnosoft"
+    )
+
+    assert encuentralos.max_concurrent_pages == 32
+    assert encuentralos.max_concurrent_posts == 8
+    assert encuentralos.probe_limit == 1000
+
+
+def test_invalid_max_concurrent_posts_is_rejected(tmp_path):
+    config = tmp_path / "invalid_max_concurrent_posts.yaml"
+    config.write_text(
+        """
+sources:
+  - id: api_invalid_parallel_posts
+    name: API con POSTs paralelos invalidos
+    type: api_json
+    enabled: true
+    trust_tier: C
+    url: "https://example.org/api"
+    refresh_minutes: 30
+    parser_asignado: encuentralos
+    max_concurrent_posts: 0
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="max_concurrent_posts"):
+        validate_sources_config(config)
+
+
 def test_unsafe_source_id_is_rejected(tmp_path):
     """id se usa como segmento de URL en /api/source-watermarks/{id}."""
     config = tmp_path / "unsafe_id.yaml"
@@ -318,6 +402,22 @@ def test_valid_allowed_domains_and_rate_limit(tmp_path):
     source = payload["sources"][0]
     assert source["allowed_domains"] == ["example.org"]
     assert source["rate_limit_per_minute"] == 30
+
+
+def test_valid_probe_limit(tmp_path):
+    payload = validate_sources_config(_config_with(tmp_path, "    probe_limit: 1000\n"))
+
+    assert payload["sources"][0]["probe_limit"] == 1000
+
+
+def test_zero_probe_limit_is_rejected(tmp_path):
+    with pytest.raises(ValueError, match="probe_limit"):
+        validate_sources_config(_config_with(tmp_path, "    probe_limit: 0\n"))
+
+
+def test_bool_probe_limit_is_rejected(tmp_path):
+    with pytest.raises(ValueError, match="probe_limit"):
+        validate_sources_config(_config_with(tmp_path, "    probe_limit: true\n"))
 
 
 def test_empty_allowed_domains_is_rejected(tmp_path):

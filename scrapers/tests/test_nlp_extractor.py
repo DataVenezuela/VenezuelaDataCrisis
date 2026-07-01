@@ -4,6 +4,7 @@ import builtins
 import sys
 from dataclasses import dataclass
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -198,7 +199,7 @@ def test_load_spacy_model_reports_install_instruction_when_spacy_is_missing(
     nlp_mod._load_spacy_model.cache_clear()
     real_import = builtins.__import__
 
-    def fake_import(name: str, *args: object, **kwargs: object) -> object:
+    def fake_import(name: str, *args: Any, **kwargs: Any) -> object:
         if name == "spacy":
             raise ImportError("spacy missing", name="spacy")
         return real_import(name, *args, **kwargs)
@@ -217,7 +218,7 @@ def test_load_spacy_model_reports_missing_spacy_dependency(monkeypatch: pytest.M
     nlp_mod._load_spacy_model.cache_clear()
     real_import = builtins.__import__
 
-    def fake_import(name: str, *args: object, **kwargs: object) -> object:
+    def fake_import(name: str, *args: Any, **kwargs: Any) -> object:
         if name == "spacy":
             raise ImportError("click missing", name="click")
         return real_import(name, *args, **kwargs)

@@ -93,6 +93,7 @@ class TestBuildDeterministicId:
 
     def test_output_is_16_hex_chars(self) -> None:
         result = build_deterministic_id("JRPS", "Maracaibo, Zulia")
+        assert result is not None
         assert len(result) == 16
         assert all(c in "0123456789abcdef" for c in result)
 
