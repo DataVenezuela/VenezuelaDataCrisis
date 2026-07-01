@@ -135,10 +135,6 @@ los registros no procesables deben preservarse, no perderse.
 
 Si la fuente no tiene parser todavía, declararla con `enabled: false`. Los registros sin parser van a **cuarentena**, no se descartan.
 
-Sin `QUARANTINE_API_KEY` / `QUARANTINE_BASE_URL`, el quarantine exporter entra en
-dry-run silencioso (no envía nada, no falla). En producción son obligatorias:
-los registros no procesables deben preservarse, no perderse.
-
 ---
 
 ## Reglas de seguridad
