@@ -23,7 +23,7 @@ def now_utc() -> str:
 
 def sha256_hex(data: bytes) -> str:
     """SHA-256 hexadecimal con el prefijo ``sha256:`` que usa ``content_hash``."""
-    return f"sha256:{hashlib.sha256(data).hexdigest()}"
+    return f"{hashlib.sha256(data).hexdigest()}"
 
 
 def backoff_delay(attempt: int, *, base: float = 1.0, max_delay: float = 60.0) -> float:

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from typing import Any
 from unittest.mock import patch
 
@@ -133,10 +134,10 @@ class TestPayload:
         _exporter(t).export_source([_person("Juan")], source_slug="demo", source_fetched_ats=["2026-06-24T15:00:00Z"])
         assert t.posts[0]["dedupVersion"] == "person-detid-v1"
 
-    def test_content_hash_has_sha256_prefix(self) -> None:
+    def test_content_hash_has_64_hexchars(self) -> None:
         t = _RecordingTransport()
         _exporter(t).export_source([_person("Juan")], source_slug="demo", source_fetched_ats=["2026-06-24T15:00:00Z"])
-        assert t.posts[0]["contentHash"].startswith("sha256:")
+        assert re.fullmatch(r"[0-9a-f]{64}", t.posts[0]["contentHash"])
 
     def test_dedup_hash_null_when_no_deterministic_id(self) -> None:
         t = _RecordingTransport()
@@ -498,6 +499,37 @@ class TestSourceErrorsWatermark:
         )
         assert t.watermark_puts
         assert t.watermark_puts[-1]["watermarkAt"] == "2026-06-24T15:55:00Z"
+
+
+# --- paralelismo de POSTs ---------------------------------------------------
+
+class TestConcurrentPosts:
+    def test_contadores_correctos_con_multiples_workers(self) -> None:
+        records = [_person(f"P{i}", det=f"det{i}") for i in range(20)]
+        t = _RecordingTransport(aportes_status=201)
+        res = _exporter(t).export_source(
+            records,
+            source_slug="demo",
+            source_fetched_ats=["2026-06-24T15:00:00Z"],
+            max_concurrent_posts=4,
+        )
+        assert res.sent == 20
+        assert res.duplicates == 0
+        assert res.errors == []
+        assert len(t.posts) == 20
+
+    def test_errores_acumulan_con_multiples_workers(self) -> None:
+        records = [_person(f"P{i}", det=f"det{i}") for i in range(10)]
+        t = _RecordingTransport(aportes_status=409)
+        res = _exporter(t).export_source(
+            records,
+            source_slug="demo",
+            source_fetched_ats=["2026-06-24T15:00:00Z"],
+            max_concurrent_posts=4,
+        )
+        assert res.duplicates == 10
+        assert res.sent == 0
+        assert res.errors == []
 
 
 # --- dry-run ----------------------------------------------------------------

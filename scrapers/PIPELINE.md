@@ -107,7 +107,7 @@ Como funciona:
 ---
 
 ## El Pipeline Final
-![pipeline_completo.png](../api/pipeline_completo.png)
+![pipeline_completo.svg](../api/pipeline_completo.svg)
 
 ---
 

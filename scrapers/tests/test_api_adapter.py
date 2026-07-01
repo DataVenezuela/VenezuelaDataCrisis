@@ -430,14 +430,12 @@ class TestRawContentFields:
         page = next(adapter.fetch_all("/api/personas"))
         assert page["http_status"] == 200
 
-    def test_content_hash_format(self) -> None:
+    def test_content_hash_has_64_hexchars(self) -> None:
         transport = _SinglePageTransport(records=1)
         adapter = _adapter_with_transport(transport)
 
         page = next(adapter.fetch_all("/api/personas"))
-        assert page["content_hash"].startswith("sha256:")
-        hex_part = page["content_hash"][len("sha256:"):]
-        assert re.fullmatch(r"[0-9a-f]{64}", hex_part)
+        assert re.fullmatch(r"[0-9a-f]{64}", page["content_hash"])
 
     def test_fetched_at_is_iso8601(self) -> None:
         transport = _SinglePageTransport(records=1)
