@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from functools import lru_cache
-from typing import Protocol, TypeAlias
+from typing import Protocol, TypeAlias, cast
 
 from scrapers.normalizers.text import normalize_for_match, normalize_text
 
@@ -103,7 +103,7 @@ def _load_spacy_model(model_name: str = SPACY_MODEL) -> NlpPipeline:
         raise RuntimeError(_missing_spacy_dependency_message(exc)) from exc
 
     try:
-        pipeline: NlpPipeline = spacy.load(model_name)
+        pipeline = cast(NlpPipeline, spacy.load(model_name))
         return pipeline
     except OSError as exc:
         raise RuntimeError(_missing_model_message(model_name)) from exc
