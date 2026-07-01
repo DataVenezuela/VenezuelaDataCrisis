@@ -80,5 +80,6 @@ sources:
     notes: >
       Issue #99. Fuente canónica: API pública api.acopiove.org/v1/centros
       (JSON por defecto; NO usar el Firebase RTDB legacy acopio-ve-2026-default-rtdb).
-      Payload {data:[centro], meta:{total,limit,offset}}; paginación limit/offset
-      (~650 centros activos, jul 2026). Disabled hasta habilitación explícita en prod.
+      Payload {data:[centro], meta:{total,limit,offset}}; total también en la raíz
+      del JSON (jul 2026). Paginación limit/offset (~650 centros activos).
+      Disabled hasta habilitación explícita en prod.

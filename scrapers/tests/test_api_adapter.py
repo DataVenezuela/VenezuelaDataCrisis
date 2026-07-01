@@ -205,6 +205,22 @@ class TestFetchAllPagination:
         pages = list(adapter.fetch_all("/api/personas"))
         assert all(p["total_pages"] == 2 for p in pages)
 
+    def test_reads_total_from_meta_block(self) -> None:
+        """api.acopiove.org envía total en meta.total (contrato AcopioVE)."""
+
+        class _MetaTotalTransport(httpx.BaseTransport):
+            def handle_request(self, request: httpx.Request) -> httpx.Response:
+                return _json_response({
+                    "data": _synthetic_records(10, 0),
+                    "meta": {"count": 10, "total": 10, "limit": 20, "offset": 0},
+                })
+
+        adapter = _adapter_with_transport(_MetaTotalTransport(), page_size=20)
+        pages = list(adapter.fetch_all("/v1/centros"))
+        assert len(pages) == 1
+        assert pages[0]["total_pages"] == 1
+        assert pages[0]["records_in_page"] == 10
+
     def test_stops_on_empty_page(self) -> None:
         """
         Si el servidor devuelve data vacía, el adapter emite esa página

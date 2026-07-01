@@ -302,11 +302,18 @@ class ApiAdapter:
                             "records quedará vacío; verifica el esquema de la API.",
                             self.source_key, page_num, list(data.keys())[:10],
                         )
-                # Intentar extraer total
-                for tkey in ("total", "count", "total_count", "totalCount"):
-                    if tkey in data and isinstance(data[tkey], int):
-                        total = data[tkey]
-                        break
+                # Intentar extraer total (raíz o meta.* — p. ej. api.acopiove.org)
+                if total is None:
+                    for tkey in ("total", "count", "total_count", "totalCount"):
+                        if tkey in data and isinstance(data[tkey], int):
+                            total = data[tkey]
+                            break
+                if total is None and isinstance(data.get("meta"), dict):
+                    meta = data["meta"]
+                    for tkey in ("total", "count", "total_count", "totalCount"):
+                        if tkey in meta and isinstance(meta[tkey], int):
+                            total = meta[tkey]
+                            break
 
             # Calcular total_pages si conocemos el total
             if total is not None and total_pages is None:
