@@ -98,7 +98,6 @@ def _get_adapter(source: SourceConfig) -> Any:
       pdf         -> PdfAdapter (pdfplumber, texto por pagina)
       rss         -> RssAdapter (extrae items del feed RSS/Atom)
       webapp_js   -> PlaywrightAdapter (browser headless, paginas con JS)
-      x_recent_search -> XSearchAdapter (API oficial de X Recent Search)
 
     Tipos sin adapter registrado devuelven None y la fuente se omite.
     """
@@ -140,15 +139,6 @@ def _get_adapter(source: SourceConfig) -> Any:
         adapter = ApiAdapter(**adapter_kwargs)
         return adapter
 
-    if stype == "x_recent_search":
-        from scrapers.adapters.x_search_adapter import XSearchAdapter
-
-        query = _build_x_query(source.required_keywords)
-        return XSearchAdapter(
-            query=query,
-            source_key=source.id,
-        )
-
     if stype == "html_static":
         from scrapers.adapters.html_adapter import HtmlAdapter
         return HtmlAdapter.from_source_config(source)
@@ -183,7 +173,6 @@ def _get_parser(source: SourceConfig, event_id: str) -> Any:
     Parsers concretos (producen entidades tipadas):
       encuentralos  -> EncuentralosParser -> list[Person]
       demo_text     -> DemoTextParser -> list[Person] (fixture sintetico local)
-      x_posts       -> XPostParser -> list[Person]
 
     Si ``parser_asignado`` no tiene implementacion registrada se loguea un
     warning y se devuelve None; ``_run_source`` trata la ausencia de parser
@@ -205,28 +194,11 @@ def _get_parser(source: SourceConfig, event_id: str) -> Any:
         from scrapers.parsers.demo_text_parser import DemoTextParser
         return DemoTextParser(event_id=event_id)
 
-    if pa == "x_posts":
-        from scrapers.parsers.x_post_parser import XPostParser
-
-        return XPostParser(
-            event_id=event_id,
-            source_key=source.id,
-            trust_tier=source.trust_tier,
-        )
-
     log.warning(
         "Parser %r no implementado (fuente=%s) — fuente omitida",
         source.parser_asignado, source.id,
     )
     return None
-
-
-def _build_x_query(required_keywords: list[str]) -> str:
-    keywords = [keyword.strip() for keyword in required_keywords if keyword.strip()]
-    if not keywords:
-        return "Venezuela terremoto"
-    parts = [f'"{keyword}"' if " " in keyword else keyword for keyword in keywords]
-    return " OR ".join(parts)
 
 
 # ---------------------------------------------------------------------------

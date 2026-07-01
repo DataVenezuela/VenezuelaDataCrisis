@@ -7,15 +7,7 @@ from typing import Any
 import yaml
 
 
-SUPPORTED_TYPES = {
-    "html_static",
-    "api_json",
-    "rss",
-    "manual_file",
-    "webapp_js",
-    "pdf",
-    "x_recent_search",
-}
+SUPPORTED_TYPES = {"html_static", "api_json", "rss", "manual_file", "webapp_js", "pdf"}
 SUPPORTED_TRUST_TIERS = {"A", "B", "C", "D"}
 # id se usa como segmento de URL en /api/source-watermarks/{id} (staging_exporter);
 # debe ser seguro para una ruta REST sin escapar.

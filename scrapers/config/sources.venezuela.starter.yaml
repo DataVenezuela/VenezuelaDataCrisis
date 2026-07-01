@@ -55,6 +55,8 @@ sources:
       - Venezuela
       - earthquake
       - activation
+
+
   - id: encuentralos_tecnosoft
     name: Encuentralos - personas desaparecidas
     type: api_json
@@ -68,20 +70,3 @@ sources:
     probe_limit: 1000
     max_concurrent_pages: 32
     max_concurrent_posts: 8
-
-  - id: x_venezuela_crisis_recent
-    name: "X/Twitter Venezuela Crisis Recent Search"
-    type: x_recent_search
-    enabled: false
-    trust_tier: D
-    url: "https://api.x.com/2/tweets/search/recent"
-    refresh_minutes: 10
-    parser_asignado: x_posts
-    required_keywords:
-      - desaparecido
-      - desaparecida
-      - se busca
-      - terremoto
-      - herido
-      - encontrado
-    notes: "Fuente social no verificada. Solo posts publicos. Requiere credencial de X via variable documentada. No commitear dumps reales."

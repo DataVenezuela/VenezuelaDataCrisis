@@ -51,24 +51,6 @@ sources:
     refresh_minutes: 60
 ```
 
-Fuente social experimental deshabilitada:
-
-```yaml
-  - id: x_venezuela_crisis_recent
-    name: "X/Twitter Venezuela Crisis Recent Search"
-    url: "https://api.x.com/2/tweets/search/recent"
-    type: x_recent_search
-    parser_asignado: x_posts
-    trust_tier: D
-    enabled: false
-    refresh_minutes: 10
-    required_keywords:
-      - desaparecido
-      - se busca
-      - terremoto
-    notes: "Fuente social no verificada. Requiere credencial de X via variable documentada."
-```
-
 ---
 
 ## Campos
@@ -103,7 +85,6 @@ No se deben agregar campos nuevos al contrato sin actualizar este documento.
 | `pdf` | `pdf_adapter.py` (pdfplumber) | PDFs con texto extraíble |
 | `manual_file` | `local_file.py` | Archivos locales / uploads manuales |
 | `rss` | `rss_adapter.py` (PR #100) | Feeds RSS/Atom |
-| `x_recent_search` | `x_search_adapter.py` | API oficial de X Recent Search; requiere `X_BEARER_CREDENTIAL`, rate limit conservador y `enabled: false` por defecto |
 
 ---
 
