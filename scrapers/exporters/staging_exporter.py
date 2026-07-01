@@ -389,10 +389,11 @@ class StagingExporter:
                     result.duplicates += 1
             else:
                 log.warning(
-                    "POST %s status=%s externalId=%s",
+                    "POST %s status=%s externalId=%s body=%s",
                     _APORTES_PATH,
                     resp.status_code,
                     payload["externalId"],
+                    resp.text[:300],
                 )
                 with _lock:
                     result.errors.append(
