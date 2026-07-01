@@ -41,9 +41,11 @@ from __future__ import annotations
 import logging
 import os
 import uuid
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from scrapers.adapters._shared import now_utc, sha256_hex
 from scrapers.adapters.base import RawContent
@@ -102,7 +104,12 @@ def _get_adapter(source: SourceConfig) -> Any:
     stype = source.type
 
     if stype == "api_json":
-        from scrapers.adapters.api_adapter import ApiAdapter
+        from scrapers.adapters._shared import RateLimiter
+        from scrapers.adapters.api_adapter import (
+            ApiAdapter,
+            _DEFAULT_TIMEOUT,
+            _MAX_RETRIES,
+        )
         # base_url = esquema + host; el path se pasa en fetch_all
         import httpx
         parsed = httpx.URL(source.url)
@@ -114,12 +121,19 @@ def _get_adapter(source: SourceConfig) -> Any:
             "base_url": base_url,
             "source_key": source.id,
             "default_path": path,
+            "timeout": source.timeout_seconds if source.timeout_seconds is not None else _DEFAULT_TIMEOUT,
+            "max_retries": source.max_retries if source.max_retries is not None else _MAX_RETRIES,
+            "max_concurrent_pages": source.max_concurrent_pages,
         }
         # page_size es opcional: cada fuente declara el limite real que su
         # API soporta (algunas aceptan 1000+, otras capan en 50). Sin
         # override, ApiAdapter usa su propio default (_DEFAULT_PAGE_SIZE).
         if source.page_size is not None:
             adapter_kwargs["page_size"] = source.page_size
+        # ApiAdapter es el unico que hace multiples requests por corrida
+        # (paginacion), asi que es el unico que aplica rate_limit_per_minute.
+        if source.rate_limit_per_minute is not None:
+            adapter_kwargs["rate_limiter"] = RateLimiter(source.rate_limit_per_minute)
         adapter = ApiAdapter(**adapter_kwargs)
         return adapter
 
@@ -156,6 +170,7 @@ def _get_parser(source: SourceConfig, event_id: str) -> Any:
 
     Parsers concretos (producen entidades tipadas):
       encuentralos  -> EncuentralosParser -> list[Person]
+      demo_text     -> DemoTextParser -> list[Person] (fixture sintetico local)
 
     Si ``parser_asignado`` no tiene implementacion registrada se loguea un
     warning y se devuelve None; ``_run_source`` trata la ausencia de parser
@@ -172,6 +187,10 @@ def _get_parser(source: SourceConfig, event_id: str) -> Any:
         from scrapers.parsers.encuentralos_parser import EncuentralosParser
         secret = os.getenv("PII_HMAC_SECRET")
         return EncuentralosParser(event_id=event_id, secret=secret)
+
+    if pa == "demo_text":
+        from scrapers.parsers.demo_text_parser import DemoTextParser
+        return DemoTextParser(event_id=event_id)
 
     log.warning(
         "Parser %r no implementado (fuente=%s) — fuente omitida",
@@ -208,7 +227,7 @@ class _LocalFileAdapter:
             records_in_page=None,
         )
 
-    def fetch_all(self, url: str, **kwargs: Any):  # type: ignore[return]
+    def fetch_all(self, url: str, **kwargs: Any) -> Iterator[RawContent]:
         yield self.fetch(url)
 
 
@@ -271,7 +290,7 @@ _PII_FIELD_NAMES = {"cedula", "cédula", "identity_document", "documento_identid
                     "telefono", "teléfono", "phone", "mobile", "celular"}
 
 
-def _strip_raw_pii(d: dict) -> dict:
+def _strip_raw_pii(d: dict[str, Any]) -> dict[str, Any]:
     """Elimina campos PII crudos sin hashear (defensa en profundidad)."""
     return {k: v for k, v in d.items() if k.lower() not in _PII_FIELD_NAMES}
 
@@ -279,7 +298,7 @@ def _strip_raw_pii(d: dict) -> dict:
 def _apply_pii(
     entities: list[ParsedEntity],
     errors: list[str],
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """
     Convierte entidades tipadas a dicts y aplica tokenize_pii_fields.
 
@@ -295,7 +314,7 @@ def _apply_pii(
     """
     pii_salt_available = bool(os.getenv("PII_SALT"))
 
-    result: list[dict] = []
+    result: list[dict[str, Any]] = []
     for entity in entities:
         try:
             d = entity.model_dump()
@@ -321,7 +340,10 @@ def _apply_pii(
     return result
 
 
-def _enrich_records(records: list[dict], errors: list[str]) -> list[dict]:
+def _enrich_records(
+    records: list[dict[str, Any]],
+    errors: list[str],
+) -> list[dict[str, Any]]:
     """
     Normalizacion post-dump y computo de ``deterministic_id``.
 
@@ -336,7 +358,7 @@ def _enrich_records(records: list[dict], errors: list[str]) -> list[dict]:
         phonetic_hash as _compute_phonetic,
     )
 
-    enriched: list[dict] = []
+    enriched: list[dict[str, Any]] = []
     for rec in records:
         try:
             # Normalizar ubicacion si viene como string crudo sin objeto
@@ -372,12 +394,12 @@ def _enrich_records(records: list[dict], errors: list[str]) -> list[dict]:
 
 
 def _apply_confidence(
-    records: list[dict],
+    records: list[dict[str, Any]],
     errors: list[str],
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Calcula y escribe confidence_score en cada registro."""
     _MODEL_MAP = {"Person": Person, "AcopioCenter": AcopioCenter, "Event": Event}
-    result: list[dict] = []
+    result: list[dict[str, Any]] = []
     for rec in records:
         try:
             entity_type = rec.get("_entity_type", "Person")
@@ -394,15 +416,15 @@ def _apply_confidence(
 
 
 def _apply_minor_protection(
-    records: list[dict],
+    records: list[dict[str, Any]],
     errors: list[str],
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Reduce campos identificables en registros con is_minor=True antes de exportar.
 
     No afecta a Event/AcopioCenter (no tienen is_minor) ni a Person con
     is_minor en None/False — ver scrapers/sanitizers/minor_protection.py.
     """
-    result: list[dict] = []
+    result: list[dict[str, Any]] = []
     for rec in records:
         try:
             result.append(protect_minor_fields(rec))
@@ -411,6 +433,29 @@ def _apply_minor_protection(
             errors.append(f"Error en proteccion de menores (registro omitido): {exc}")
             # Fail-closed: no se agrega el registro sin redactar.
     return result
+
+
+# ---------------------------------------------------------------------------
+# Domain allowlist
+# ---------------------------------------------------------------------------
+
+def _check_allowed_domain(source: SourceConfig) -> str | None:
+    """Valida el host de ``source.url`` contra ``source.allowed_domains``.
+
+    Match **exacto, case-insensitive** (sin subdominios — decision del equipo,
+    issue #132). Devuelve ``None`` si pasa (o si no hay allowlist configurada,
+    caso retrocompatible), o un mensaje de error si el host no esta permitido.
+    """
+    if not source.allowed_domains:
+        return None
+    host = (urlparse(source.url).hostname or "").lower()
+    allowed = {domain.strip().lower() for domain in source.allowed_domains}
+    if host not in allowed:
+        return (
+            f"dominio no permitido: {host!r} no esta en allowed_domains "
+            f"{sorted(allowed)} (fuente {source.id} omitida sin fetchear)"
+        )
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -434,6 +479,15 @@ def _run_source(
     """
     log.info("Iniciando fuente: %s (type=%s, parser=%s)", source.id, source.type, source.parser_asignado)
     source_errors: list[str] = []
+
+    # 0. Domain allowlist — antes de construir el adapter, para no abrir ninguna
+    # conexion ni hacer ningun request a un dominio no auditado. La omision queda
+    # visible en summary["errors"], mismo patron que "parser no implementado".
+    domain_error = _check_allowed_domain(source)
+    if domain_error is not None:
+        log.warning("[%s] %s", source.id, domain_error)
+        all_errors.append(f"[{source.id}] {domain_error}")
+        return ExportResult(errors=[domain_error])
 
     # 1. Adapter
     adapter = _get_adapter(source)
@@ -509,6 +563,7 @@ def _run_source(
         source_slug=source.id,
         source_fetched_ats=fetched_ats,
         source_errors=source_errors,
+        max_concurrent_posts=source.max_concurrent_posts,
     )
     # Arrastrar los errores previos de la fuente al frente del resultado.
     result.errors[0:0] = source_errors
@@ -555,7 +610,7 @@ def run_pipeline(
     output_dir: Path,
     limit: int | None = None,
     max_workers: int = 1,
-) -> dict:
+) -> dict[str, Any]:
     """
     Orquestador principal del pipeline.
 

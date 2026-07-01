@@ -723,6 +723,20 @@ sources:
         assert summary["staging_sent"] == 0
         assert transport.posts == []
 
+    def test_repo_demo_config_processes_synthetic_record(self, tmp_path: Path) -> None:
+        """El quickstart debe procesar el fixture sintético, no solo validar YAML."""
+        transport = _StagingTransport()
+        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport):
+            summary = run_pipeline(
+                config_path=Path("scrapers/config/sources.demo.yaml"),
+                output_dir=tmp_path / "out",
+            )
+        assert summary["errors"] == []
+        assert summary["sources_processed"] == 1
+        assert summary["staging_sent"] == 1
+        assert len(transport.posts) == 1
+        assert transport.posts[0]["rawJson"]["full_name"] == "Juan Demo"
+
     def test_unimplemented_parser_visible_in_summary(self, tmp_path: Path) -> None:
         """Una fuente con parser no registrado aparece VISIBLE en el resumen.
 
@@ -940,3 +954,69 @@ sources: []
         ):
             summary = run_pipeline(config_path=cfg, output_dir=tmp_path / "out")
         assert summary["sources_processed"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Domain allowlist en _run_source (issue #132)
+# ---------------------------------------------------------------------------
+
+def _api_source(url: str, **kw: Any) -> SourceConfig:
+    return SourceConfig(
+        id="test_src",
+        name="Test",
+        type="api_json",
+        enabled=True,
+        trust_tier="C",
+        url=url,
+        refresh_minutes=30,
+        parser_asignado="encuentralos",
+        **kw,
+    )
+
+
+class TestDomainAllowlist:
+    def test_blocks_disallowed_domain_without_fetching(self, monkeypatch):
+        built: list[str] = []
+        monkeypatch.setattr(rp, "_get_adapter", lambda s: built.append(s.id))
+        source = _api_source(
+            "https://evil.example.com/api",
+            allowed_domains=["encuentralos.tecnosoft.dev"],
+        )
+        all_errors: list[str] = []
+
+        result = rp._run_source(source, None, all_errors, _EVENT_ID, MagicMock())
+
+        # Nunca se intentó construir el adapter → ningún request.
+        assert built == []
+        assert result.sent == 0
+        assert any("dominio no permitido" in e for e in result.errors)
+        # El error queda visible en el summary global.
+        assert any("evil.example.com" in e for e in all_errors)
+
+    def test_allows_matching_domain_case_insensitive(self, monkeypatch):
+        built: list[str] = []
+
+        def fake_adapter(s):
+            built.append(s.id)
+            return None  # corta limpio tras pasar el gate de dominio
+
+        monkeypatch.setattr(rp, "_get_adapter", fake_adapter)
+        source = _api_source(
+            "https://encuentralos.tecnosoft.dev/api/personas",
+            allowed_domains=["Encuentralos.Tecnosoft.Dev"],  # mayúsculas
+        )
+
+        result = rp._run_source(source, None, [], _EVENT_ID, MagicMock())
+
+        assert built == ["test_src"]  # pasó el gate, intentó construir adapter
+        assert not any("dominio no permitido" in e for e in result.errors)
+
+    def test_no_allowed_domains_is_unrestricted(self, monkeypatch):
+        built: list[str] = []
+        monkeypatch.setattr(rp, "_get_adapter", lambda s: built.append(s.id))
+        source = _api_source("https://anything.example.org/api")  # sin allowlist
+
+        rp._run_source(source, None, [], _EVENT_ID, MagicMock())
+
+        # Comportamiento retrocompatible: pasa el gate como hoy.
+        assert built == ["test_src"]

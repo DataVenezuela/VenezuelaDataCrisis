@@ -94,7 +94,7 @@ def test_fetch_sets_hash_and_timestamp_formats() -> None:
 
     result = adapter.fetch("https://example.test/demo")
 
-    assert re.fullmatch(r"sha256:[0-9a-f]{64}", result["content_hash"])
+    assert re.fullmatch(r"[0-9a-f]{64}", result["content_hash"])
     assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", result["fetched_at"])
 
 

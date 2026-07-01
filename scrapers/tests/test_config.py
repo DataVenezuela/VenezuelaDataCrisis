@@ -12,7 +12,7 @@ def test_demo_config_is_valid():
 
     assert "sources" in payload
     assert payload["sources"][0]["enabled"] is True
-    assert payload["sources"][0]["parser_asignado"] == "text"
+    assert payload["sources"][0]["parser_asignado"] == "demo_text"
 
 
 def test_starter_config_enabled_sources_have_registered_parser():
@@ -274,3 +274,78 @@ sources:
     payload = validate_sources_config(config)
 
     assert payload["sources"][0]["parser_asignado"] == "html"
+
+
+# ---------------------------------------------------------------------------
+# allowed_domains / rate_limit_per_minute (issue #132)
+# ---------------------------------------------------------------------------
+
+def _config_with(tmp_path, extra_lines: str):
+    config = tmp_path / "src.yaml"
+    config.write_text(
+        f"""
+sources:
+  - id: fuente_test
+    name: Fuente de prueba
+    type: api_json
+    enabled: true
+    trust_tier: C
+    url: "https://example.org/api"
+    refresh_minutes: 30
+    parser_asignado: encuentralos
+{extra_lines}
+""",
+        encoding="utf-8",
+    )
+    return config
+
+
+def test_allowed_domains_and_rate_limit_are_optional(tmp_path):
+    # Ausentes: config valida igual que hoy (retrocompatible).
+    payload = validate_sources_config(_config_with(tmp_path, ""))
+    source = payload["sources"][0]
+    assert "allowed_domains" not in source
+    assert "rate_limit_per_minute" not in source
+
+
+def test_valid_allowed_domains_and_rate_limit(tmp_path):
+    extra = (
+        "    allowed_domains:\n"
+        "      - example.org\n"
+        "    rate_limit_per_minute: 30\n"
+    )
+    payload = validate_sources_config(_config_with(tmp_path, extra))
+    source = payload["sources"][0]
+    assert source["allowed_domains"] == ["example.org"]
+    assert source["rate_limit_per_minute"] == 30
+
+
+def test_empty_allowed_domains_is_rejected(tmp_path):
+    with pytest.raises(ValueError, match="allowed_domains"):
+        validate_sources_config(_config_with(tmp_path, "    allowed_domains: []\n"))
+
+
+def test_allowed_domains_with_blank_entry_is_rejected(tmp_path):
+    extra = '    allowed_domains: ["example.org", "  "]\n'
+    with pytest.raises(ValueError, match="allowed_domains"):
+        validate_sources_config(_config_with(tmp_path, extra))
+
+
+def test_non_list_allowed_domains_is_rejected(tmp_path):
+    with pytest.raises(ValueError, match="allowed_domains"):
+        validate_sources_config(_config_with(tmp_path, "    allowed_domains: example.org\n"))
+
+
+def test_zero_rate_limit_is_rejected(tmp_path):
+    with pytest.raises(ValueError, match="rate_limit_per_minute"):
+        validate_sources_config(_config_with(tmp_path, "    rate_limit_per_minute: 0\n"))
+
+
+def test_negative_rate_limit_is_rejected(tmp_path):
+    with pytest.raises(ValueError, match="rate_limit_per_minute"):
+        validate_sources_config(_config_with(tmp_path, "    rate_limit_per_minute: -5\n"))
+
+
+def test_bool_rate_limit_is_rejected(tmp_path):
+    with pytest.raises(ValueError, match="rate_limit_per_minute"):
+        validate_sources_config(_config_with(tmp_path, "    rate_limit_per_minute: true\n"))

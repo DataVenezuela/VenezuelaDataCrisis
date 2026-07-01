@@ -58,6 +58,7 @@ contenido para `content_hash`, backoff exponencial con jitter) viven en
 | Parser | Módulo | Estado |
 |--------|--------|--------|
 | `encuentralos` | `scrapers/parsers/encuentralos_parser.py` | ✅ Implementado |
+| `demo_text` | `scrapers/parsers/demo_text_parser.py` | ✅ Implementado solo para el fixture sintético local |
 
 Si una fuente no tiene parser concreto asignado, `_get_parser` loguea un
 warning y la fuente se omite (devuelve `None`). No hay parser de fallback

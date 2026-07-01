@@ -143,7 +143,7 @@ def test_fetch_local_pdf_returns_text_by_page(tmp_path: Path) -> None:
     assert result["records_in_page"] is None
     assert result["pages"] == 2
     assert result["extraction_method"] == "pdfplumber"
-    assert re.fullmatch(r"sha256:[0-9a-f]{64}", result["content_hash"])
+    assert re.fullmatch(r"[0-9a-f]{64}", result["content_hash"])
 
 
 def test_fetch_all_yields_one_document(tmp_path: Path) -> None:

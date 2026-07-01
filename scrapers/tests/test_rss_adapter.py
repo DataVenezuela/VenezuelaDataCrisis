@@ -89,7 +89,7 @@ def test_fetch_all_raw_content_has_standard_fields() -> None:
     assert first["source_url"] == "https://example.test/feed.xml"
     assert first["http_status"] == 200
     assert first["content_type"] == "application/rss+xml"
-    assert re.fullmatch(r"sha256:[0-9a-f]{64}", first["content_hash"])
+    assert re.fullmatch(r"[0-9a-f]{64}", first["content_hash"])
     assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", first["fetched_at"])
 
 
