@@ -20,7 +20,7 @@ import os
 import time
 import threading
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
@@ -337,7 +337,7 @@ class StagingExporter:
         source_slug: str,
         source_fetched_ats: list[str],
         source_errors: list[str] | None = None,
-        max_concurrent_posts: int = 1,
+        max_concurrent_posts: int | None = None,
     ) -> ExportResult:
         """Exporta los records de ``source_slug``; avanza su watermark si todo OK.
 
@@ -348,7 +348,7 @@ class StagingExporter:
         llegaron a staging (p.ej. un menor) saltando su fetched_at.
 
         ``max_concurrent_posts`` controla el paralelismo del loop de POSTs.
-        El default 1 mantiene el comportamiento secuencial original.
+        El default ``None`` equivale a 1 worker (comportamiento secuencial original).
         """
         result = ExportResult()
 
@@ -363,12 +363,16 @@ class StagingExporter:
             return result
 
         def _post_one(rec: dict[str, object]) -> None:
-            payload = self._build_payload(rec, source_slug)
             try:
+                payload = self._build_payload(rec, source_slug)
                 resp = self._post_with_retry(_APORTES_PATH, payload)
             except httpx.HTTPError as exc:
                 with _lock:
                     result.errors.append(f"POST {_APORTES_PATH} fallo: {exc}")
+                return
+            except Exception as exc:
+                with _lock:
+                    result.errors.append(f"POST {_APORTES_PATH} error inesperado: {exc}")
                 return
             if resp.status_code in (200, 201):
                 with _lock:
@@ -384,15 +388,9 @@ class StagingExporter:
                     )
 
         _lock = threading.Lock()
-        workers = max(1, max_concurrent_posts)
-        if workers == 1:
-            for rec in records:
-                _post_one(rec)
-        else:
-            with ThreadPoolExecutor(max_workers=workers) as pool:
-                futures = [pool.submit(_post_one, rec) for rec in records]
-                for fut in as_completed(futures):
-                    fut.result()
+        workers = max(1, max_concurrent_posts or 0)
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            list(pool.map(_post_one, records))
 
         # El watermark solo avanza si no hubo NINGUN error: ni de POST/PUT ni
         # previo de la fuente (source_errors).

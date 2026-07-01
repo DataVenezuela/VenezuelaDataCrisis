@@ -500,6 +500,37 @@ class TestSourceErrorsWatermark:
         assert t.watermark_puts[-1]["watermarkAt"] == "2026-06-24T15:55:00Z"
 
 
+# --- paralelismo de POSTs ---------------------------------------------------
+
+class TestConcurrentPosts:
+    def test_contadores_correctos_con_multiples_workers(self) -> None:
+        records = [_person(f"P{i}", det=f"det{i}") for i in range(20)]
+        t = _RecordingTransport(aportes_status=201)
+        res = _exporter(t).export_source(
+            records,
+            source_slug="demo",
+            source_fetched_ats=["2026-06-24T15:00:00Z"],
+            max_concurrent_posts=4,
+        )
+        assert res.sent == 20
+        assert res.duplicates == 0
+        assert res.errors == []
+        assert len(t.posts) == 20
+
+    def test_errores_acumulan_con_multiples_workers(self) -> None:
+        records = [_person(f"P{i}", det=f"det{i}") for i in range(10)]
+        t = _RecordingTransport(aportes_status=409)
+        res = _exporter(t).export_source(
+            records,
+            source_slug="demo",
+            source_fetched_ats=["2026-06-24T15:00:00Z"],
+            max_concurrent_posts=4,
+        )
+        assert res.duplicates == 10
+        assert res.sent == 0
+        assert res.errors == []
+
+
 # --- dry-run ----------------------------------------------------------------
 
 class TestDryRun:

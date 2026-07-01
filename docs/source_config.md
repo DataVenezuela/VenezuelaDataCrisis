@@ -33,6 +33,7 @@ sources:
     enabled: true
     refresh_minutes: 30
     max_concurrent_pages: 4  # opcional; solo aplica si la primera pagina reporta total
+    max_concurrent_posts: 8  # opcional; POSTs paralelos al staging API (default: 1)
     # pagination:               # NO IMPLEMENTADO — ver advertencia arriba
     #   path: /api/personas
     #   limit_param: limit
@@ -64,6 +65,7 @@ sources:
 | `enabled` | sí | `true`/`false`. Las deshabilitadas se ignoran |
 | `refresh_minutes` | no | Frecuencia mínima de scraping. Default: 60 |
 | `max_concurrent_pages` | no | Máximo de páginas API en vuelo cuando la primera respuesta reporta `total`, `count`, `total_count` o `totalCount`. Si se omite, `api_adapter.py` usa un default conservador. Sin total confiable, el adapter conserva paginación secuencial. |
+| `max_concurrent_posts` | no | Máximo de POSTs en paralelo al staging API durante `export_source()`. Default: `1` (comportamiento secuencial original). Útil para fuentes con muchos registros donde la latencia de red domina. |
 
 No se deben agregar campos nuevos al contrato sin actualizar este documento.
 

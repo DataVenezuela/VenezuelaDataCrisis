@@ -520,6 +520,7 @@ def _run_source(
         source_slug=source.id,
         source_fetched_ats=fetched_ats,
         source_errors=source_errors,
+        max_concurrent_posts=source.max_concurrent_posts,
     )
     # Arrastrar los errores previos de la fuente al frente del resultado.
     result.errors[0:0] = source_errors
