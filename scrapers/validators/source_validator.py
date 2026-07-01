@@ -95,6 +95,22 @@ def _validate_optional_fields(source: dict[str, Any], label: str) -> None:
                 f"en fuentes api_json paginadas)."
             )
 
+    allowed_domains = source.get("allowed_domains")
+    if allowed_domains is not None:
+        if not isinstance(allowed_domains, list) or not allowed_domains or not all(
+            isinstance(domain, str) and domain.strip() for domain in allowed_domains
+        ):
+            raise ValueError(
+                f"{label} debe tener 'allowed_domains' como lista no vacia de textos no vacios."
+            )
+
+    rate_limit = source.get("rate_limit_per_minute")
+    if rate_limit is not None:
+        if isinstance(rate_limit, bool) or not isinstance(rate_limit, int) or rate_limit <= 0:
+            raise ValueError(
+                f"{label} debe tener 'rate_limit_per_minute' como entero positivo."
+            )
+
     max_concurrent_pages = source.get("max_concurrent_pages")
     if max_concurrent_pages is not None:
         if (

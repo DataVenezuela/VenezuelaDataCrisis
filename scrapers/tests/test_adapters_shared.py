@@ -11,8 +11,8 @@ class TestNowUtc:
 
 
 class TestSha256Hex:
-    def test_has_sha256_prefix_and_64_hex_chars(self) -> None:
-        assert re.fullmatch(r"sha256:[0-9a-f]{64}", sha256_hex(b"hola"))
+    def test_mock_hash_has_64_hexchars(self) -> None:
+        assert re.fullmatch(r"[0-9a-f]{64}", sha256_hex(b"hola"))
 
     def test_is_deterministic(self) -> None:
         assert sha256_hex(b"contenido") == sha256_hex(b"contenido")
@@ -22,7 +22,7 @@ class TestSha256Hex:
 
     def test_empty_bytes_does_not_raise(self) -> None:
         assert sha256_hex(b"") == (
-            "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         )
 
 

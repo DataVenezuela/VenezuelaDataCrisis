@@ -40,7 +40,7 @@ from typing import Any, Iterator
 
 import httpx
 
-from scrapers.adapters._shared import backoff_delay, now_utc, sha256_hex
+from scrapers.adapters._shared import RateLimiter, backoff_delay, now_utc, sha256_hex
 from scrapers.adapters.http_client import USER_AGENT
 
 from .base import RawContent
@@ -146,6 +146,9 @@ class ApiAdapter:
     source_key:
         Identificador de la fuente para el campo ``source_key`` de RawContent.
         Si no se pasa, se usa el dominio del ``base_url``.
+    rate_limiter:
+        Limitador de tasa opcional. Si se pasa, se invoca ``wait()`` antes de
+        cada GET para no exceder el tope de requests por ventana de la fuente.
     """
 
     def __init__(
@@ -158,12 +161,14 @@ class ApiAdapter:
         max_concurrent_pages: int | None = _DEFAULT_MAX_CONCURRENT_PAGES,
         source_key: str | None = None,
         default_path: str | None = None,
+        rate_limiter: RateLimiter | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.page_size = page_size
         self.timeout = timeout
         self.max_retries = max_retries
         self.max_concurrent_pages = _coerce_max_concurrent_pages(max_concurrent_pages)
+        self.rate_limiter = rate_limiter
         # Fix: default_path as constructor param instead of monkey-patching
         # a private attr after construction. Allows _run_source to know the
         # API path without coupling to internal attribute names.
@@ -199,6 +204,8 @@ class ApiAdapter:
 
         for attempt in range(1, self.max_retries + 1):
             try:
+                if self.rate_limiter is not None:
+                    self.rate_limiter.wait()
                 resp = self._client.get(path, params=params)
 
                 if resp.status_code in _RETRYABLE_STATUS:

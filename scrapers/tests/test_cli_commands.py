@@ -52,19 +52,19 @@ class TestListEnabled:
 
 
 class TestIngest:
-    def test_ingest_demo_source_reports_parser_error(self, tmp_path: Path) -> None:
+    def test_ingest_demo_source_succeeds_in_dry_run(self, tmp_path: Path) -> None:
         result = _run_cli(
             "ingest",
             "--config", str(_DEMO_CONFIG),
             "--source", "demo_manual_synthetic",
             "--output-dir", str(tmp_path),
         )
-        assert result.returncode != 0
+        assert result.returncode == 0
         output = json.loads(result.stdout)
         assert output["source_id"] == "demo_manual_synthetic"
-        assert output["status"] == "error"
+        assert output["status"] == "ok"
         assert output["records_exported"] == 0
-        assert "parser no implementado" in output["errors"][0]
+        assert output["errors"] == []
 
     def test_ingest_unknown_source_fails(self) -> None:
         result = _run_cli(

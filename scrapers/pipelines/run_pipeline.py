@@ -55,6 +55,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from scrapers.adapters._shared import now_utc, sha256_hex
 from scrapers.adapters.base import RawContent
@@ -239,7 +240,12 @@ def _get_adapter(source: SourceConfig) -> Any:
     stype = source.type
 
     if stype == "api_json":
-        from scrapers.adapters.api_adapter import ApiAdapter
+        from scrapers.adapters._shared import RateLimiter
+        from scrapers.adapters.api_adapter import (
+            ApiAdapter,
+            _DEFAULT_TIMEOUT,
+            _MAX_RETRIES,
+        )
         # base_url = esquema + host; el path se pasa en fetch_all
         import httpx
         parsed = httpx.URL(source.url)
@@ -299,6 +305,7 @@ def _get_parser(source: SourceConfig, event_id: str) -> Any:
 
     Parsers concretos (producen entidades tipadas):
       encuentralos  -> EncuentralosParser -> list[Person]
+      demo_text     -> DemoTextParser -> list[Person] (fixture sintetico local)
 
     Si ``parser_asignado`` no tiene implementacion registrada se loguea un
     warning y se devuelve None; ``_run_source`` trata la ausencia de parser
@@ -315,6 +322,10 @@ def _get_parser(source: SourceConfig, event_id: str) -> Any:
         from scrapers.parsers.encuentralos_parser import EncuentralosParser
         secret = os.getenv("PII_HMAC_SECRET")
         return EncuentralosParser(event_id=event_id, secret=secret)
+
+    if pa == "demo_text":
+        from scrapers.parsers.demo_text_parser import DemoTextParser
+        return DemoTextParser(event_id=event_id)
 
     log.warning(
         "Parser %r no implementado (fuente=%s) — fuente omitida",
@@ -610,6 +621,29 @@ def _apply_minor_protection(
 
 
 # ---------------------------------------------------------------------------
+# Domain allowlist
+# ---------------------------------------------------------------------------
+
+def _check_allowed_domain(source: SourceConfig) -> str | None:
+    """Valida el host de ``source.url`` contra ``source.allowed_domains``.
+
+    Match **exacto, case-insensitive** (sin subdominios — decision del equipo,
+    issue #132). Devuelve ``None`` si pasa (o si no hay allowlist configurada,
+    caso retrocompatible), o un mensaje de error si el host no esta permitido.
+    """
+    if not source.allowed_domains:
+        return None
+    host = (urlparse(source.url).hostname or "").lower()
+    allowed = {domain.strip().lower() for domain in source.allowed_domains}
+    if host not in allowed:
+        return (
+            f"dominio no permitido: {host!r} no esta en allowed_domains "
+            f"{sorted(allowed)} (fuente {source.id} omitida sin fetchear)"
+        )
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Orquestador por fuente
 # ---------------------------------------------------------------------------
 
@@ -636,6 +670,15 @@ def _run_source(
     """
     log.info("Iniciando fuente: %s (type=%s, parser=%s)", source.id, source.type, source.parser_asignado)
     source_errors: list[str] = []
+
+    # 0. Domain allowlist — antes de construir el adapter, para no abrir ninguna
+    # conexion ni hacer ningun request a un dominio no auditado. La omision queda
+    # visible en summary["errors"], mismo patron que "parser no implementado".
+    domain_error = _check_allowed_domain(source)
+    if domain_error is not None:
+        log.warning("[%s] %s", source.id, domain_error)
+        all_errors.append(f"[{source.id}] {domain_error}")
+        return ExportResult(errors=[domain_error])
 
     # 1. Adapter
     adapter = _get_adapter(source)
@@ -743,6 +786,7 @@ def _run_source(
         source_slug=source.id,
         source_fetched_ats=fetched_ats,
         source_errors=source_errors,
+        max_concurrent_posts=source.max_concurrent_posts,
     )
     # Arrastrar los errores previos de la fuente al frente del resultado.
     result.errors[0:0] = source_errors
