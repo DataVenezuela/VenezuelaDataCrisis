@@ -10,11 +10,12 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Iterator
 from datetime import date
-from typing import Any
-from xml.etree.ElementTree import Element, ParseError
+from typing import Any, Protocol
 
 import defusedxml.ElementTree as ET
+from defusedxml.ElementTree import ParseError
 
 from scrapers.adapters.base import RawContent
 from scrapers.models import Person
@@ -38,6 +39,15 @@ _STATUS_MAP: dict[str, str] = {
 _EMAIL_RE = re.compile(r"\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b")
 _PHONE_RE = re.compile(r"(?<!\w)(?:\+?\d[\d\s().-]{6,}\d)(?!\w)")
 _VENEZUELAN_ID_RE = re.compile(r"\b[VEJG]-?\d{6,9}\b", re.IGNORECASE)
+
+
+class _ElementLike(Protocol):
+    tag: str
+    text: str | None
+
+    def iter(self) -> Iterator["_ElementLike"]: ...
+
+    def __iter__(self) -> Iterator["_ElementLike"]: ...
 
 
 class PfifParser:
@@ -72,7 +82,7 @@ class PfifParser:
                 people.append(person)
         return people
 
-    def _parse_person(self, node: Element, raw: RawContent) -> Person | None:
+    def _parse_person(self, node: _ElementLike, raw: RawContent) -> Person | None:
         full_name = normalize_proper_name(_child_text(node, "full_name"))
         if not full_name:
             log.warning("%s: registro PFIF sin full_name - omitido", SOURCE_KEY)
@@ -106,7 +116,7 @@ class PfifParser:
         )
 
 
-def _person_nodes(root: Element) -> list[Element]:
+def _person_nodes(root: _ElementLike) -> list[_ElementLike]:
     return [
         node
         for node in root.iter()
@@ -114,7 +124,7 @@ def _person_nodes(root: Element) -> list[Element]:
     ]
 
 
-def _first_child(node: Element | None, name: str) -> Element | None:
+def _first_child(node: _ElementLike | None, name: str) -> _ElementLike | None:
     if node is None:
         return None
     for child in list(node):
@@ -123,7 +133,7 @@ def _first_child(node: Element | None, name: str) -> Element | None:
     return None
 
 
-def _child_text(node: Element | None, name: str) -> str | None:
+def _child_text(node: _ElementLike | None, name: str) -> str | None:
     child = _first_child(node, name)
     if child is None or child.text is None:
         return None
@@ -141,7 +151,7 @@ def _map_status(raw_status: str | None) -> str:
     return _STATUS_MAP.get(raw_status.strip().lower(), "unknown")
 
 
-def _location_text(node: Element) -> str | None:
+def _location_text(node: _ElementLike) -> str | None:
     city = normalize_text(_child_text(node, "home_city"))
     state = normalize_text(_child_text(node, "home_state"))
     raw = ", ".join(part for part in (city, state) if part)
@@ -173,7 +183,7 @@ def _age_range_from_birth_date(raw_birth_date: str | None, reference_date: date)
     return {"min": age, "max": age}
 
 
-def _build_nota(node: Element, person_record: Element | None, source_url: str | None) -> str | None:
+def _build_nota(node: _ElementLike, person_record: _ElementLike | None, source_url: str | None) -> str | None:
     parts: list[str] = []
     for label, value in (
         ("notes", _child_text(node, "notes")),
