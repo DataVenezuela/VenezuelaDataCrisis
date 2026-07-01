@@ -18,7 +18,9 @@ import json
 import logging
 import os
 import time
+import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
@@ -335,6 +337,7 @@ class StagingExporter:
         source_slug: str,
         source_fetched_ats: list[str],
         source_errors: list[str] | None = None,
+        max_concurrent_posts: int = 1,
     ) -> ExportResult:
         """Exporta los records de ``source_slug``; avanza su watermark si todo OK.
 
@@ -343,6 +346,9 @@ class StagingExporter:
         inyectan despues en run_pipeline. Si no estan vacios, el watermark NO
         avanza: evita perder silenciosamente registros descartados que nunca
         llegaron a staging (p.ej. un menor) saltando su fetched_at.
+
+        ``max_concurrent_posts`` controla el paralelismo del loop de POSTs.
+        El default 1 mantiene el comportamiento secuencial original.
         """
         result = ExportResult()
 
@@ -356,22 +362,37 @@ class StagingExporter:
                 )
             return result
 
-        for rec in records:
+        def _post_one(rec: dict[str, object]) -> None:
             payload = self._build_payload(rec, source_slug)
             try:
                 resp = self._post_with_retry(_APORTES_PATH, payload)
             except httpx.HTTPError as exc:
-                result.errors.append(f"POST {_APORTES_PATH} fallo: {exc}")
-                continue
+                with _lock:
+                    result.errors.append(f"POST {_APORTES_PATH} fallo: {exc}")
+                return
             if resp.status_code in (200, 201):
-                result.sent += 1
+                with _lock:
+                    result.sent += 1
             elif resp.status_code == 409:
-                result.duplicates += 1
+                with _lock:
+                    result.duplicates += 1
             else:
-                result.errors.append(
-                    f"{_APORTES_PATH} status {resp.status_code} "
-                    f"para externalId={payload['externalId']}"
-                )
+                with _lock:
+                    result.errors.append(
+                        f"{_APORTES_PATH} status {resp.status_code} "
+                        f"para externalId={payload['externalId']}"
+                    )
+
+        _lock = threading.Lock()
+        workers = max(1, max_concurrent_posts)
+        if workers == 1:
+            for rec in records:
+                _post_one(rec)
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = [pool.submit(_post_one, rec) for rec in records]
+                for fut in as_completed(futures):
+                    fut.result()
 
         # El watermark solo avanza si no hubo NINGUN error: ni de POST/PUT ni
         # previo de la fuente (source_errors).
