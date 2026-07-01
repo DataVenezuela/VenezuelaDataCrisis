@@ -64,6 +64,6 @@ sources:
     trust_tier: C
     url: "https://encuentralos.tecnosoft.dev/api/personas"
     refresh_minutes: 30
-    parser_asignado: encuentralos_errored
+    parser_asignado: encuentralos
     required_keywords: []
     notes: "API paginada (limit/offset, ~290 registros). Usa ApiAdapter con page_size=20."
