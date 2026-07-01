@@ -198,8 +198,10 @@ class _SinglePageTransport(httpx.BaseTransport):
 
     def __init__(self, records: int) -> None:
         self.records = records
+        self.call_count = 0
 
     def handle_request(self, _: httpx.Request) -> httpx.Response:
+        self.call_count += 1
         items = _synthetic_records(self.records)
         return _json_response({"data": items, "total": self.records})
 
@@ -214,6 +216,7 @@ class _ErrorTransport(httpx.BaseTransport):
 def _adapter_with_transport(
     transport: httpx.BaseTransport,
     page_size: int = 20,
+    probe_limit: int | None = None,
     max_retries: int = 5,
     max_concurrent_pages: int | None = 4,
 ) -> ApiAdapter:
@@ -221,6 +224,7 @@ def _adapter_with_transport(
     adapter = ApiAdapter(
         base_url="https://mock.test",
         page_size=page_size,
+        probe_limit=probe_limit,
         max_retries=max_retries,
         max_concurrent_pages=max_concurrent_pages,
         source_key="mock_source",
@@ -732,6 +736,41 @@ class _CapedLimitTransport(httpx.BaseTransport):
 
 
 class TestEffectivePageSizeAutoDetect:
+    def test_probe_limit_supported_offsets_step_by_probe_size(self) -> None:
+        """Si el API soporta probe_limit=1000, los offsets saltan de 1000 en 1000."""
+        transport = _PaginatedTransport(total=2500, page_size=20)
+        adapter = _adapter_with_transport(
+            transport,
+            page_size=20,
+            probe_limit=1000,
+            max_concurrent_pages=4,
+        )
+
+        list(adapter.fetch_all("/api/personas"))
+
+        assert "limit=1000" in transport.calls[0]
+        assert sorted(
+            int(dict(httpx.URL(call).params)["offset"]) for call in transport.calls
+        ) == [0, 1000, 2000]
+
+    def test_probe_limit_caps_to_returned_count(self) -> None:
+        """Si pedimos 1000 y el API capea en 100, los offsets usan 100."""
+        total = 250
+        cap = 100
+        transport = _CapedLimitTransport(total=total, cap=cap)
+        adapter = _adapter_with_transport(
+            transport,
+            page_size=20,
+            probe_limit=1000,
+            max_concurrent_pages=4,
+        )
+
+        pages = list(adapter.fetch_all("/api/personas"))
+        all_records = [r for p in pages for r in p["raw_content"]["data"]]
+
+        assert len(all_records) == total
+        assert sorted(transport.offsets) == [0, 100, 200]
+
     def test_no_records_skipped_when_api_caps_limit(self) -> None:
         """Si la API capea el limit (pedimos 100, devuelve 20), todos los registros llegan."""
         total = 50
@@ -780,11 +819,17 @@ class TestEffectivePageSizeAutoDetect:
     def test_limit_reflects_returned_count_on_partial_single_page(self) -> None:
         """En página única parcial, limit == registros recibidos, no page_size solicitado."""
         transport = _SinglePageTransport(records=5)
-        adapter = _adapter_with_transport(transport, page_size=20, max_concurrent_pages=4)
+        adapter = _adapter_with_transport(
+            transport,
+            page_size=20,
+            probe_limit=1000,
+            max_concurrent_pages=4,
+        )
 
         page = next(adapter.fetch_all("/api/personas"))
 
         assert page["limit"] == 5
+        assert transport.call_count == 1
 
 
 class TestNoModuleLevelClientLeak:
