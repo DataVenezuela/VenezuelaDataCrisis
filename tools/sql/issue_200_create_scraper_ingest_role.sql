@@ -29,4 +29,5 @@ GRANT scraper_ingest TO authenticator;
 GRANT USAGE ON SCHEMA public TO scraper_ingest;
 GRANT INSERT, UPDATE ON public.aportes TO scraper_ingest;
 GRANT INSERT, UPDATE ON public.source_watermarks TO scraper_ingest;
+GRANT SELECT ON public.source_watermarks TO scraper_ingest;
 GRANT SELECT ON public.sources TO scraper_ingest;

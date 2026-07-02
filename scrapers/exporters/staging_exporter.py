@@ -105,7 +105,13 @@ class StagingConfig:
 
 @dataclass
 class ExportResult:
-    """Resultado agregado de exportar los records de una fuente."""
+    """Resultado agregado de exportar los records de una fuente.
+
+    ``duplicates`` siempre es 0: con ``resolution=merge-duplicates``
+    PostgREST nunca devuelve 409. El contador se conserva para no romper
+    el contrato de ``run_pipeline`` pero ya no se incrementa en el nuevo
+    esquema de upsert.
+    """
 
     sent: int = 0
     duplicates: int = 0

@@ -459,7 +459,7 @@ class TestStagingDisabled:
         # Sin STAGING_*: el exporter entra en dry-run; el transport no debe
         # recibir ningun POST aunque la factory este parcheada.
         env = {k: v for k, v in os.environ.items()
-               if k not in ("SUPABASE_URL", "SUPABASE_PUBLISHABLE_KEY")}
+               if k not in ("SUPABASE_URL", "SUPABASE_PUBLISHABLE_KEY", "SUPABASE_INGEST_JWT")}
         with patch.dict(os.environ, env, clear=True), _patch_exporter(transport), patch(
             "scrapers.pipelines.run_pipeline._get_adapter", return_value=_mock_adapter()
         ), patch(
