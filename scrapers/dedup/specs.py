@@ -89,16 +89,20 @@ def person_block_keys(rec: dict[str, object]) -> list[str]:
 
     Fuerte (solo si hay cedula_hmac no vacio): ced:{event_id}:{cedula_hmac}.
     cedula_hmac ya es un HMAC opaco; no se re-hashea.
-    Fonetica (siempre): phon:{event_id}:{estado}:{phonetic_hash(full_name)}.
+    Fonetica (siempre): phon:{event_id}:{phonetic_hash(full_name)}.
+
+    Location is intentionally excluded from the phonetic key: two records
+    with the same full_name but different location granularity (e.g.
+    "Caracas" vs "Caracas, Miranda") must land in the same block and
+    be compared, since similarity_score already accounts for location.
     """
     event_id = str(rec.get("event_id") or "")
-    estado = normalize_for_match(str(rec.get("last_known_location") or ""))
     ph = phonetic_hash(str(rec.get("full_name") or ""))
     keys: list[str] = []
     cedula_hmac = rec.get("cedula_hmac")
     if isinstance(cedula_hmac, str) and cedula_hmac.strip():
         keys.append(f"ced:{event_id}:{cedula_hmac}")
-    keys.append(f"phon:{event_id}:{estado}:{ph}")
+    keys.append(f"phon:{event_id}:{ph}")
     return keys
 
 

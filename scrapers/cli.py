@@ -134,8 +134,8 @@ def _cmd_consolidate(args: argparse.Namespace) -> None:
     for rec in records:
         try:
             events.append(Event(**rec))
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f"WARN: registro no se pudo parsear como Event: {exc}", file=sys.stderr)
 
     if events:
         deduped, n_removed = deduplicate_typed_entities(events)

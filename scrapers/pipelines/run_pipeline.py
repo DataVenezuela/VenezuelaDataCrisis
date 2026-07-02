@@ -692,8 +692,8 @@ def _run_source(
             if hasattr(adapter, "close"):
                 try:
                     adapter.close()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    log.warning("adapter.close() fallo: %s", exc)
         for raw in pages:
             quarantine_batch.append(
                 _quarantine_from_text(
@@ -721,8 +721,8 @@ def _run_source(
         if hasattr(adapter, "close"):
             try:
                 adapter.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                log.warning("adapter.close() fallo en %s: %s", source.id, exc)
 
     log.info("%s: %d pagina(s) descargadas", source.id, len(pages))
 

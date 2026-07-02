@@ -10,14 +10,23 @@ pendiente.
 from __future__ import annotations
 
 import logging
+import json
+from typing import Any
+
+import httpx
+import pytest
+
+import scrapers.jobs.consolidation_job as consolidation_job
 
 from scrapers.jobs.consolidation_job import (
+    PersonConsolidationConfig,
     canonical_from_winner,
     consolidate_entity_type,
     default_tier_rank,
     group_by_dedup_hash,
     main,
     pick_winner,
+    run_person_consolidation,
 )
 from scrapers.jobs.ports import ConsolidationDataPort, FakeInMemoryAdapter, Record
 
@@ -283,3 +292,300 @@ def test_main_cli_dry_run_retorna_cero() -> None:
 
 def test_main_cli_rechaza_batch_size_invalido() -> None:
     assert main(["--batch-size", "0"]) == 2
+
+
+# --- Person dedup candidates (#92) -----------------------------------------
+
+_EVENT_ID = "8f14e45f-ceea-467e-bd5d-0a4f2e0c1a3a"
+
+
+def _person_aporte(
+    aporte_id: str,
+    person_record_id: str,
+    name: str = "Juan Perez",
+    cedula_hmac: str | None = "same",
+    created_at: str = "2024-01-01T00:00:00Z",
+    block_keys: list[str] | None = None,
+    include_block_keys: bool = True,
+    event_id: str = _EVENT_ID,
+    phonetic_hash: str = "JN",
+) -> dict[str, Any]:
+    row = {
+        "id": aporte_id,
+        "person_record_id": person_record_id,
+        "entity_type": "person",
+        "full_name": name,
+        "event_id": event_id,
+        "cedula_hmac": cedula_hmac,
+        "last_known_location": "Caracas, Distrito Capital",
+        "phonetic_hash": phonetic_hash,
+        "age_range": {"min": 25, "max": 35},
+        "status": "missing",
+        "created_at": created_at,
+        "consolidated_at": None,
+    }
+    if include_block_keys:
+        row["block_keys"] = block_keys or [f"ced:{event_id}:same"]
+    return row
+
+
+class _PersonTransport(httpx.BaseTransport):
+    def __init__(
+        self,
+        batches: list[list[dict[str, Any]]],
+        *,
+        existing: list[dict[str, Any]] | None = None,
+        post_status: int = 201,
+        patch_candidate_status: int = 204,
+        mark_status: int = 204,
+    ) -> None:
+        self.batches = batches
+        self.existing = existing or []
+        self.post_status = post_status
+        self.patch_candidate_status = patch_candidate_status
+        self.mark_status = mark_status
+        self.get_urls: list[str] = []
+        self.post_bodies: list[Any] = []
+        self.patch_urls: list[str] = []
+        self._batch_idx = 0
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if request.method == "GET" and path == "/rest/v1/aportes":
+            self.get_urls.append(str(request.url))
+            batch = self.batches[self._batch_idx] if self._batch_idx < len(self.batches) else []
+            self._batch_idx += 1
+            return httpx.Response(200, json=batch)
+        if request.method == "GET" and path == "/rest/v1/dedup_candidates":
+            self.get_urls.append(str(request.url))
+            return httpx.Response(200, json=self.existing)
+        if request.method == "POST" and path == "/rest/v1/dedup_candidates":
+            self.post_bodies.append(json.loads(request.content))
+            return httpx.Response(self.post_status)
+        if request.method == "PATCH" and path == "/rest/v1/dedup_candidates":
+            self.patch_urls.append(str(request.url))
+            return httpx.Response(self.patch_candidate_status)
+        if request.method == "PATCH" and path == "/rest/v1/aportes":
+            self.patch_urls.append(str(request.url))
+            return httpx.Response(self.mark_status)
+        return httpx.Response(404, json={"error": "not found"})
+
+
+def _person_client(transport: _PersonTransport) -> httpx.Client:
+    return httpx.Client(base_url="https://test.supabase.co", transport=transport)
+
+
+def _person_config(**overrides: Any) -> PersonConsolidationConfig:
+    return PersonConsolidationConfig(
+        supabase_url="https://test.supabase.co",
+        supabase_service_key="test-key",
+        batch_size=int(overrides.get("batch_size", 500)),
+        threshold=float(overrides.get("threshold", 0.85)),
+    )
+
+
+def test_person_candidate_payload_matches_master_schema() -> None:
+    rows = [
+        _person_aporte("a1", "person-1"),
+        _person_aporte("a2", "person-2"),
+    ]
+    transport = _PersonTransport([rows])
+    result = run_person_consolidation(_person_config(), client=_person_client(transport))
+
+    assert result.errors == []
+    assert result.candidates_inserted_or_updated == 1
+    assert len(transport.post_bodies) == 1
+    assert isinstance(transport.post_bodies[0], list)
+    body = transport.post_bodies[0][0]
+    assert body["event_id"] == _EVENT_ID
+    assert body["left_person_record_id"] == "person-1"
+    assert body["right_person_record_id"] == "person-2"
+    assert body["blocking_key"] == f"ced:{_EVENT_ID}:same"
+    assert body["decision"] == "pending"
+    assert "left_person" not in body
+    assert "right_person" not in body
+
+
+def test_person_cursor_includes_same_timestamp_higher_id() -> None:
+    first = [_person_aporte("0001", "person-1")]
+    second = [_person_aporte("0002", "person-2", name="Juan Perez Gonzalez")]
+    transport = _PersonTransport([first, second, []])
+    result = run_person_consolidation(
+        _person_config(batch_size=1, threshold=0.99),
+        client=_person_client(transport),
+    )
+
+    assert result.records_read == 2
+    second_fetch = [url for url in transport.get_urls if "/rest/v1/aportes" in url][1]
+    assert "or=" in second_fetch
+    assert "created_at.gt.2024-01-01T00%3A00%3A00Z" in second_fetch
+    assert "and%28created_at.eq.2024-01-01T00%3A00%3A00Z%2Cid.gt.0001%29" in second_fetch
+
+
+def test_person_upsert_error_does_not_mark_consolidated() -> None:
+    rows = [
+        _person_aporte("a1", "person-1"),
+        _person_aporte("a2", "person-2"),
+    ]
+    transport = _PersonTransport([rows], post_status=500)
+    result = run_person_consolidation(_person_config(), client=_person_client(transport))
+
+    assert result.upsert_errors == 1
+    assert result.errors
+    assert not any("/rest/v1/aportes" in url for url in transport.patch_urls)
+
+
+def test_person_batch_lookup_does_not_get_per_candidate() -> None:
+    rows = [
+        _person_aporte("a1", "person-1"),
+        _person_aporte("a2", "person-2"),
+        _person_aporte("a3", "person-3"),
+    ]
+    transport = _PersonTransport([rows])
+    result = run_person_consolidation(_person_config(), client=_person_client(transport))
+
+    dedup_gets = [url for url in transport.get_urls if "/rest/v1/dedup_candidates" in url]
+    assert result.candidates_inserted_or_updated == 3
+    assert len(dedup_gets) == 1
+    assert len(transport.post_bodies) == 1
+    assert len(transport.post_bodies[0]) == 3
+
+
+def test_person_existing_candidate_is_idempotent_update() -> None:
+    rows = [
+        _person_aporte("a1", "person-1"),
+        _person_aporte("a2", "person-2"),
+    ]
+    transport = _PersonTransport(
+        [rows],
+        existing=[
+            {
+                "candidate_id": "cand-1",
+                "left_person_record_id": "person-2",
+                "right_person_record_id": "person-1",
+                "blocking_key": f"ced:{_EVENT_ID}:same",
+            }
+        ],
+    )
+    result = run_person_consolidation(_person_config(), client=_person_client(transport))
+
+    assert result.upsert_errors == 0
+    assert result.duplicates_skipped == 1
+    assert result.candidates_inserted_or_updated == 1
+    assert transport.post_bodies == []
+    assert any("candidate_id=eq.cand-1" in url for url in transport.patch_urls)
+
+
+def test_person_mark_consolidated_error_is_reported() -> None:
+    rows = [
+        _person_aporte("a1", "person-1"),
+        _person_aporte("a2", "person-2"),
+    ]
+    transport = _PersonTransport([rows], mark_status=500)
+    result = run_person_consolidation(_person_config(), client=_person_client(transport))
+
+    assert result.mark_errors == 1
+    assert any(error.startswith("mark_error") for error in result.errors)
+
+
+@pytest.mark.parametrize("missing_field", ["event_id", "blocking_key"])
+def test_person_invalid_candidate_payload_is_nonfatal(
+    monkeypatch: pytest.MonkeyPatch,
+    missing_field: str,
+) -> None:
+    rows = [
+        _person_aporte("bad-1", "person-1"),
+        _person_aporte("bad-2", "person-2"),
+        _person_aporte("ok-1", "person-3"),
+        _person_aporte("ok-2", "person-4"),
+    ]
+    invalid = {
+        "event_id": _EVENT_ID,
+        "left_person_record_id": "person-1",
+        "right_person_record_id": "person-2",
+        "blocking_key": "bad:block",
+        "source_record_ids": ["bad-1", "bad-2"],
+        "score": 0.95,
+        "reasons": {"nombre": 0.4},
+        "priority": "high",
+    }
+    del invalid[missing_field]
+    valid = {
+        "event_id": _EVENT_ID,
+        "left_person_record_id": "person-3",
+        "right_person_record_id": "person-4",
+        "blocking_key": "ok:block",
+        "source_record_ids": ["ok-1", "ok-2"],
+        "score": 0.95,
+        "reasons": {"nombre": 0.4},
+        "priority": "high",
+    }
+
+    monkeypatch.setattr(consolidation_job, "find_candidates", lambda *_: [invalid, valid])
+    transport = _PersonTransport([rows])
+    result = run_person_consolidation(_person_config(), client=_person_client(transport))
+
+    assert result.upsert_errors == 1
+    assert any("candidate_payload_error" in error for error in result.errors)
+    assert result.candidates_inserted_or_updated == 1
+    assert len(transport.post_bodies[0]) == 1
+    mark_urls = [url for url in transport.patch_urls if "/rest/v1/aportes" in url]
+    assert mark_urls
+    assert "ok-1" in mark_urls[0]
+    assert "ok-2" in mark_urls[0]
+    assert "bad-1" not in mark_urls[0]
+    assert "bad-2" not in mark_urls[0]
+
+
+def test_person_fatal_upsert_error_aborts_without_marking() -> None:
+    rows = [
+        _person_aporte("a1", "person-1"),
+        _person_aporte("a2", "person-2"),
+    ]
+    transport = _PersonTransport([rows], post_status=401)
+    result = run_person_consolidation(_person_config(), client=_person_client(transport))
+
+    assert result.upsert_errors == 1
+    assert result.errors
+    assert not any("/rest/v1/aportes" in url for url in transport.patch_urls)
+
+
+def test_person_fallback_without_block_keys_generates_expected_keys() -> None:
+    rows = [
+        _person_aporte(
+            "a1",
+            "person-1",
+            include_block_keys=False,
+            cedula_hmac="same",
+            phonetic_hash="JN",
+        ),
+        _person_aporte(
+            "a2",
+            "person-2",
+            include_block_keys=False,
+            cedula_hmac="same",
+            phonetic_hash="JN",
+        ),
+    ]
+    transport = _PersonTransport([rows])
+    result = run_person_consolidation(_person_config(), client=_person_client(transport))
+
+    assert result.candidates_inserted_or_updated == 2
+    payloads = transport.post_bodies[0]
+    assert {payload["blocking_key"] for payload in payloads} == {
+        f"ced:{_EVENT_ID}:same",
+        f"phon:{_EVENT_ID}:JN",
+    }
+
+
+def test_person_without_block_keys_and_event_id_generates_no_invalid_keys() -> None:
+    rows = [
+        _person_aporte("a1", "person-1", include_block_keys=False, event_id=""),
+        _person_aporte("a2", "person-2", include_block_keys=False, event_id=""),
+    ]
+    transport = _PersonTransport([rows])
+    result = run_person_consolidation(_person_config(), client=_person_client(transport))
+
+    assert result.blocks == 0
+    assert result.candidates_inserted_or_updated == 0
+    assert transport.post_bodies == []
