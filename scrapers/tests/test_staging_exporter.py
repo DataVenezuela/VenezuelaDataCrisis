@@ -42,6 +42,9 @@ class _RecordingTransport(httpx.BaseTransport):
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
+        if path == "/rest/v1/sources":
+            src_id = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            return httpx.Response(200, json=[{"id": src_id}])
         if path == "/rest/v1/aportes":
             body = json.loads(request.content)
             if isinstance(body, list):
@@ -281,6 +284,8 @@ class TestWatermark:
 
         class _Transport(httpx.BaseTransport):
             def handle_request(self, request: httpx.Request) -> httpx.Response:
+                if request.url.path == "/rest/v1/sources":
+                    return httpx.Response(200, json=[{"id": _SOURCE_ID_FIXTURE}])
                 if request.url.path == "/rest/v1/aportes":
                     return httpx.Response(201, json={})
                 if request.method == "POST" and request.url.path == "/rest/v1/source_watermarks":
@@ -399,6 +404,8 @@ class TestResponseClassification:
 
 # --- retry del POST ---------------------------------------------------------
 
+_SOURCE_ID_FIXTURE = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+
 class _FlakyTransport(httpx.BaseTransport):
     def __init__(self, aportes_sequence: list[int]) -> None:
         self.aportes_sequence = aportes_sequence
@@ -407,6 +414,8 @@ class _FlakyTransport(httpx.BaseTransport):
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
+        if path == "/rest/v1/sources":
+            return httpx.Response(200, json=[{"id": _SOURCE_ID_FIXTURE}])
         if path == "/rest/v1/aportes":
             idx = min(self.attempts, len(self.aportes_sequence) - 1)
             status = self.aportes_sequence[idx]

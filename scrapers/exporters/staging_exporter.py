@@ -231,6 +231,12 @@ class StagingExporter:
             dedup_hash = specs.dedup_key(rec, entity_type)
 
         source_id = self._resolve_source_id(source_slug)
+        if source_id is None:
+            raise ValueError(
+                f"no se pudo resolver source_slug={source_slug!r} a UUID. "
+                "Verificar que la fuente exista en la tabla sources y que "
+                "SUPABASE_INGEST_JWT tenga GRANT SELECT ON public.sources."
+            )
         payload: dict[str, object] = {
             "run_id": self.run_id,
             "entity_type": _entity_type_slug(entity_type),
@@ -238,7 +244,7 @@ class StagingExporter:
             "dedup_version": spec.version,
             "block_keys": specs.block_keys(rec, entity_type),
             "content_hash": _content_hash(clean),
-            "source_id": source_id or source_slug,
+            "source_id": source_id,
             "scraper_id": _SCRAPER_ID,
             "raw_json": clean,
         }
@@ -287,11 +293,14 @@ class StagingExporter:
 
     def _set_watermark(self, source_slug: str, watermark_at: str) -> bool:
         assert self._client is not None
-        resp = self._client.post(
-            _WATERMARKS_PATH,
-            json={"source_slug": source_slug, "watermark_at": watermark_at},
-            headers={"Prefer": "resolution=merge-duplicates"},
-        )
+        try:
+            resp = self._post_with_retry(
+                _WATERMARKS_PATH,
+                {"source_slug": source_slug, "watermark_at": watermark_at},
+                headers={"Prefer": "resolution=merge-duplicates"},
+            )
+        except httpx.HTTPError:
+            return False
         return resp.status_code in (200, 201)
 
     def _post_with_retry(
@@ -375,7 +384,11 @@ class StagingExporter:
 
         if not self.enabled or self._client is None or self.config is None:
             for rec in records:
-                payload = self._build_payload(rec, source_slug)
+                try:
+                    payload = self._build_payload(rec, source_slug)
+                except ValueError as exc:
+                    log.warning("DRY-RUN: %s", exc)
+                    continue
                 log.info(
                     "DRY-RUN staging_exporter: enviaria entity_type=%s external_id=%s",
                     payload["entity_type"],
@@ -383,7 +396,12 @@ class StagingExporter:
                 )
             return result
 
-        payloads = [self._build_payload(rec, source_slug) for rec in records]
+        payloads: list[dict[str, object]] = []
+        for rec in records:
+            try:
+                payloads.append(self._build_payload(rec, source_slug))
+            except ValueError as exc:
+                result.errors.append(str(exc))
         chunks = [payloads[i : i + size] for i in range(0, len(payloads), size)]
 
         _batch_timeout = httpx.Timeout(connect=10.0, read=120.0, write=120.0, pool=10.0)
@@ -394,10 +412,10 @@ class StagingExporter:
                     _APORTES_UPSERT_PATH, chunk, timeout=_batch_timeout, headers=batch_headers,
                 )
             except httpx.HTTPError as exc:
-                result.errors.append(f"POST {_APORTES_PATH} batch fallo: {exc}")
+                result.errors.append(f"POST {_APORTES_UPSERT_PATH} batch fallo: {exc}")
                 continue
             except Exception as exc:
-                result.errors.append(f"POST {_APORTES_PATH} batch error inesperado: {exc}")
+                result.errors.append(f"POST {_APORTES_UPSERT_PATH} batch error inesperado: {exc}")
                 continue
 
             if resp.status_code in (200, 201):
@@ -405,12 +423,12 @@ class StagingExporter:
             else:
                 log.warning(
                     "POST %s status=%s body=%s",
-                    _APORTES_PATH,
+                    _APORTES_UPSERT_PATH,
                     resp.status_code,
                     resp.text[:300],
                 )
                 result.errors.append(
-                    f"{_APORTES_PATH} status {resp.status_code} "
+                    f"{_APORTES_UPSERT_PATH} status {resp.status_code} "
                     f"(lote de {len(chunk)} registros)"
                 )
 

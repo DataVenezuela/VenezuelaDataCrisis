@@ -46,13 +46,17 @@ def _person(det: str | None = "detid123") -> dict[str, Any]:
     }
 
 
+_MOCK_SOURCE_UUID = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+
 def _exporter_for_payload() -> StagingExporter:
     cfg = StagingConfig(
         supabase_url="https://project.supabase.co",
         publishable_key="k",
         ingest_jwt="jwt",
     )
-    return StagingExporter(cfg, run_id="run-test")
+    exp = StagingExporter(cfg, run_id="run-test")
+    exp._resolve_source_id = lambda slug: _MOCK_SOURCE_UUID  # type: ignore[method-assign]
+    return exp
 
 
 class TestPayloadContract:
@@ -111,7 +115,7 @@ class TestOnConflict:
             "el upsert debe especificar on_conflict para que PostgREST "
             "pueda resolver merge-duplicates"
         )
-        assert "source_id" in path and "external_id" in path
+        assert "on_conflict=source_id,external_id" in path
 
     def test_scraper_id_is_constant(self) -> None:
         from scrapers.exporters.staging_exporter import _SCRAPER_ID
