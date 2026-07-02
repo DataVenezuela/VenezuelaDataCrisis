@@ -181,7 +181,7 @@ El scraper escribe directo a Supabase via PostgREST, sin pasar por Vercel.
 `dataVenezuela` (Vercel) solo sirve el API público de lectura/búsqueda.
 
 `PARTNER_API_SALT` y `sources.owner_id` ya no afectan el path de ingest
-porque el scraper usa la publishable key con grants al rol `anon`, no las
+porque el scraper usa un JWT firmado con `role: scraper_ingest`, no las
 API keys de `partner_api_keys`.
 
 ### `ruff check .` exige ruff==0.15.20 (pin en ci.yml)

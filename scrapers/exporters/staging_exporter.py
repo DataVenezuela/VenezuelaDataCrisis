@@ -165,6 +165,7 @@ class StagingExporter:
         self.run_id = run_id or str(uuid.uuid4())
         self._owns_client = client is None
         self._client: httpx.Client | None = client
+        self._source_id_cache: dict[str, str] = {}
         if self.enabled and config is not None and client is None:
             self._client = httpx.Client(
                 base_url=config.supabase_url,
@@ -185,12 +186,11 @@ class StagingExporter:
         """Resuelve ``source_slug`` → UUID de ``sources`` via PostgREST.
 
         Cachea el resultado en ``self._source_id_cache`` para no repetir el
-        GET en cada payload de la misma corrida.
+        GET en cada payload de la misma corrida. En dry-run devuelve un UUID
+        placeholder para que ``_build_payload`` no falle.
         """
         if not self.enabled or self._client is None:
-            return None
-        if not hasattr(self, "_source_id_cache"):
-            self._source_id_cache: dict[str, str] = {}
+            return "00000000-0000-0000-0000-000000000000"
         cached = self._source_id_cache.get(source_slug)
         if cached is not None:
             return cached
@@ -344,15 +344,16 @@ class StagingExporter:
     def _advance_watermark(
         self, source_slug: str, source_fetched_ats: list[str], has_errors: bool
     ) -> str | None:
-        """Avanza el watermark si no hubo errores. Devuelve None o mensaje de error."""
+        """Avanza el watermark si no hubo errores. Devuelve None o mensaje de error.
+
+        ``_set_watermark`` captura ``httpx.HTTPError`` internamente y devuelve
+        ``False``, asi que no hace falta try/except aca.
+        """
         if has_errors or not source_fetched_ats:
             return None
         new_watermark = _apply_safety_margin(max(source_fetched_ats))
-        try:
-            if not self._set_watermark(source_slug, new_watermark):
-                return "no se pudo actualizar el watermark"
-        except httpx.HTTPError as exc:
-            return f"POST {_WATERMARKS_PATH} fallo: {exc}"
+        if not self._set_watermark(source_slug, new_watermark):
+            return "no se pudo actualizar el watermark"
         return None
 
     # -- export ---------------------------------------------------------------
