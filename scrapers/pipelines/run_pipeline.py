@@ -14,7 +14,7 @@ Flujo por fuente habilitada
 5. **Score**     — ``confidence_score`` sobre cada entidad
 6. **Minor protection** — ``protect_minor_fields`` reduce campos identificables
                    cuando is_minor=True (foto, cedula_masked, ubicacion exacta)
-7. **Staging**   — ``StagingExporter`` hace POST a /api/aportes de dataVenezuela
+7. **Staging**   — ``StagingExporter`` hace upsert directo a Supabase (PostgREST)
 
 Cuarentena (Issue #88)
 ----------------------
@@ -752,25 +752,16 @@ def _run_source(
     # 8. Proteccion de menores (is_minor=True reduce campos identificables)
     records = _apply_minor_protection(records, source_errors, source, quarantine_batch)
 
-    # 9. Staging export
+    # 9. Staging export — upsert directo a Supabase via PostgREST
     # source_errors se pasa para que el watermark NO avance si hubo errores
     # previos de la fuente (parse/PII/enriquecimiento/proteccion de menores).
-    if source.bulk_size is not None:
-        result = exporter.export_source_bulk(
-            records,
-            source_slug=source.id,
-            source_fetched_ats=fetched_ats,
-            source_errors=source_errors,
-            bulk_size=source.bulk_size,
-        )
-    else:
-        result = exporter.export_source(
-            records,
-            source_slug=source.id,
-            source_fetched_ats=fetched_ats,
-            source_errors=source_errors,
-            max_concurrent_posts=source.max_concurrent_posts,
-        )
+    result = exporter.export_source(
+        records,
+        source_slug=source.id,
+        source_fetched_ats=fetched_ats,
+        source_errors=source_errors,
+        batch_size=source.bulk_size,
+    )
     # Arrastrar los errores previos de la fuente al frente del resultado.
     result.errors[0:0] = source_errors
 
