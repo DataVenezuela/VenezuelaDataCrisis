@@ -27,37 +27,29 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: scrapers/requirements.txt
-
-      - name: Install dependencies
-        run: pip install -r scrapers/requirements.txt
-
       - name: List enabled sources
         id: list
         env:
           CONFIG: ${{ inputs.config || 'scrapers/config/sources.venezuela.starter.yaml' }}
         run: |
-          SOURCES=$(python -m scrapers.cli list-enabled --config "$CONFIG" --json)
-          echo "matrix={\"source_id\":$SOURCES}" >> "$GITHUB_OUTPUT"
-
-          # Check if there are sources to process
-          COUNT=$(echo "$SOURCES" | python -c "import sys,json; print(len(json.load(sys.stdin)))")
-          if [ "$COUNT" -gt 0 ]; then
-            echo "has_sources=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "has_sources=false" >> "$GITHUB_OUTPUT"
-          fi
+          pip install pyyaml --quiet
+          python3 - <<'EOF'
+          import yaml, json, os
+          with open(os.environ["CONFIG"]) as f:
+              cfg = yaml.safe_load(f)
+          ids = [s["id"] for s in cfg.get("sources", []) if s.get("enabled", False)]
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f'matrix={{"source_id":{json.dumps(ids)}}}\n')
+              out.write(f'has_sources={"true" if ids else "false"}\n')
+          EOF
+        shell: bash
 
   # ── Ingest: un job por fuente (matrix) ──────────────────────────
   ingest:
     needs: discover
     if: needs.discover.outputs.has_sources == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 60
     strategy:
       fail-fast: false            # una fuente fallida no cancela las demás
       max-parallel: 4
@@ -73,6 +65,12 @@ jobs:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: scrapers/requirements.txt
+
+      - name: Cache spaCy model
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/lib/python3.12/site-packages/es_core_news_sm
+          key: spacy-model-es-core-news-sm-3.8.0
 
       - name: Install dependencies
         run: pip install -r scrapers/requirements.txt
