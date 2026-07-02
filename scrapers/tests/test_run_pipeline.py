@@ -31,11 +31,16 @@ import httpx
 import pytest
 
 from scrapers.adapters.base import RawContent
+from scrapers.exporters.quarantine_exporter import QuarantineConfig, QuarantineExporter
 from scrapers.exporters.staging_exporter import StagingConfig, StagingExporter
 from scrapers.models import Person
 from scrapers.models.source import SourceConfig
 from scrapers.pipelines import run_pipeline as rp
 from scrapers.pipelines.run_pipeline import _get_adapter, run_pipeline
+from scrapers.exporters.quarantine_exporter import (
+   
+    QuarantineRecord,
+)
 
 # ---------------------------------------------------------------------------
 # Constantes y helpers
@@ -103,6 +108,44 @@ def _patch_exporter(transport: httpx.BaseTransport) -> Any:
         return StagingExporter(config, client=client, run_id=run_id)
 
     return patch.object(rp, "StagingExporter", side_effect=_factory)
+
+
+_QUARANTINE_ENV = {
+    "QUARANTINE_API_KEY": "test-key",
+    "QUARANTINE_BASE_URL": "https://backend.test",
+}
+
+
+class _QuarantineTransport(httpx.BaseTransport):
+    """Intercepta POSTs a /api/v1/quarantine y captura los bodies."""
+
+    def __init__(self, status: int = 201) -> None:
+        self.status = status
+        self.posts: list[dict[str, Any]] = []
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/quarantine":
+            self.posts.append(json.loads(request.content))
+            return httpx.Response(self.status, json={"ok": True})
+        return httpx.Response(404)
+
+
+def _patch_quarantine_exporter(transport: httpx.BaseTransport) -> Any:
+    """Factory que reemplaza QuarantineExporter por uno con client mockeado.
+
+    Espeja ``_patch_exporter``: run_pipeline llama
+    ``QuarantineExporter(QuarantineConfig.from_env(), run_id=...)``; la factory
+    inyecta un httpx.Client(transport=...) para que nada salga a la red.
+    """
+    def _factory(
+        config: QuarantineConfig | None, *, run_id: str | None = None
+    ) -> QuarantineExporter:
+        if config is None:
+            return QuarantineExporter(None, run_id=run_id)
+        client = httpx.Client(base_url=config.base_url, transport=transport)
+        return QuarantineExporter(config, client=client, run_id=run_id)
+
+    return patch.object(rp, "QuarantineExporter", side_effect=_factory)
 
 
 def _make_demo_config(tmp_path: Path, sources_yaml: str) -> Path:
@@ -267,6 +310,8 @@ class TestSummaryShape:
             "staging_sent",
             "staging_duplicates",
             "staging_errors",
+            "quarantined",
+            "quarantine_errors",
             "errors",
         }
         assert required.issubset(summary.keys())
@@ -760,16 +805,19 @@ sources:
     parser_asignado: parser_inexistente
 """)
         transport = _StagingTransport()
-        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport):
+        qtransport = _QuarantineTransport()
+        with patch.dict(
+            os.environ, {**_STAGING_ENV, **_QUARANTINE_ENV}, clear=False
+        ), _patch_exporter(transport), _patch_quarantine_exporter(qtransport):
             summary = run_pipeline(config_path=cfg, output_dir=tmp_path / "out")
+        # Visible en el resumen.
         omissions = [
             e for e in summary["errors"]
-            if "parser no implementado" in e and "omitida" in e
+            if "parser no implementado" in e and "cuarentena" in e
         ]
         assert len(omissions) == 1
         assert "parser_inexistente" in omissions[0]
         assert "fuente_sin_parser" in omissions[0]
-        # La omision tambien cuenta como error de staging (visibilidad numerica).
         assert summary["staging_errors"] >= 1
 
     def test_fetch_error_does_not_crash_pipeline(self, tmp_path: Path, demo_config: Path) -> None:
@@ -885,7 +933,10 @@ class TestMinorProtectionEndToEnd:
         assert data["cedula_masked"] is None
         assert data["last_known_location"] == "Lara"
 
-    def test_minor_record_omitted_when_protection_raises(self, tmp_path: Path, demo_config: Path) -> None:
+    def test_minor_record_quarantined_when_protection_raises(self, tmp_path: Path, demo_config: Path) -> None:
+        """Si la proteccion de menores falla, el registro NO se exporta a staging
+        (fail-closed) pero TAMPOCO se descarta: va a cuarentena con riesgo alto
+        para redaccion manual (Issue #88)."""
         persons = [
             Person(
                 full_name="NINIO DEMO PEREZ",
@@ -897,7 +948,10 @@ class TestMinorProtectionEndToEnd:
             )
         ]
         transport = _StagingTransport()
-        with patch.dict(os.environ, _STAGING_ENV, clear=False), _patch_exporter(transport), patch(
+        qtransport = _QuarantineTransport()
+        with patch.dict(
+            os.environ, {**_STAGING_ENV, **_QUARANTINE_ENV}, clear=False
+        ), _patch_exporter(transport), _patch_quarantine_exporter(qtransport), patch(
             "scrapers.pipelines.run_pipeline._get_adapter", return_value=_mock_adapter()
         ), patch(
             "scrapers.pipelines.run_pipeline._get_parser", return_value=_mock_parser(persons)
@@ -905,8 +959,11 @@ class TestMinorProtectionEndToEnd:
             "scrapers.pipelines.run_pipeline.protect_minor_fields", side_effect=ValueError("boom")
         ):
             summary = run_pipeline(config_path=demo_config, output_dir=tmp_path / "out")
+        # Fail-closed: nada del menor llega a staging.
         assert transport.posts == []
         assert any("registro omitido" in e for e in summary["errors"])
+        assert len(qtransport.posts) >= 1
+        assert qtransport.posts[0]["riskLevel"] == "high"
 
 
 # ---------------------------------------------------------------------------
@@ -977,14 +1034,16 @@ def _api_source(url: str, **kw: Any) -> SourceConfig:
 class TestDomainAllowlist:
     def test_blocks_disallowed_domain_without_fetching(self, monkeypatch):
         built: list[str] = []
+        quarantine_batch: list[QuarantineRecord] = []
         monkeypatch.setattr(rp, "_get_adapter", lambda s: built.append(s.id))
         source = _api_source(
             "https://evil.example.com/api",
             allowed_domains=["encuentralos.tecnosoft.dev"],
         )
         all_errors: list[str] = []
+        
 
-        result = rp._run_source(source, None, all_errors, _EVENT_ID, MagicMock())
+        result = rp._run_source(source, None, all_errors, _EVENT_ID, MagicMock(), quarantine_batch)
 
         # Nunca se intentó construir el adapter → ningún request.
         assert built == []
@@ -995,7 +1054,7 @@ class TestDomainAllowlist:
 
     def test_allows_matching_domain_case_insensitive(self, monkeypatch):
         built: list[str] = []
-
+        quarantine_batch: list[QuarantineRecord] = []
         def fake_adapter(s):
             built.append(s.id)
             return None  # corta limpio tras pasar el gate de dominio
@@ -1006,7 +1065,7 @@ class TestDomainAllowlist:
             allowed_domains=["Encuentralos.Tecnosoft.Dev"],  # mayúsculas
         )
 
-        result = rp._run_source(source, None, [], _EVENT_ID, MagicMock())
+        result = rp._run_source(source, None, [], _EVENT_ID, MagicMock(), quarantine_batch)
 
         assert built == ["test_src"]  # pasó el gate, intentó construir adapter
         assert not any("dominio no permitido" in e for e in result.errors)
@@ -1015,8 +1074,8 @@ class TestDomainAllowlist:
         built: list[str] = []
         monkeypatch.setattr(rp, "_get_adapter", lambda s: built.append(s.id))
         source = _api_source("https://anything.example.org/api")  # sin allowlist
-
-        rp._run_source(source, None, [], _EVENT_ID, MagicMock())
+        quarantine_batch: list[QuarantineRecord] = []
+        rp._run_source(source, None, [], _EVENT_ID, MagicMock(), quarantine_batch)
 
         # Comportamiento retrocompatible: pasa el gate como hoy.
         assert built == ["test_src"]
@@ -1037,7 +1096,7 @@ class TestExporterParallelismWiring:
         monkeypatch.setattr(rp, "_get_adapter", lambda s: adapter)
         monkeypatch.setattr(rp, "_get_parser", lambda s, event_id: parser)
 
-        result = rp._run_source(source, None, [], _EVENT_ID, exporter)
+        result = rp._run_source(source, None, [], _EVENT_ID, exporter, [])
 
         assert result.sent == 2
         exporter.export_source.assert_called_once()

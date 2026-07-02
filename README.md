@@ -93,10 +93,47 @@ python -m scrapers.cli run --config scrapers/config/sources.demo.yaml
 Para ver progreso real del pipeline (no solo el resultado final), agregá `--verbose` antes del subcomando:
 
 ```bash
-python -m scrapers.cli --verbose ingest --config <config> --source <id> --output-dir scrapers/runtime_output
+# Obligatorio en producción para HMAC de cédulas
+export PII_HMAC_SECRET="valor-secreto"
+export PII_SALT="mismo-valor"
+
+# Credenciales de dataVenezuela (staging exporter)
+export DATAVZLA_API_KEY="x-api-key del scraper"
+export DATAVZLA_BASE_URL="https://..."
+
+# Cuarentena (quarantine exporter, Issue #88) — POST /api/v1/quarantine
+export QUARANTINE_API_KEY="x-api-key del scraper"
+export QUARANTINE_BASE_URL="https://..."
 ```
 
-Sin ese flag, el CLI no configura logging y los mensajes de progreso (páginas descargadas, entidades parseadas) no se muestran en ningún lado.
+Sin `PII_HMAC_SECRET`, el pipeline corre pero `cedula_hmac` queda `None`. Aceptable en CI offline; obligatorio en producción.
+
+Sin `QUARANTINE_API_KEY` / `QUARANTINE_BASE_URL`, el quarantine exporter entra en
+dry-run silencioso (no envía nada, no falla). En producción son obligatorias:
+los registros no procesables deben preservarse, no perderse.
+
+---
+
+## Agregar una fuente nueva
+
+1. Declararla en `scrapers/config/sources.venezuela.starter.yaml`:
+   ```yaml
+   - id: mi_fuente
+     name: "Mi Fuente"
+     url: "https://mi-fuente.org/api/personas"
+     type: api_json
+     parser_asignado: mi_parser
+     trust_tier: C
+     enabled: true
+   ```
+
+2. Escribir el parser en `scrapers/parsers/mi_parser.py` implementando `ParserProtocol`.
+
+3. Registrar el parser en `run_pipeline.py::_get_parser`.
+
+4. Agregar tests en `scrapers/tests/test_mi_parser.py` con fixtures sintéticos.
+
+Si la fuente no tiene parser todavía, declararla con `enabled: false`. Los registros sin parser van a **cuarentena**, no se descartan.
 
 ---
 

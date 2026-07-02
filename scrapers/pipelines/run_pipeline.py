@@ -16,6 +16,14 @@ Flujo por fuente habilitada
                    cuando is_minor=True (foto, cedula_masked, ubicacion exacta)
 7. **Staging**   — ``StagingExporter`` hace POST a /api/aportes de dataVenezuela
 
+Cuarentena (Issue #88)
+----------------------
+NINGUN registro se descarta en silencio. Cada punto donde el pipeline antes
+perdia datos (parser ausente, parseo fallido, PII no tratable, fail-closed de
+proteccion de menores) ahora enruta el registro a la Quarantine DB via
+``QuarantineExporter`` (POST /api/quarantine) para revision humana. El preview
+va redactado; el run continua con las demas fuentes.
+
 La deduplicacion ya no ocurre por fuente: el dedup_hash/external_id deterministas
 y las block keys (scrapers/dedup/specs.py) la trasladan al backend (upsert por
 external_id) y al consolidation job de Stage 2 (#82).
@@ -33,15 +41,17 @@ El dict de retorno tiene las keys que espera ``cli.py``:
   staging_sent        int  — aportes aceptados por staging (200/201)
   staging_duplicates  int  — aportes ya existentes en staging (409)
   staging_errors      int  — errores por registro o de watermark
+  quarantined         int  — registros enviados a la Quarantine DB
+  quarantine_errors   int  — errores al enviar a cuarentena
   errors              list[str]  — mensajes de error no fatales
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import uuid
-from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
@@ -49,6 +59,12 @@ from urllib.parse import urlparse
 
 from scrapers.adapters._shared import now_utc, sha256_hex
 from scrapers.adapters.base import RawContent
+from scrapers.exporters.quarantine_exporter import (
+    QuarantineConfig,
+    QuarantineExporter,
+    QuarantineRecord,
+    quarantine_payload_hash,
+)
 from scrapers.exporters.staging_exporter import (
     ExportResult,
     StagingConfig,
@@ -59,6 +75,8 @@ from scrapers.models._validators import validate_uuid_str
 from scrapers.models.source import SourceConfig
 from scrapers.normalizers import normalize_date, normalize_location
 from scrapers.sanitizers.minor_protection import protect_minor_fields
+from scrapers.sanitizers.pii_detector import detect_pii
+from scrapers.sanitizers.pii_redactor import redact_pii
 from scrapers.sanitizers.pii_tokenizer import tokenize_pii_fields
 from scrapers.sources.loader import load_sources
 from scrapers.validators.quality import confidence_score
@@ -73,14 +91,75 @@ ParsedEntity = Person | AcopioCenter | Event
 
 
 def _error_summary(message: str) -> dict[str, Any]:
-    """Summary de salida temprana con las keys nuevas de staging."""
+    """Summary de salida temprana con las keys nuevas de staging y cuarentena."""
     return {
         "sources_processed": 0,
         "staging_sent": 0,
         "staging_duplicates": 0,
         "staging_errors": 0,
+        "quarantined": 0,
+        "quarantine_errors": 0,
         "errors": [message],
     }
+
+
+# ---------------------------------------------------------------------------
+# Cuarentena: construccion de registros no procesables
+# ---------------------------------------------------------------------------
+# Principio inamovible (Issue #88): NINGUN registro se descarta en silencio. En
+# una crisis donde cada registro puede ser una vida, todo lo que hoy se perderia
+# (parser ausente, error de parseo, PII no redactable, fail-closed de menores)
+# va a la Quarantine DB para que pase por ojo humano. El preview se manda SIEMPRE
+# redactado; pii_findings_summary lleva conteos por tipo, nunca valores en claro.
+
+def _to_text(value: object) -> str:
+    """Coacciona el contenido crudo (str | dict | list) a texto para preview/hash."""
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+    except Exception:
+        return str(value)
+
+
+def _pii_summary(text: str) -> dict[str, object] | None:
+    """Resumen de hallazgos PII como conteos por tipo. Sin valores en claro.
+
+    Devuelve None si no hay hallazgos (la columna jsonb queda null).
+    """
+    summary: dict[str, int] = {}
+    for finding in detect_pii(text):
+        kind = str(finding.get("kind", "unknown"))
+        summary[kind] = summary.get(kind, 0) + 1
+    return dict(summary) if summary else None
+
+
+def _quarantine_from_text(
+    *,
+    source: SourceConfig,
+    text: str,
+    reason_code: str,
+    risk_level: str,
+    detail: str,
+    source_url: str | None = None,
+) -> QuarantineRecord:
+    """Arma un QuarantineRecord desde contenido crudo o serializado.
+
+    ``payload_hash`` se calcula sobre el texto ORIGINAL (permite verificar el
+    payload exacto aun tras destruirlo). ``payload_preview_redacted`` se redacta
+    con ``redact_pii`` para no filtrar PII en claro al revisor.
+    """
+    return QuarantineRecord(
+        source_slug=source.id,
+        reason_code=reason_code,
+        risk_level=risk_level,
+        source_url=source_url or source.url,
+        reason_detail=detail,
+        payload_preview_redacted=redact_pii(text),
+        payload_hash=quarantine_payload_hash(text),
+        pii_findings_summary=_pii_summary(text),
+    )
+
 
 
 # ---------------------------------------------------------------------------
@@ -257,7 +336,7 @@ class _LocalFileAdapter:
             records_in_page=None,
         )
 
-    def fetch_all(self, url: str, **kwargs: Any) -> Iterator[RawContent]:
+    def fetch_all(self, url: str, **kwargs: Any):  # type: ignore[return]
         yield self.fetch(url)
 
 
@@ -265,7 +344,7 @@ class _LocalFileAdapter:
 # Etapas del pipeline
 # ---------------------------------------------------------------------------
 
-def _fetch_pages(adapter: Any, source: SourceConfig, updated_after: str) -> list[RawContent]:
+def _fetch_pages(adapter: Any, source: SourceConfig, updated_after: str, limit: int | None = None) -> list[RawContent]:
     """Llama a fetch_all del adapter y recopila todas las paginas.
 
     ``updated_after`` es el watermark actual de la fuente; se pasa como query
@@ -276,14 +355,15 @@ def _fetch_pages(adapter: Any, source: SourceConfig, updated_after: str) -> list
     url = source.url
     pages: list[RawContent] = []
     params = {"updated_after": updated_after}
+    kwargs = {"limit": limit} if limit is not None else {}
 
     # ApiAdapter expone default_path separado de base_url
     if hasattr(adapter, "default_path") and adapter.default_path:
         path = adapter.default_path
-        for page in adapter.fetch_all(path, params=params):
+        for page in adapter.fetch_all(path, params=params, **kwargs):
             pages.append(page)
     else:
-        for page in adapter.fetch_all(url, params=params):
+        for page in adapter.fetch_all(url, params=params, **kwargs):
             pages.append(page)
 
     return pages
@@ -293,8 +373,14 @@ def _parse_pages(
     parser: Any,
     pages: list[RawContent],
     limit: int | None,
+    source: SourceConfig,
+    quarantine_batch: list[QuarantineRecord],
 ) -> tuple[list[ParsedEntity], list[str]]:
-    """Parsea todas las paginas y devuelve (entidades, errores_por_registro)."""
+    """Parsea todas las paginas y devuelve (entidades, errores_por_registro).
+
+    Una pagina que falla al parsear NO se descarta: su contenido crudo va a
+    cuarentena (``invalid_schema``) para revision humana.
+    """
     entities: list[ParsedEntity] = []
     errors: list[str] = []
 
@@ -305,6 +391,16 @@ def _parse_pages(
             msg = f"Error parseando pagina {raw.get('page')}: {exc}"
             log.warning(msg)
             errors.append(msg)
+            quarantine_batch.append(
+                _quarantine_from_text(
+                    source=source,
+                    text=_to_text(raw.get("raw_content")),
+                    reason_code="invalid_schema",
+                    risk_level="medium",
+                    detail=msg,
+                    source_url=raw.get("source_url"),
+                )
+            )
             continue
 
         entities.extend(batch)
@@ -320,7 +416,7 @@ _PII_FIELD_NAMES = {"cedula", "cédula", "identity_document", "documento_identid
                     "telefono", "teléfono", "phone", "mobile", "celular"}
 
 
-def _strip_raw_pii(d: dict[str, Any]) -> dict[str, Any]:
+def _strip_raw_pii(d: dict) -> dict:
     """Elimina campos PII crudos sin hashear (defensa en profundidad)."""
     return {k: v for k, v in d.items() if k.lower() not in _PII_FIELD_NAMES}
 
@@ -328,7 +424,9 @@ def _strip_raw_pii(d: dict[str, Any]) -> dict[str, Any]:
 def _apply_pii(
     entities: list[ParsedEntity],
     errors: list[str],
-) -> list[dict[str, Any]]:
+    source: SourceConfig,
+    quarantine_batch: list[QuarantineRecord],
+) -> list[dict]:
     """
     Convierte entidades tipadas a dicts y aplica tokenize_pii_fields.
 
@@ -344,7 +442,7 @@ def _apply_pii(
     """
     pii_salt_available = bool(os.getenv("PII_SALT"))
 
-    result: list[dict[str, Any]] = []
+    result: list[dict] = []
     for entity in entities:
         try:
             d = entity.model_dump()
@@ -365,15 +463,29 @@ def _apply_pii(
                 d = _strip_raw_pii(entity.model_dump())
                 d["_entity_type"] = type(entity).__name__
                 result.append(d)
-            except Exception:
-                pass
+            except Exception as rescue_exc:
+                # No se pudo ni rescatar sin PII: a cuarentena (PII no tratable),
+                # riesgo alto. NUNCA se descarta en silencio (Issue #88).
+                try:
+                    preview_text = _to_text(entity.model_dump())
+                except Exception:
+                    preview_text = repr(entity)
+                quarantine_batch.append(
+                    _quarantine_from_text(
+                        source=source,
+                        text=preview_text,
+                        reason_code="pii_untreatable",
+                        risk_level="high",
+                        detail=(
+                            f"PII no tratable para {type(entity).__name__}: "
+                            f"{exc} (rescate fallo: {rescue_exc})"
+                        ),
+                    )
+                )
     return result
 
 
-def _enrich_records(
-    records: list[dict[str, Any]],
-    errors: list[str],
-) -> list[dict[str, Any]]:
+def _enrich_records(records: list[dict], errors: list[str]) -> list[dict]:
     """
     Normalizacion post-dump y computo de ``deterministic_id``.
 
@@ -388,7 +500,7 @@ def _enrich_records(
         phonetic_hash as _compute_phonetic,
     )
 
-    enriched: list[dict[str, Any]] = []
+    enriched: list[dict] = []
     for rec in records:
         try:
             # Normalizar ubicacion si viene como string crudo sin objeto
@@ -424,12 +536,12 @@ def _enrich_records(
 
 
 def _apply_confidence(
-    records: list[dict[str, Any]],
+    records: list[dict],
     errors: list[str],
-) -> list[dict[str, Any]]:
+) -> list[dict]:
     """Calcula y escribe confidence_score en cada registro."""
     _MODEL_MAP = {"Person": Person, "AcopioCenter": AcopioCenter, "Event": Event}
-    result: list[dict[str, Any]] = []
+    result: list[dict] = []
     for rec in records:
         try:
             entity_type = rec.get("_entity_type", "Person")
@@ -446,22 +558,39 @@ def _apply_confidence(
 
 
 def _apply_minor_protection(
-    records: list[dict[str, Any]],
+    records: list[dict],
     errors: list[str],
-) -> list[dict[str, Any]]:
+    source: SourceConfig,
+    quarantine_batch: list[QuarantineRecord],
+) -> list[dict]:
     """Reduce campos identificables en registros con is_minor=True antes de exportar.
 
     No afecta a Event/AcopioCenter (no tienen is_minor) ni a Person con
     is_minor en None/False — ver scrapers/sanitizers/minor_protection.py.
     """
-    result: list[dict[str, Any]] = []
+    result: list[dict] = []
     for rec in records:
         try:
             result.append(protect_minor_fields(rec))
         except Exception as exc:
-            log.error("Error en proteccion de menores, registro omitido: %s", exc)
+            log.error("Error en proteccion de menores: %s", exc)
             errors.append(f"Error en proteccion de menores (registro omitido): {exc}")
-            # Fail-closed: no se agrega el registro sin redactar.
+            # Fail-closed para STAGING: el registro sin redactar NO se exporta.
+            # Pero NO se descarta: va a cuarentena con riesgo alto para redaccion
+            # manual (review_status 'needs_manual_redaction' en el backend). El
+            # preview va redactado igual, defensa en profundidad (Issue #88).
+            quarantine_batch.append(
+                _quarantine_from_text(
+                    source=source,
+                    text=_to_text(rec),
+                    reason_code="pii_untreatable",
+                    risk_level="high",
+                    detail=(
+                        "proteccion de menores fallo; registro preservado para "
+                        f"redaccion manual: {exc}"
+                    ),
+                )
+            )
     return result
 
 
@@ -498,6 +627,7 @@ def _run_source(
     all_errors: list[str],
     event_id: str,
     exporter: StagingExporter,
+    quarantine_batch: list[QuarantineRecord],
 ) -> ExportResult:
     """
     Ejecuta el pipeline completo para una fuente.
@@ -506,6 +636,11 @@ def _run_source(
     errores previos de la fuente (parse/PII/enriquecimiento) se arrastran en
     ``ExportResult.errors``. Cualquier excepcion no capturada sube al
     orquestador principal.
+
+    ``quarantine_batch`` acumula los registros no procesables de esta fuente
+    (parser ausente, parseo fallido, PII no tratable, menor no redactable). El
+    orquestador lo vacia a la Quarantine DB al terminar la fuente — NADA se
+    descarta en silencio (Issue #88).
     """
     log.info("Iniciando fuente: %s (type=%s, parser=%s)", source.id, source.type, source.parser_asignado)
     source_errors: list[str] = []
@@ -522,25 +657,54 @@ def _run_source(
     # 1. Adapter
     adapter = _get_adapter(source)
     if adapter is None:
-        return ExportResult()
+        # Tipo de fuente sin adapter implementado: NO hay payload que cuarentenar
+        # (nunca se hizo fetch), pero la omision NO debe ser silenciosa — queda
+        # VISIBLE en summary["errors"] para que el operador sepa que esa fuente
+        # entera no se proceso (Issue #88, principio "nada invisible").
+        msg = (
+            f"adapter no implementado para type={source.type!r} "
+            f"(fuente {source.id} omitida — sin payload que cuarentenar)"
+        )
+        all_errors.append(f"[{source.id}] {msg}")
+        return ExportResult(errors=[msg])
 
     # 2. Parser
     parser = _get_parser(source, event_id)
     if parser is None:
-        # El adapter ya fue creado (puede tener browser/conexion abierta), asi
-        # que se cierra antes de omitir la fuente para no filtrar recursos en
-        # cada corrida (fuentes con parser_asignado no registrado).
-        if hasattr(adapter, "close"):
-            adapter.close()
-        # La omision queda VISIBLE en el summary del run (no solo en un
-        # log.warning silencioso): se contabiliza como error de fuente y
-        # fluye a summary["errors"] via all_errors, igual que el resto de
-        # errores no fatales de la fuente.
+        # Sin parser NO se descarta la fuente: se baja el contenido crudo y se
+        # manda a cuarentena (parser_unavailable) para que un humano lo revise y
+        # se pueda escribir el parser. El fetch puede ser costoso (Playwright),
+        # pero perder registros en una crisis no es aceptable (Issue #88).
         msg = (
             f"parser no implementado: {source.parser_asignado} "
-            f"(fuente {source.id} omitida)"
+            f"(fuente {source.id} — registros a cuarentena)"
         )
         all_errors.append(f"[{source.id}] {msg}")
+        try:
+            watermark_at = exporter.get_watermark(source.id)
+            pages = _fetch_pages(adapter, source, watermark_at)
+        except Exception as exc:
+            all_errors.append(
+                f"[{source.id}] fetch fallo al intentar cuarentenar sin parser: {exc}"
+            )
+            pages = []
+        finally:
+            if hasattr(adapter, "close"):
+                try:
+                    adapter.close()
+                except Exception:
+                    pass
+        for raw in pages:
+            quarantine_batch.append(
+                _quarantine_from_text(
+                    source=source,
+                    text=_to_text(raw.get("raw_content")),
+                    reason_code="parser_unavailable",
+                    risk_level="medium",
+                    detail=msg,
+                    source_url=raw.get("source_url"),
+                )
+            )
         return ExportResult(errors=[msg])
 
     # 3. Fetch
@@ -565,16 +729,19 @@ def _run_source(
     fetched_ats = [str(p.get("fetched_at")) for p in pages if p.get("fetched_at")]
 
     # 4. Parse
-    entities, parse_errors = _parse_pages(parser, pages, limit)
+    entities, parse_errors = _parse_pages(parser, pages, limit, source, quarantine_batch)
     source_errors.extend(parse_errors)
     log.info("%s: %d entidades parseadas", source.id, len(entities))
+    
+    if len(entities) ==  0 and len(pages) > 0: 
+        log.warning("%s: No se parsearon entidades de %d paginas descargadas", source.id, len(pages))
 
     if not entities:
         all_errors.extend([f"[{source.id}] {e}" for e in source_errors])
         return ExportResult(errors=list(source_errors))
 
     # 5. PII
-    records = _apply_pii(entities, source_errors)
+    records = _apply_pii(entities, source_errors, source, quarantine_batch)
 
     # 6. Enriquecimiento (deterministic_id + normalizacion)
     records = _enrich_records(records, source_errors)
@@ -583,7 +750,7 @@ def _run_source(
     records = _apply_confidence(records, source_errors)
 
     # 8. Proteccion de menores (is_minor=True reduce campos identificables)
-    records = _apply_minor_protection(records, source_errors)
+    records = _apply_minor_protection(records, source_errors, source, quarantine_batch)
 
     # 9. Staging export
     # source_errors se pasa para que el watermark NO avance si hubo errores
@@ -614,7 +781,7 @@ def _process_source_safe(
     all_errors: list[str],
     event_id: str,
     exporter: StagingExporter,
-) -> tuple[ExportResult, bool]:
+) -> tuple[ExportResult,list[QuarantineRecord], bool]:
     """Ejecuta ``_run_source`` capturando cualquier excepcion fatal de la fuente.
 
     Aisla el manejo de errores fatales (try/except con log + acumulado en
@@ -623,14 +790,17 @@ def _process_source_safe(
     donde ``ok=False`` si la fuente entera fallo (no cuenta como
     ``sources_processed``).
     """
+
+    quarantine_batch: list[QuarantineRecord] = []
     try:
-        result = _run_source(source, limit, all_errors, event_id, exporter)
-        return result, True
+        result = _run_source(source, limit, all_errors, event_id, exporter, quarantine_batch)
+        return result,quarantine_batch, True
     except Exception as exc:
         msg = f"[{source.id}] Error fatal en fuente: {exc}"
         log.error(msg, exc_info=True)
         all_errors.append(msg)
-        return ExportResult(), False
+        return ExportResult(), quarantine_batch, False
+        
 
 
 # ---------------------------------------------------------------------------
@@ -642,7 +812,7 @@ def run_pipeline(
     output_dir: Path,
     limit: int | None = None,
     max_workers: int = 1,
-) -> dict[str, Any]:
+) -> dict:
     """
     Orquestador principal del pipeline.
 
@@ -669,7 +839,7 @@ def run_pipeline(
     Returns
     -------
     dict con keys: sources_processed, staging_sent, staging_duplicates,
-                   staging_errors, errors.
+                   staging_errors, quarantined, quarantine_errors, errors.
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -700,19 +870,31 @@ def run_pipeline(
     staging_sent = 0
     staging_duplicates = 0
     staging_errors = 0
+    quarantined = 0
+    quarantine_errors = 0
     sources_processed = 0
+    quarantine_batch: list[QuarantineRecord] = []
     all_errors: list[str] = []
 
-    # Un solo exporter (un httpx.Client) y un solo run_id por corrida.
-    exporter = StagingExporter(StagingConfig.from_env(), run_id=str(uuid.uuid4()))
+    # Un solo run_id por corrida, COMPARTIDO entre staging y cuarentena: permite
+    # correlacionar que se exporto y que se cuarentenó en la misma corrida (#88).
+    run_id = str(uuid.uuid4())
+    # Dos exporters HTTP independientes (cada uno con su httpx.Client y sus env
+    # vars). Ambos hacen dry-run silencioso si faltan sus credenciales.
+    exporter = StagingExporter(StagingConfig.from_env(), run_id=run_id)
+    quarantine_exporter = QuarantineExporter(QuarantineConfig.from_env(), run_id=run_id)
+    
     try:
         if max_workers <= 1 or len(enabled) <= 1:
+        
             for source in enabled:
-                result, ok = _process_source_safe(source, limit, all_errors, event_id, exporter)
+                result,thread_quarantine_batch, ok = _process_source_safe(source, limit, all_errors, event_id, exporter)
+                thread_quarantine_batch = thread_quarantine_batch or []
                 staging_sent += result.sent
                 staging_duplicates += result.duplicates
                 staging_errors += len(result.errors)
                 sources_processed += int(ok)
+                quarantine_batch.extend(thread_quarantine_batch)
         else:
             with ThreadPoolExecutor(max_workers=max_workers) as pool:
                 futures = [
@@ -720,24 +902,43 @@ def run_pipeline(
                     for source in enabled
                 ]
                 for future in as_completed(futures):
-                    result, ok = future.result()
+                    result,thread_quarantine_batch, ok = future.result()
+                    thread_quarantine_batch = thread_quarantine_batch or []
                     staging_sent += result.sent
                     staging_duplicates += result.duplicates
                     staging_errors += len(result.errors)
                     sources_processed += int(ok)
+                    quarantine_batch.extend(thread_quarantine_batch)
+    
+     
     finally:
+        if quarantine_batch:
+            qres = quarantine_exporter.quarantine_many(quarantine_batch)
+            quarantined += qres.sent
+            quarantine_errors += len(qres.errors)
+            all_errors.extend(
+                f"cuarentena: {e}" for e in qres.errors
+            )
+            log.info(
+                "%s: %d a cuarentena (%d duplicados, %d errores)",
+                source.id, qres.sent, qres.duplicates, len(qres.errors),
+            ) 
+
         exporter.close()
+        quarantine_exporter.close()
 
     summary = {
         "sources_processed": sources_processed,
         "staging_sent": staging_sent,
         "staging_duplicates": staging_duplicates,
         "staging_errors": staging_errors,
+        "quarantined": quarantined,
+        "quarantine_errors": quarantine_errors,
         "errors": all_errors,
     }
 
     log.info(
-        "Pipeline finalizado — fuentes=%d enviados=%d duplicados=%d errores=%d",
-        sources_processed, staging_sent, staging_duplicates, len(all_errors),
+        "Pipeline finalizado — fuentes=%d enviados=%d duplicados=%d cuarentena=%d errores=%d",
+        sources_processed, staging_sent, staging_duplicates, quarantined, len(all_errors),
     )
     return summary

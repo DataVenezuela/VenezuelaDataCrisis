@@ -34,6 +34,8 @@ def _cmd_run(args: argparse.Namespace) -> None:
     print(f"Aportes enviados: {summary['staging_sent']}")
     print(f"Aportes duplicados: {summary['staging_duplicates']}")
     print(f"Errores de staging: {summary['staging_errors']}")
+    print(f"Registros en cuarentena: {summary['quarantined']}")
+    print(f"Errores de cuarentena: {summary['quarantine_errors']}")
     print(f"Errores: {len(summary['errors'])}")
 
 
