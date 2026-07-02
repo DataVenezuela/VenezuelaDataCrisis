@@ -19,8 +19,11 @@ Ejecucion:
 
 El acceso a datos real es `SupabaseConsolidationAdapter` (PostgREST directo,
 decision del equipo #82), que se cablea via `_build_port()` desde las env vars
-SUPABASE_URL + SUPABASE_SERVICE_KEY; si faltan, cae a un `FakeInMemoryAdapter`
-vacio (dry-run seguro, sin red). Ver scrapers/jobs/supabase_adapter.py.
+SUPABASE_URL + SUPABASE_PUBLISHABLE_KEY + SUPABASE_CONSOLIDATION_JWT (patron de
+auth acordado en #200: rol dedicado consolidation_job, sin service_role); si
+faltan, cae a un `FakeInMemoryAdapter` vacio (dry-run seguro, sin red). Ver
+scrapers/jobs/supabase_adapter.py. El camino Person (#92) usa el mismo par de
+credenciales via `PersonConsolidationConfig`.
 """
 
 from __future__ import annotations
@@ -288,10 +291,20 @@ def consolidate_entity_type(
 
 @dataclass
 class PersonConsolidationConfig:
-    """Configuracion para Person dedup candidates via Supabase REST."""
+    """Configuracion para Person dedup candidates via Supabase REST.
+
+    Auth segun el patron acordado en #200 (mismo que el adapter Event/Acopio):
+    ``publishable_key`` en el header ``apikey`` y ``consolidation_jwt`` en
+    ``Authorization: Bearer`` (rol dedicado ``consolidation_job``, sin
+    service_role). El JWT solo se LEE del entorno; el adapter NO lo firma.
+    Depende de la migracion de backend del rol consolidation_job (grants +
+    policies) y del secret ``SUPABASE_CONSOLIDATION_JWT`` (aun inexistentes) para
+    correr contra Supabase real; no cambia trust_tier ni el schema.
+    """
 
     supabase_url: str
-    supabase_service_key: str
+    publishable_key: str
+    consolidation_jwt: str
     entity_type: str = _PERSON_ENTITY_TYPE
     batch_size: int = _PERSON_DEFAULT_BATCH_SIZE
     threshold: float = _PERSON_DEFAULT_THRESHOLD
@@ -299,13 +312,18 @@ class PersonConsolidationConfig:
     @classmethod
     def from_env(cls, **overrides: Any) -> "PersonConsolidationConfig | None":
         url = os.getenv("SUPABASE_URL")
-        key = os.getenv("SUPABASE_SERVICE_KEY")
-        if not url or not key:
-            _LOGGER.error("SUPABASE_URL and SUPABASE_SERVICE_KEY are required")
+        publishable_key = os.getenv("SUPABASE_PUBLISHABLE_KEY")
+        consolidation_jwt = os.getenv("SUPABASE_CONSOLIDATION_JWT")
+        if not url or not publishable_key or not consolidation_jwt:
+            _LOGGER.error(
+                "SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY and "
+                "SUPABASE_CONSOLIDATION_JWT are required"
+            )
             return None
         return cls(
             supabase_url=str(url).rstrip("/"),
-            supabase_service_key=str(key),
+            publishable_key=str(publishable_key),
+            consolidation_jwt=str(consolidation_jwt),
             entity_type=str(overrides.get("entity_type", _PERSON_ENTITY_TYPE)),
             batch_size=int(overrides.get("batch_size", _PERSON_DEFAULT_BATCH_SIZE)),
             threshold=float(overrides.get("threshold", _PERSON_DEFAULT_THRESHOLD)),
@@ -391,8 +409,10 @@ class SupabasePersonDedupAdapter:
         client = httpx.Client(
             base_url=config.supabase_url,
             headers={
-                "apikey": config.supabase_service_key,
-                "Authorization": f"Bearer {config.supabase_service_key}",
+                # Patron #200: apikey = publishable key; Bearer = JWT del rol
+                # dedicado consolidation_job. NO service_role.
+                "apikey": config.publishable_key,
+                "Authorization": f"Bearer {config.consolidation_jwt}",
                 "Content-Type": "application/json",
             },
             timeout=httpx.Timeout(60.0),
@@ -702,10 +722,12 @@ def _build_port() -> ConsolidationDataPort:
     """Construye el PORT de datos a usar por la CLI para Event/AcopioCenter.
 
     Decision del equipo (#82): acceso DIRECTO a Supabase PostgREST desde GitHub
-    Actions. Si `SUPABASE_URL` + `SUPABASE_SERVICE_KEY` estan seteadas y son
-    validas (https), construye el adapter real; si faltan, cae a un
-    `FakeInMemoryAdapter` vacio (dry-run seguro, sin red), igual que el patron de
-    dry-run del staging_exporter. Asi `--dry-run` sin env corre sin tocar la red.
+    Actions. Si `SUPABASE_URL` + `SUPABASE_PUBLISHABLE_KEY` +
+    `SUPABASE_CONSOLIDATION_JWT` estan seteadas y la URL es valida (https),
+    construye el adapter real (auth por rol dedicado, patron #200); si faltan,
+    cae a un `FakeInMemoryAdapter` vacio (dry-run seguro, sin red), igual que el
+    patron de dry-run del staging_exporter. Asi `--dry-run` sin env corre sin
+    tocar la red.
     """
     config = SupabaseConsolidationConfig.from_env()
     if config is None:

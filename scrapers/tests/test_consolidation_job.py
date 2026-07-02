@@ -384,7 +384,8 @@ def _person_client(transport: _PersonTransport) -> httpx.Client:
 def _person_config(**overrides: Any) -> PersonConsolidationConfig:
     return PersonConsolidationConfig(
         supabase_url="https://test.supabase.co",
-        supabase_service_key="test-key",
+        publishable_key="test-publishable-key",
+        consolidation_jwt="test-consolidation-jwt",
         batch_size=int(overrides.get("batch_size", 500)),
         threshold=float(overrides.get("threshold", 0.85)),
     )

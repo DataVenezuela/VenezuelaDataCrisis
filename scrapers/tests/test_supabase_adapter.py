@@ -30,13 +30,20 @@ from scrapers.jobs.supabase_adapter import (
 )
 
 _URL = "https://proj.supabase.co"
-_KEY = "service-key-xyz"
+# apikey (publishable) y Bearer (JWT) son credenciales DISTINTAS por diseno
+# (patron #200): los tests las mantienen separadas para no volver al falso-verde
+# de reusar la misma key en ambos headers.
+_PUBLISHABLE_KEY = "publishable-key-xyz"
+_CONSOLIDATION_JWT = "consolidation-jwt-abc"
 
 
 def _adapter(handler: Any) -> SupabaseConsolidationAdapter:
     client = httpx.Client(
         base_url=_URL,
-        headers={"apikey": _KEY, "Authorization": f"Bearer {_KEY}"},
+        headers={
+            "apikey": _PUBLISHABLE_KEY,
+            "Authorization": f"Bearer {_CONSOLIDATION_JWT}",
+        },
         transport=httpx.MockTransport(handler),
     )
     return SupabaseConsolidationAdapter(client)
@@ -44,31 +51,66 @@ def _adapter(handler: Any) -> SupabaseConsolidationAdapter:
 
 # --- Config from_env --------------------------------------------------------
 
-def test_from_env_sin_variables_es_dry_run(monkeypatch: pytest.MonkeyPatch) -> None:
+def _clear_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("SUPABASE_URL", raising=False)
-    monkeypatch.delenv("SUPABASE_SERVICE_KEY", raising=False)
+    monkeypatch.delenv("SUPABASE_PUBLISHABLE_KEY", raising=False)
+    monkeypatch.delenv("SUPABASE_CONSOLIDATION_JWT", raising=False)
+
+
+def test_from_env_sin_variables_es_dry_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear_env(monkeypatch)
     assert SupabaseConsolidationConfig.from_env() is None
 
 
 def test_from_env_config_parcial_es_dry_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear_env(monkeypatch)
     monkeypatch.setenv("SUPABASE_URL", _URL)
-    monkeypatch.delenv("SUPABASE_SERVICE_KEY", raising=False)
+    monkeypatch.setenv("SUPABASE_PUBLISHABLE_KEY", _PUBLISHABLE_KEY)
+    # falta SUPABASE_CONSOLIDATION_JWT => dry-run
     assert SupabaseConsolidationConfig.from_env() is None
 
 
 def test_from_env_rechaza_http_plano(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear_env(monkeypatch)
     monkeypatch.setenv("SUPABASE_URL", "http://proj.supabase.co")
-    monkeypatch.setenv("SUPABASE_SERVICE_KEY", _KEY)
+    monkeypatch.setenv("SUPABASE_PUBLISHABLE_KEY", _PUBLISHABLE_KEY)
+    monkeypatch.setenv("SUPABASE_CONSOLIDATION_JWT", _CONSOLIDATION_JWT)
     assert SupabaseConsolidationConfig.from_env() is None
 
 
 def test_from_env_ok_con_https(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear_env(monkeypatch)
     monkeypatch.setenv("SUPABASE_URL", _URL + "/")
-    monkeypatch.setenv("SUPABASE_SERVICE_KEY", _KEY)
+    monkeypatch.setenv("SUPABASE_PUBLISHABLE_KEY", _PUBLISHABLE_KEY)
+    monkeypatch.setenv("SUPABASE_CONSOLIDATION_JWT", _CONSOLIDATION_JWT)
     config = SupabaseConsolidationConfig.from_env()
     assert config is not None
     assert config.supabase_url == _URL  # trailing slash removido
-    assert config.supabase_key == _KEY
+    assert config.publishable_key == _PUBLISHABLE_KEY
+    assert config.consolidation_jwt == _CONSOLIDATION_JWT
+
+
+def test_from_config_headers_apikey_publishable_bearer_jwt() -> None:
+    """El adapter real manda apikey=publishable y Bearer=JWT (NO la misma key).
+
+    Verifica el patron #200: from_config traduce la config a headers distintos
+    por credencial (apikey != Bearer), sin service_role. Se lee el default de
+    headers del httpx.Client que arma from_config, sin abrir red.
+    """
+    config = SupabaseConsolidationConfig(
+        supabase_url=_URL,
+        publishable_key=_PUBLISHABLE_KEY,
+        consolidation_jwt=_CONSOLIDATION_JWT,
+    )
+    adapter = SupabaseConsolidationAdapter.from_config(config)
+    try:
+        headers = adapter._client.headers
+        assert headers["apikey"] == _PUBLISHABLE_KEY
+        assert headers["Authorization"] == f"Bearer {_CONSOLIDATION_JWT}"
+        # blindaje anti falso-verde: apikey y Bearer NO son el mismo valor.
+        assert headers["apikey"] != _CONSOLIDATION_JWT
+    finally:
+        adapter.close()
 
 
 # --- fetch_unconsolidated ---------------------------------------------------

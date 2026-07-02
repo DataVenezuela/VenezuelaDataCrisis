@@ -17,15 +17,27 @@ Espeja el patron de `scrapers/exporters/staging_exporter.py`:
     credencial; el endpoint es fijo y un redirect inesperado se trata como error.
   - Reintentos con `backoff_delay` en status transitorios y errores de red.
 
-Variables de entorno (convencion del repo)
-------------------------------------------
-El repo no tiene todavia un workflow que exponga la key de Supabase al pipeline
-Python (el `staging_exporter` usa STAGING_* contra Vercel, no Supabase directo;
-`build_public_index.yml` menciona SUPABASE_DB_URL, que es una connection string
-de Postgres, no la Data API). El consolidation job hermano (`consolidation_job`,
-camino Person #92) ya lee ``SUPABASE_URL`` + ``SUPABASE_SERVICE_KEY``. Para no
-introducir una tercera convencion, este adapter reusa exactamente esos dos
-nombres. ``consolidate.yml`` (workflow, #96) es quien debera inyectarlos.
+Variables de entorno (patron acordado en #200)
+----------------------------------------------
+El auth sigue el patron de rol dedicado + JWT acordado en #200 (ver el comentario
+de cierre): NADA de service_role en el path de consolidacion. Se leen:
+  - ``SUPABASE_URL``: base de la Data API (PostgREST) del proyecto.
+  - ``SUPABASE_PUBLISHABLE_KEY``: va en el header ``apikey`` (identifica el
+    proyecto; NO otorga permisos por si sola: la seguridad la da RLS).
+  - ``SUPABASE_CONSOLIDATION_JWT``: JWT HS256 con claim ``role=consolidation_job``,
+    va en ``Authorization: Bearer <...>``. El adapter SOLO lo LEE del entorno; NO
+    lo firma. PostgREST valida la firma local y hace SET ROLE al rol del claim.
+``consolidate.yml`` (workflow, #96) es quien debera inyectarlos.
+
+DEPENDENCIA DE BACKEND (critico)
+--------------------------------
+Este auth depende de una migracion de backend (en DataVenezuela/dataVenezuela)
+que cree el rol ``consolidation_job`` (NOBYPASSRLS + grant al authenticator +
+policies dedicadas TO consolidation_job sobre events/acopio_centers/
+dedup_candidates/dedup_decisions y aportes.consolidated_at) y del secret
+``SUPABASE_CONSOLIDATION_JWT``, ambos AUN INEXISTENTES. Sin esa migracion los
+requests contra Supabase real dan permission-denied. El cambio de credencial NO
+altera el criterio de winner-selection/trust_tier ni el schema.
 
 FIDELIDAD DE SCHEMA (critico)
 -----------------------------
@@ -137,27 +149,34 @@ _MARK_CHUNK_SIZE = 100
 
 @dataclass(frozen=True)
 class SupabaseConsolidationConfig:
-    """Configuracion del adapter leida del entorno (SUPABASE_URL + key).
+    """Configuracion del adapter leida del entorno (patron #200).
 
     Espeja ``StagingConfig`` del exporter: HTTPS obligatorio y ``from_env``
-    devuelve None (=> dry-run) si falta la config, sin abortar.
+    devuelve None (=> dry-run) si falta la config, sin abortar. El auth usa el
+    par acordado en #200: ``publishable_key`` en el header ``apikey`` y
+    ``consolidation_jwt`` en ``Authorization: Bearer`` (rol dedicado
+    ``consolidation_job``, sin service_role). El JWT solo se LEE del entorno.
     """
 
     supabase_url: str
-    supabase_key: str
+    publishable_key: str
+    consolidation_jwt: str
 
     @classmethod
     def from_env(cls) -> "SupabaseConsolidationConfig | None":
         """Construye la config desde el entorno; None si falta o no es https.
 
-        Distingue el dry-run intencional (NINGUNA env seteada, dev local) de una
-        config parcial en prod (alguna seteada, otra no): la primera loguea a
-        INFO, la segunda a ERROR listando las faltantes. En ambos casos devuelve
-        None (gatilla dry-run) sin abortar el job.
+        Lee ``SUPABASE_URL`` + ``SUPABASE_PUBLISHABLE_KEY`` (apikey) +
+        ``SUPABASE_CONSOLIDATION_JWT`` (Bearer). Distingue el dry-run intencional
+        (NINGUNA env seteada, dev local) de una config parcial en prod (alguna
+        seteada, otra no): la primera loguea a INFO, la segunda a ERROR listando
+        las faltantes. En ambos casos devuelve None (gatilla dry-run) sin abortar
+        el job. NUNCA loguea el valor de la key ni del JWT.
         """
         values = {
             "SUPABASE_URL": os.getenv("SUPABASE_URL"),
-            "SUPABASE_SERVICE_KEY": os.getenv("SUPABASE_SERVICE_KEY"),
+            "SUPABASE_PUBLISHABLE_KEY": os.getenv("SUPABASE_PUBLISHABLE_KEY"),
+            "SUPABASE_CONSOLIDATION_JWT": os.getenv("SUPABASE_CONSOLIDATION_JWT"),
         }
         present = [k for k, v in values.items() if v]
         if not present:
@@ -174,9 +193,9 @@ class SupabaseConsolidationConfig:
             )
             return None
         base_url = str(values["SUPABASE_URL"]).rstrip("/")
-        # La key y (potencialmente) PII viajan en cada request. Sobre HTTP plano
-        # serian interceptables (MITM); exigir HTTPS. Config errada => dry-run,
-        # nunca enviar a un endpoint inseguro.
+        # La key/JWT y (potencialmente) PII viajan en cada request. Sobre HTTP
+        # plano serian interceptables (MITM); exigir HTTPS. Config errada =>
+        # dry-run, nunca enviar a un endpoint inseguro.
         if not base_url.lower().startswith("https://"):
             log.error(
                 "supabase_adapter: SUPABASE_URL debe ser https:// (recibido %r); "
@@ -186,7 +205,8 @@ class SupabaseConsolidationConfig:
             return None
         return cls(
             supabase_url=base_url,
-            supabase_key=str(values["SUPABASE_SERVICE_KEY"]),
+            publishable_key=str(values["SUPABASE_PUBLISHABLE_KEY"]),
+            consolidation_jwt=str(values["SUPABASE_CONSOLIDATION_JWT"]),
         )
 
 
@@ -245,8 +265,10 @@ class SupabaseConsolidationAdapter:
         client = httpx.Client(
             base_url=config.supabase_url,
             headers={
-                "apikey": config.supabase_key,
-                "Authorization": f"Bearer {config.supabase_key}",
+                # Patron #200: apikey = publishable key (identifica el proyecto);
+                # Bearer = JWT del rol dedicado consolidation_job. NO service_role.
+                "apikey": config.publishable_key,
+                "Authorization": f"Bearer {config.consolidation_jwt}",
                 "User-Agent": USER_AGENT,
                 "Accept": "application/json",
                 "Content-Type": "application/json",
