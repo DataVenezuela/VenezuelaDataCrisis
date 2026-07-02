@@ -1096,7 +1096,7 @@ class TestExporterParallelismWiring:
         monkeypatch.setattr(rp, "_get_adapter", lambda s: adapter)
         monkeypatch.setattr(rp, "_get_parser", lambda s, event_id: parser)
 
-        result = rp._run_source(source, None, [], _EVENT_ID, exporter)
+        result = rp._run_source(source, None, [], _EVENT_ID, exporter, [])
 
         assert result.sent == 2
         exporter.export_source.assert_called_once()
