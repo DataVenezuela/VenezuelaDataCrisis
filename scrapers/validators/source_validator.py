@@ -149,6 +149,14 @@ def _validate_optional_fields(source: dict[str, Any], label: str) -> None:
                 f"{label} debe tener 'max_concurrent_posts' como entero positivo."
             )
 
+    bulk_size = source.get("bulk_size")
+    if bulk_size is not None:
+        if isinstance(bulk_size, bool) or not isinstance(bulk_size, int) or bulk_size < 1:
+            raise ValueError(
+                f"{label} debe tener 'bulk_size' como entero positivo (>= 1); "
+                f"0 o negativo produce chunks vacios y perdida silenciosa de datos."
+            )
+
 
 def validate_sources_config(config_path: Path) -> dict[str, Any]:
     payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))

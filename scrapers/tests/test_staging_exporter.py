@@ -39,10 +39,12 @@ class _RecordingTransport(httpx.BaseTransport):
         aportes_status: int = 201,
         watermark_status: int = 200,
         bulk_status: int = 200,
+        bulk_body: bytes | None = None,
     ) -> None:
         self.aportes_status = aportes_status
         self.watermark_status = watermark_status
         self.bulk_status = bulk_status
+        self.bulk_body = bulk_body
         self.posts: list[dict[str, Any]] = []
         self.bulk_posts: list[dict[str, Any]] = []
         # source_slug se infiere del path (no va en el body del PUT real).
@@ -55,6 +57,12 @@ class _RecordingTransport(httpx.BaseTransport):
             body = json.loads(request.content)
             self.bulk_posts.append(body)
             aportes_in = body.get("aportes", [])
+            if self.bulk_body is not None:
+                return httpx.Response(
+                    self.bulk_status,
+                    content=self.bulk_body,
+                    headers={"Content-Type": "text/plain"},
+                )
             if self.bulk_status in (200, 201):
                 return httpx.Response(
                     self.bulk_status,
@@ -690,6 +698,19 @@ class TestBulkExport:
             bulk_size=500,
         )
         assert t_ind.posts[0] == t_bulk.bulk_posts[0]["aportes"][0]
+
+    def test_json_invalido_bloquea_watermark(self) -> None:
+        """200 con body no-JSON no debe avanzar el watermark ni contar como enviado."""
+        t = _RecordingTransport(bulk_body=b"not-json", bulk_status=200)
+        res = _exporter(t).export_source_bulk(
+            [_person("Juan")],
+            source_slug="demo",
+            source_fetched_ats=["2026-06-24T16:00:00Z"],
+            bulk_size=500,
+        )
+        assert res.errors, "debe haber un error registrado"
+        assert res.sent == 0, "no debe contar registros sin confirmacion del servidor"
+        assert t.watermark_puts == [], "watermark no debe avanzar"
 
     def test_contadores_correctos_multiples_lotes(self) -> None:
         records = [_person(f"P{i}", det=f"det{i}") for i in range(10)]

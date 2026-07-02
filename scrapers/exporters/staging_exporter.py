@@ -299,7 +299,13 @@ class StagingExporter:
         )
         return resp.status_code in (200, 201)
 
-    def _post_with_retry(self, path: str, payload: dict[str, object]) -> httpx.Response:
+    def _post_with_retry(
+        self,
+        path: str,
+        payload: dict[str, object],
+        *,
+        timeout: httpx.Timeout | None = None,
+    ) -> httpx.Response:
         """POST con exponential backoff en status transitorios y errores de red.
 
         Reintenta en 429/500/502/503/504 y en TimeoutException/NetworkError
@@ -311,7 +317,7 @@ class StagingExporter:
         resp: httpx.Response | None = None
         for attempt in range(1, _MAX_POST_RETRIES + 1):
             try:
-                resp = self._client.post(path, json=payload)
+                resp = self._client.post(path, json=payload, timeout=timeout)
             except (httpx.TimeoutException, httpx.NetworkError) as exc:
                 last_exc = exc
                 if attempt < _MAX_POST_RETRIES:
@@ -451,8 +457,11 @@ class StagingExporter:
 
         for chunk in chunks:
             body: dict[str, object] = {"aportes": chunk}
+            # Timeout escalado: payloads bulk (~1 MB) necesitan más tiempo que
+            # los individuales (~2 KB) que usan el default de 30s del cliente.
+            _bulk_timeout = httpx.Timeout(connect=10.0, read=120.0, write=120.0, pool=10.0)
             try:
-                resp = self._post_with_retry(_APORTES_BULK_PATH, body)
+                resp = self._post_with_retry(_APORTES_BULK_PATH, body, timeout=_bulk_timeout)
             except httpx.HTTPError as exc:
                 result.errors.append(f"POST {_APORTES_BULK_PATH} fallo: {exc}")
                 continue
@@ -468,7 +477,13 @@ class StagingExporter:
                     batch_errors = data.get("errors") or []
                     result.errors.extend(str(e) for e in batch_errors)
                 except (ValueError, AttributeError, TypeError) as exc:
-                    result.sent += len(chunk)
+                    # No asumir que el lote fue enviado: el watermark NO debe
+                    # avanzar si no podemos confirmar cuántos registros aceptó
+                    # el servidor. Registramos como error para que el watermark
+                    # se bloquee y el lote se reintente en la próxima corrida.
+                    result.errors.append(
+                        f"bulk response JSON invalido en lote de {len(chunk)}: {exc}"
+                    )
                     log.warning("bulk response JSON invalido: %s", exc)
             else:
                 log.warning(
