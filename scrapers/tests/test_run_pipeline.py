@@ -51,6 +51,7 @@ _EVENT_ID = "8f14e45f-ceea-467e-bd5d-0a4f2e0c1a3a"
 _SUPABASE_ENV = {
     "SUPABASE_URL": "https://project.supabase.co",
     "SUPABASE_PUBLISHABLE_KEY": "sb_publishable_test",
+    "SUPABASE_INGEST_JWT": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoic2NyYXBlcl9pbmdlc3QifQ.test",
 }
 
 

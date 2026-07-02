@@ -143,8 +143,9 @@ tiene `timeout-minutes: 15` — insuficiente para ese volumen.
 El README raíz puede tener referencias desactualizadas a
 `DATAVZLA_API_KEY`/`DATAVZLA_BASE_URL`/`STAGING_API_KEY`/`STAGING_BASE_URL`.
 **Las variables reales que lee `StagingConfig.from_env()` son:**
-- `SUPABASE_PUBLISHABLE_KEY` — secret de GitHub Actions
 - `SUPABASE_URL` — variable de GitHub Actions (URL pública, no secret)
+- `SUPABASE_PUBLISHABLE_KEY` — secret de GitHub Actions (pública por diseño, para header `apikey`)
+- `SUPABASE_INGEST_JWT` — secret de GitHub Actions (JWT firmado con rol `scraper_ingest`)
 
 `STAGING_SOURCE_SLUG` **no existe como variable consumida por el código.**
 El `source_slug` siempre sale de `source.id` en `run_pipeline.py`, nunca de

@@ -646,9 +646,10 @@ Responsabilidades del exporter:
   201. Si cualquiera falla, el watermark no cambia.
 
 Auth con Supabase: header `apikey` con la publishable key del proyecto
-(`SUPABASE_PUBLISHABLE_KEY`). Es segura para GitHub Actions según la
-documentación de Supabase — ver `docs/adr/0001-arquitectura-serving-publico.md`
-para la justificación arquitectónica.
+(`SUPABASE_PUBLISHABLE_KEY`) + `Authorization: Bearer` con un JWT firmado
+con el rol `scraper_ingest` (`SUPABASE_INGEST_JWT`). El JWT se genera una
+sola vez offline contra `SUPABASE_JWT_SECRET` del proyecto y PostgREST lo
+valida localmente, sin requests extra de auth.
 
 ### Semántica del watermark: `fetched_at` (wall-clock local) vs `updated_at` (servidor)
 

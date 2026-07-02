@@ -59,8 +59,10 @@ class _RecordingTransport(httpx.BaseTransport):
         return httpx.Response(404)
 
 
+_TEST_JWT = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoic2NyYXBlcl9pbmdlc3QifQ.test"
+
 def _exporter(transport: httpx.BaseTransport) -> StagingExporter:
-    cfg = StagingConfig(supabase_url="https://project.supabase.co", publishable_key="k")
+    cfg = StagingConfig(supabase_url="https://project.supabase.co", publishable_key="k", ingest_jwt=_TEST_JWT)
     client = httpx.Client(base_url="https://project.supabase.co", transport=transport)
     return StagingExporter(cfg, client=client, run_id="run-1")
 
@@ -368,11 +370,16 @@ class TestGetWatermark:
 # --- auth ---------------------------------------------------------------
 
 class TestAuth:
-    def test_uses_apikey_header(self) -> None:
-        cfg = StagingConfig(supabase_url="https://project.supabase.co", publishable_key="sb_publishable_test")
+    def test_uses_apikey_and_bearer_headers(self) -> None:
+        cfg = StagingConfig(
+            supabase_url="https://project.supabase.co",
+            publishable_key="sb_publishable_test",
+            ingest_jwt=_TEST_JWT,
+        )
         exp = StagingExporter(cfg, run_id="run-1")
         assert exp._client is not None
         assert exp._client.headers["apikey"] == "sb_publishable_test"
+        assert exp._client.headers["Authorization"] == f"Bearer {_TEST_JWT}"
         exp.close()
 
 
@@ -416,7 +423,7 @@ class _FlakyTransport(httpx.BaseTransport):
 class TestPostRetry:
     def test_503_then_200_ends_as_sent(self) -> None:
         t = _FlakyTransport([503, 200])
-        cfg = StagingConfig(supabase_url="https://project.supabase.co", publishable_key="k")
+        cfg = StagingConfig(supabase_url="https://project.supabase.co", publishable_key="k", ingest_jwt=_TEST_JWT)
         client = httpx.Client(base_url="https://project.supabase.co", transport=t)
         exp = StagingExporter(cfg, client=client, run_id="run-1")
         with patch("scrapers.exporters.staging_exporter.time.sleep", lambda *_: None):
@@ -429,7 +436,7 @@ class TestPostRetry:
 
     def test_persistent_503_ends_as_error(self) -> None:
         t = _FlakyTransport([503])
-        cfg = StagingConfig(supabase_url="https://project.supabase.co", publishable_key="k")
+        cfg = StagingConfig(supabase_url="https://project.supabase.co", publishable_key="k", ingest_jwt=_TEST_JWT)
         client = httpx.Client(base_url="https://project.supabase.co", transport=t)
         exp = StagingExporter(cfg, client=client, run_id="run-1")
         with patch("scrapers.exporters.staging_exporter.time.sleep", lambda *_: None):
@@ -578,17 +585,20 @@ class TestDryRun:
         env = {
             "SUPABASE_URL": "https://project.supabase.co",
             "SUPABASE_PUBLISHABLE_KEY": "sb_publishable_test",
+            "SUPABASE_INGEST_JWT": _TEST_JWT,
         }
         with patch.dict(os.environ, env, clear=True):
             cfg = StagingConfig.from_env()
         assert cfg is not None
         assert cfg.supabase_url == "https://project.supabase.co"
         assert cfg.publishable_key == "sb_publishable_test"
+        assert cfg.ingest_jwt == _TEST_JWT
 
     def test_from_env_rejects_plain_http(self, caplog: Any) -> None:
         env = {
             "SUPABASE_URL": "http://project.supabase.co",
             "SUPABASE_PUBLISHABLE_KEY": "k",
+            "SUPABASE_INGEST_JWT": _TEST_JWT,
         }
         with patch.dict(os.environ, env, clear=True):
             with caplog.at_level("ERROR", logger="scrapers.exporters.staging_exporter"):
@@ -603,7 +613,7 @@ class TestLifecycle:
         t = _RecordingTransport()
         client = httpx.Client(base_url="https://project.supabase.co", transport=t)
         exp = StagingExporter(
-            StagingConfig(supabase_url="https://project.supabase.co", publishable_key="k"),
+            StagingConfig(supabase_url="https://project.supabase.co", publishable_key="k", ingest_jwt=_TEST_JWT),
             client=client,
         )
         exp.close()

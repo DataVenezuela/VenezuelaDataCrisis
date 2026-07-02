@@ -140,6 +140,7 @@ jobs:
           PII_HMAC_SECRET: ${{ secrets.PII_HMAC_SECRET }}
           SUPABASE_URL: ${{ vars.SUPABASE_URL }}
           SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
+          SUPABASE_INGEST_JWT: ${{ secrets.SUPABASE_INGEST_JWT }}
           PYTHONUNBUFFERED: "1"
           # Las expresiones ${{ }} se inyectan en variables de entorno (NO en el
           # cuerpo del script) para evitar shell injection: un valor malicioso en

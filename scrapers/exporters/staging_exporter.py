@@ -1,10 +1,11 @@
 """Staging exporter: upsert directo a Supabase via PostgREST.
 
 Reemplaza el export via Vercel (/api/aportes) por escritura directa a
-Supabase usando la publishable key del proyecto. Cada batch de registros
-(post-PII, post-score, post-minor-protection) se upserta con
-``Prefer: resolution=merge-duplicates``; la idempotencia por external_id
-absorbe re-envios sin duplicar.
+Supabase. Auth via custom JWT firmado con rol ``scraper_ingest``
+(``Authorization: Bearer``) + publishable key en header ``apikey``.
+Cada batch de registros (post-PII, post-score, post-minor-protection)
+se upserta con ``Prefer: resolution=merge-duplicates``; la idempotencia
+por external_id absorbe re-envios sin duplicar.
 
 Sin red real en tests: el httpx.Client es inyectable via el parametro
 ``client`` del constructor (los tests pasan httpx.Client(transport=...)).
@@ -55,6 +56,7 @@ class StagingConfig:
 
     supabase_url: str
     publishable_key: str
+    ingest_jwt: str
 
     @classmethod
     def from_env(cls) -> StagingConfig | None:
@@ -68,6 +70,7 @@ class StagingConfig:
         values = {
             "SUPABASE_URL": os.getenv("SUPABASE_URL"),
             "SUPABASE_PUBLISHABLE_KEY": os.getenv("SUPABASE_PUBLISHABLE_KEY"),
+            "SUPABASE_INGEST_JWT": os.getenv("SUPABASE_INGEST_JWT"),
         }
         present = [k for k, v in values.items() if v]
         if not present:
@@ -94,6 +97,7 @@ class StagingConfig:
         return cls(
             supabase_url=supabase_url,
             publishable_key=str(values["SUPABASE_PUBLISHABLE_KEY"]),
+            ingest_jwt=str(values["SUPABASE_INGEST_JWT"]),
         )
 
 
@@ -158,6 +162,7 @@ class StagingExporter:
                 base_url=config.supabase_url,
                 headers={
                     "apikey": config.publishable_key,
+                    "Authorization": f"Bearer {config.ingest_jwt}",
                     "User-Agent": USER_AGENT,
                     "Accept": "application/json",
                     "Content-Type": "application/json",
@@ -285,6 +290,20 @@ class StagingExporter:
         assert last_exc is not None
         raise last_exc
 
+    def _advance_watermark(
+        self, source_slug: str, source_fetched_ats: list[str], has_errors: bool
+    ) -> str | None:
+        """Avanza el watermark si no hubo errores. Devuelve None o mensaje de error."""
+        if has_errors or not source_fetched_ats:
+            return None
+        new_watermark = _apply_safety_margin(max(source_fetched_ats))
+        try:
+            if not self._set_watermark(source_slug, new_watermark):
+                return "no se pudo actualizar el watermark"
+        except httpx.HTTPError as exc:
+            return f"POST {_WATERMARKS_PATH} fallo: {exc}"
+        return None
+
     # -- export ---------------------------------------------------------------
 
     def export_source(
@@ -353,14 +372,11 @@ class StagingExporter:
                     f"(lote de {len(chunk)} registros)"
                 )
 
-        has_source_errors = bool(source_errors)
-        if not result.errors and not has_source_errors and source_fetched_ats:
-            new_watermark = _apply_safety_margin(max(source_fetched_ats))
-            try:
-                if not self._set_watermark(source_slug, new_watermark):
-                    result.errors.append("no se pudo actualizar el watermark")
-            except httpx.HTTPError as exc:
-                result.errors.append(f"POST {_WATERMARKS_PATH} fallo: {exc}")
+        watermark_err = self._advance_watermark(
+            source_slug, source_fetched_ats, bool(source_errors) or bool(result.errors)
+        )
+        if watermark_err is not None:
+            result.errors.append(watermark_err)
 
         return result
 
