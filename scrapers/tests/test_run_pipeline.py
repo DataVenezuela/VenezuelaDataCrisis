@@ -55,8 +55,6 @@ _SUPABASE_ENV = {
 }
 
 
-_SOURCE_ID_FIXTURE = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
-
 class _StagingTransport(httpx.BaseTransport):
     """Intercepta POSTs a /rest/v1/aportes y el watermark via PostgREST.
 
@@ -71,8 +69,6 @@ class _StagingTransport(httpx.BaseTransport):
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
-        if path == "/rest/v1/sources":
-            return httpx.Response(200, json=[{"id": _SOURCE_ID_FIXTURE}])
         if path == "/rest/v1/aportes":
             body = json.loads(request.content)
             if isinstance(body, list):
@@ -86,6 +82,8 @@ class _StagingTransport(httpx.BaseTransport):
             body = json.loads(request.content)
             self.watermark_posts.append(body)
             return httpx.Response(200, json={})
+        if path == "/rest/v1/sources":
+            return httpx.Response(200, json=[{"id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"}])
         return httpx.Response(404)
 
 

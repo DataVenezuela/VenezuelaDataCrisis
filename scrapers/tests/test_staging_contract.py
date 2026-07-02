@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import httpx
+
 from scrapers.exporters.staging_exporter import StagingConfig, StagingExporter
 
 _EVENT_ID = "8f14e45f-ceea-467e-bd5d-0a4f2e0c1a3a"
@@ -46,17 +48,21 @@ def _person(det: str | None = "detid123") -> dict[str, Any]:
     }
 
 
-_MOCK_SOURCE_UUID = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
-
 def _exporter_for_payload() -> StagingExporter:
     cfg = StagingConfig(
         supabase_url="https://project.supabase.co",
         publishable_key="k",
         ingest_jwt="jwt",
     )
-    exp = StagingExporter(cfg, run_id="run-test")
-    exp._resolve_source_id = lambda slug: _MOCK_SOURCE_UUID  # type: ignore[method-assign]
-    return exp
+    client = httpx.Client(
+        base_url="https://project.supabase.co",
+        transport=httpx.MockTransport(lambda r: (
+            httpx.Response(200, json=[{"id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"}])
+            if r.url.path == "/rest/v1/sources"
+            else httpx.Response(404)
+        )),
+    )
+    return StagingExporter(cfg, client=client, run_id="run-test")
 
 
 class TestPayloadContract:
@@ -115,7 +121,9 @@ class TestOnConflict:
             "el upsert debe especificar on_conflict para que PostgREST "
             "pueda resolver merge-duplicates"
         )
-        assert "on_conflict=source_id,external_id" in path
+        assert "on_conflict=source_id,external_id" in path, (
+            f"path debe contener on_conflict=source_id,external_id, got: {path}"
+        )
 
     def test_scraper_id_is_constant(self) -> None:
         from scrapers.exporters.staging_exporter import _SCRAPER_ID

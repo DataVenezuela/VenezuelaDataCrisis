@@ -31,8 +31,14 @@ from scrapers.exporters.staging_exporter import (
 _EVENT_ID = "8f14e45f-ceea-467e-bd5d-0a4f2e0c1a3a"
 
 
+_SOURCE_UUID = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+
 class _RecordingTransport(httpx.BaseTransport):
-    """Captura POSTs a /rest/v1/aportes y /rest/v1/source_watermarks."""
+    """Captura POSTs a /rest/v1/aportes y /rest/v1/source_watermarks.
+
+    Responde a /rest/v1/sources con un UUID fijo para que
+    _resolve_source_id funcione en tests.
+    """
 
     def __init__(self, aportes_status: int = 201) -> None:
         self.aportes_status = aportes_status
@@ -42,9 +48,6 @@ class _RecordingTransport(httpx.BaseTransport):
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
-        if path == "/rest/v1/sources":
-            src_id = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
-            return httpx.Response(200, json=[{"id": src_id}])
         if path == "/rest/v1/aportes":
             body = json.loads(request.content)
             if isinstance(body, list):
@@ -59,6 +62,8 @@ class _RecordingTransport(httpx.BaseTransport):
             body = json.loads(request.content)
             self.watermark_posts.append(body)
             return httpx.Response(200, json={})
+        if path == "/rest/v1/sources":
+            return httpx.Response(200, json=[{"id": _SOURCE_UUID}])
         return httpx.Response(404)
 
 
@@ -284,14 +289,14 @@ class TestWatermark:
 
         class _Transport(httpx.BaseTransport):
             def handle_request(self, request: httpx.Request) -> httpx.Response:
-                if request.url.path == "/rest/v1/sources":
-                    return httpx.Response(200, json=[{"id": _SOURCE_ID_FIXTURE}])
                 if request.url.path == "/rest/v1/aportes":
                     return httpx.Response(201, json={})
                 if request.method == "POST" and request.url.path == "/rest/v1/source_watermarks":
                     captured["body"] = json.loads(request.content)
                     captured["headers"] = dict(request.headers)
                     return httpx.Response(200, json={})
+                if request.url.path == "/rest/v1/sources":
+                    return httpx.Response(200, json=[{"id": _SOURCE_UUID}])
                 return httpx.Response(404)
 
         _exporter(_Transport()).export_source(
@@ -404,8 +409,6 @@ class TestResponseClassification:
 
 # --- retry del POST ---------------------------------------------------------
 
-_SOURCE_ID_FIXTURE = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
-
 class _FlakyTransport(httpx.BaseTransport):
     def __init__(self, aportes_sequence: list[int]) -> None:
         self.aportes_sequence = aportes_sequence
@@ -414,8 +417,6 @@ class _FlakyTransport(httpx.BaseTransport):
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
-        if path == "/rest/v1/sources":
-            return httpx.Response(200, json=[{"id": _SOURCE_ID_FIXTURE}])
         if path == "/rest/v1/aportes":
             idx = min(self.attempts, len(self.aportes_sequence) - 1)
             status = self.aportes_sequence[idx]
@@ -426,6 +427,8 @@ class _FlakyTransport(httpx.BaseTransport):
                 return httpx.Response(200, json=[])
             self.watermark_posts.append(json.loads(request.content))
             return httpx.Response(200, json={})
+        if path == "/rest/v1/sources":
+            return httpx.Response(200, json=[{"id": _SOURCE_UUID}])
         return httpx.Response(404)
 
 

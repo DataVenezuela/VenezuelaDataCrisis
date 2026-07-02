@@ -233,9 +233,9 @@ class StagingExporter:
         source_id = self._resolve_source_id(source_slug)
         if source_id is None:
             raise ValueError(
-                f"no se pudo resolver source_slug={source_slug!r} a UUID. "
-                "Verificar que la fuente exista en la tabla sources y que "
-                "SUPABASE_INGEST_JWT tenga GRANT SELECT ON public.sources."
+                f"no se pudo resolver source_id para {source_slug!r}; "
+                "verificar que la fuente exista en la tabla sources "
+                "y que el JWT tenga SELECT sobre sources"
             )
         payload: dict[str, object] = {
             "run_id": self.run_id,
@@ -387,7 +387,7 @@ class StagingExporter:
                 try:
                     payload = self._build_payload(rec, source_slug)
                 except ValueError as exc:
-                    log.warning("DRY-RUN: %s", exc)
+                    log.warning("DRY-RUN saltando registro: %s", exc)
                     continue
                 log.info(
                     "DRY-RUN staging_exporter: enviaria entity_type=%s external_id=%s",
@@ -402,6 +402,9 @@ class StagingExporter:
                 payloads.append(self._build_payload(rec, source_slug))
             except ValueError as exc:
                 result.errors.append(str(exc))
+        if not payloads:
+            return result
+
         chunks = [payloads[i : i + size] for i in range(0, len(payloads), size)]
 
         _batch_timeout = httpx.Timeout(connect=10.0, read=120.0, write=120.0, pool=10.0)
