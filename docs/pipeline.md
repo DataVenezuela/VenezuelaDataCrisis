@@ -649,6 +649,23 @@ Auth con `dataVenezuela`: header `x-api-key` (no `Authorization: Bearer`) —
 mismo header en `/api/aportes` y en `/api/source-watermarks/{slug}`, por
 contrato real documentado en `dataVenezuela/docs/api-dedup.md`.
 
+### Fuente de verdad del contrato exporter -> DB
+
+El schema de staging, watermarks, cuarentena y futuros jobs que escriban directo
+a Supabase no se define en este repo. Para cambios que toquen el contrato
+exporter -> DB, la fuente de verdad es `DataVenezuela/dataVenezuela`:
+
+- `supabase/migrations/*.sql`
+- `docs/api-dedup.md`
+- schemas Zod y rutas del endpoint correspondiente
+
+No agregues en `VenezuelaDataCrisis` una copia local ad hoc del schema real
+(por ejemplo `tools/sql/issue_*.sql`) para que los tests pasen contra esa copia.
+Si hace falta un fixture de contrato, debe indicar contra qué migración/doc de
+`dataVenezuela` fue sincronizado y no reemplaza la revisión del repo fuente.
+Esto evita que exporters y jobs pasen CI contra columnas o payloads que no
+existen en la BD real.
+
 ### Semántica del watermark: `fetched_at` (wall-clock local) vs `updated_at` (servidor)
 
 El watermark persiste `max(fetched_at)`, donde `fetched_at` es el momento en
