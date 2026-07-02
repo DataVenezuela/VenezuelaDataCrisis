@@ -27,7 +27,10 @@ LIMIT :batch_size;
 
 - **Cursor inicial:** `('1970-01-01T00:00:00Z', '00000000-0000-0000-0000-000000000000')`
 - **Batch size default:** 500, configurable
-- **Avance del cursor:** después de cada batch exitoso, registros marcados `consolidated_at = NOW()`. El cursor se reconstruye desde el último id procesado
+- **Avance del cursor:** después de cada batch, los aportes sanos se marcan
+  `consolidated_at = NOW()`. Si un candidato puntual falla, los aportes
+  relacionados con ese candidato no se marcan; el resto del batch puede avanzar.
+  El cursor se reconstruye desde el último id leído.
 - **Resiliencia:** si el job se cae, los registros con `consolidated_at = NULL` se re-encuentran en la próxima corrida. El cursor es en memoria, no persiste — no hace falta
 
 ---
@@ -122,9 +125,13 @@ def location_score(left_loc, right_loc):
   `LEAST(left_person_record_id, right_person_record_id)`,
   `GREATEST(left_person_record_id, right_person_record_id)`, `blocking_key`.
 - PostgREST no puede apuntar ese índice expresivo con `on_conflict` portable.
-  El job usa `select-before-insert/update` por par canónico + `blocking_key`.
+  El job usa lookup batch `select-before-insert/update` por par canónico +
+  `blocking_key`.
 - Si el candidato ya existe → `UPDATE score, reasons, priority, decision`.
-- Si es nuevo → `INSERT`.
+- Si es nuevo → `INSERT` en bulk cuando PostgREST lo soporta.
+- Errores fatales (auth 401/403, schema mismatch estructural, respuesta global
+  no parseable) abortan el job. Errores no fatales de candidato se acumulan,
+  bloquean solo el marcado de los aportes afectados y permiten continuar.
 
 ---
 
@@ -174,6 +181,10 @@ python -m scrapers.jobs.consolidation_job --entity-type person --batch-size 500 
   - Error de escritura de candidato → no marcar `consolidated_at`
   - Error al marcar consolidado → CLI non-zero
   - Cursor con mismo `created_at` e `id` mayor → no se salta registros
+  - Lookup batch de candidatos existentes → no un GET por candidato
+  - Candidato sin `event_id` o `blocking_key` → error controlado, no tumba todo
+  - Fallback sin `block_keys` → genera `ced:*` y `phon:*` esperados
+  - Sin `block_keys` y sin `event_id` → no genera claves inválidas
   - Batch con 0 registros → el job termina sin error
   - Job interrumpido a mitad → registros no procesados re-encontrados en próxima corrida
 

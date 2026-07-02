@@ -64,6 +64,11 @@ def find_candidates(
                     "left_person_record_id": left_person_record_id,
                     "right_person_record_id": right_person_record_id,
                     "blocking_key": block_key,
+                    "source_record_ids": [
+                        str(value)
+                        for value in (left.get("id"), right.get("id"))
+                        if value
+                    ],
                     "score": score,
                     "reasons": reasons,
                     "priority": priority,

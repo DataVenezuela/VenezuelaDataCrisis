@@ -287,50 +287,28 @@ class PersonConsolidationResult:
     errors: list[str] = field(default_factory=list)
 
 
-def _build_person_client(config: PersonConsolidationConfig) -> httpx.Client:
-    """Construye cliente Supabase sin loguear credenciales."""
-    return httpx.Client(
-        base_url=config.supabase_url,
-        headers={
-            "apikey": config.supabase_service_key,
-            "Authorization": f"Bearer {config.supabase_service_key}",
-            "Content-Type": "application/json",
-        },
-        timeout=httpx.Timeout(60.0),
-    )
+@dataclass
+class PersonCandidateWriteResult:
+    written: int = 0
+    idempotent: int = 0
+    errors: int = 0
+    mark_blocked_record_ids: set[str] = field(default_factory=set)
+    messages: list[str] = field(default_factory=list)
+    fatal: bool = False
 
 
-def _fetch_person_batch(
-    client: httpx.Client,
-    config: PersonConsolidationConfig,
-    cursor: tuple[str, str],
-) -> list[dict[str, Any]]:
-    """Lee un batch estable con cursor (created_at, id).
+def _candidate_key(row: dict[str, Any]) -> tuple[str, str, str]:
+    left = str(row["left_person_record_id"])
+    right = str(row["right_person_record_id"])
+    first, second = sorted([left, right])
+    return (first, second, str(row["blocking_key"]))
 
-    PostgREST no acepta tuplas SQL directas en query string, asi que se expresa
-    como OR equivalente:
-    created_at > last_created_at OR (created_at = last_created_at AND id > last_id)
-    """
-    last_created_at, last_id = cursor
-    response = client.get(
-        "/rest/v1/aportes",
-        params={
-            "select": "*",
-            "consolidated_at": "is.null",
-            "entity_type": f"eq.{config.entity_type}",
-            "or": (
-                f"(created_at.gt.{last_created_at},"
-                f"and(created_at.eq.{last_created_at},id.gt.{last_id}))"
-            ),
-            "order": "created_at.asc,id.asc",
-            "limit": str(config.batch_size),
-        },
-    )
-    response.raise_for_status()
-    payload = response.json()
-    if not isinstance(payload, list):
-        raise TypeError("Supabase aportes response must be a list")
-    return payload
+
+def _source_record_ids(candidate: dict[str, Any]) -> set[str]:
+    raw_ids = candidate.get("source_record_ids")
+    if not isinstance(raw_ids, list):
+        return set()
+    return {str(value) for value in raw_ids if value}
 
 
 def _candidate_payload(candidate: dict[str, Any]) -> dict[str, Any]:
@@ -359,111 +337,211 @@ def _candidate_payload(candidate: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _find_existing_candidate(
-    client: httpx.Client,
-    payload: dict[str, Any],
-) -> dict[str, Any] | None:
-    """Busca una fila existente por par canonico + blocking_key.
+class SupabasePersonDedupAdapter:
+    """REST adapter for Person dedup candidate I/O."""
 
-    El indice unico de master es expresivo (LEAST/GREATEST), por lo que
-    PostgREST no puede apuntarlo con on_conflict de forma portable. Esta
-    estrategia select-before-write mantiene idempotencia sin simular upsert.
-    """
-    left = str(payload["left_person_record_id"])
-    right = str(payload["right_person_record_id"])
-    blocking_key = str(payload["blocking_key"])
-    response = client.get(
-        "/rest/v1/dedup_candidates",
-        params={
-            "select": "candidate_id",
-            "left_person_record_id": f"in.({left},{right})",
-            "right_person_record_id": f"in.({left},{right})",
-            "blocking_key": f"eq.{blocking_key}",
-            "limit": "1",
-        },
-    )
-    response.raise_for_status()
-    rows = response.json()
-    if not isinstance(rows, list):
-        raise TypeError("Supabase dedup_candidates response must be a list")
-    return rows[0] if rows else None
+    def __init__(self, client: httpx.Client) -> None:
+        self._client = client
+
+    @classmethod
+    def from_config(cls, config: PersonConsolidationConfig) -> "SupabasePersonDedupAdapter":
+        client = httpx.Client(
+            base_url=config.supabase_url,
+            headers={
+                "apikey": config.supabase_service_key,
+                "Authorization": f"Bearer {config.supabase_service_key}",
+                "Content-Type": "application/json",
+            },
+            timeout=httpx.Timeout(60.0),
+        )
+        return cls(client)
+
+    def fetch_batch(
+        self,
+        config: PersonConsolidationConfig,
+        cursor: tuple[str, str],
+    ) -> list[dict[str, Any]]:
+        """Lee un batch estable con cursor (created_at, id)."""
+        last_created_at, last_id = cursor
+        response = self._client.get(
+            "/rest/v1/aportes",
+            params={
+                "select": "*",
+                "consolidated_at": "is.null",
+                "entity_type": f"eq.{config.entity_type}",
+                "or": (
+                    f"(created_at.gt.{last_created_at},"
+                    f"and(created_at.eq.{last_created_at},id.gt.{last_id}))"
+                ),
+                "order": "created_at.asc,id.asc",
+                "limit": str(config.batch_size),
+            },
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, list):
+            raise TypeError("Supabase aportes response must be a list")
+        return payload
+
+    def find_existing_candidates(
+        self,
+        payloads: list[dict[str, Any]],
+    ) -> dict[tuple[str, str, str], dict[str, Any]]:
+        if not payloads:
+            return {}
+
+        clauses = []
+        for payload in payloads:
+            left, right, blocking_key = _candidate_key(payload)
+            for left_id, right_id in ((left, right), (right, left)):
+                clauses.append(
+                    "and("
+                    f"left_person_record_id.eq.{left_id},"
+                    f"right_person_record_id.eq.{right_id},"
+                    f"blocking_key.eq.{blocking_key}"
+                    ")"
+                )
+
+        response = self._client.get(
+            "/rest/v1/dedup_candidates",
+            params={
+                "select": (
+                    "candidate_id,left_person_record_id,"
+                    "right_person_record_id,blocking_key"
+                ),
+                "or": f"({','.join(clauses)})",
+            },
+        )
+        response.raise_for_status()
+        rows = response.json()
+        if not isinstance(rows, list):
+            raise TypeError("Supabase dedup_candidates response must be a list")
+        return {_candidate_key(row): row for row in rows}
+
+    def insert_candidates(self, payloads: list[dict[str, Any]]) -> int:
+        if not payloads:
+            return 0
+        response = self._client.post(
+            "/rest/v1/dedup_candidates",
+            json=payloads,
+            headers={"Prefer": "return=minimal"},
+        )
+        response.raise_for_status()
+        return len(payloads)
+
+    def update_candidate(self, candidate_id: str, payload: dict[str, Any]) -> None:
+        response = self._client.patch(
+            f"/rest/v1/dedup_candidates?candidate_id=eq.{candidate_id}",
+            json={
+                "score": payload["score"],
+                "reasons": payload["reasons"],
+                "priority": payload["priority"],
+                "decision": "pending",
+            },
+            headers={"Prefer": "return=minimal"},
+        )
+        response.raise_for_status()
+
+    def mark_consolidated(self, record_ids: list[str]) -> tuple[int, int, list[str]]:
+        if not record_ids:
+            return (0, 0, [])
+
+        marked = 0
+        errors = 0
+        messages: list[str] = []
+        now = datetime.now(timezone.utc).isoformat()
+        for i in range(0, len(record_ids), 100):
+            chunk = record_ids[i : i + 100]
+            response = self._client.patch(
+                f"/rest/v1/aportes?id=in.({','.join(chunk)})",
+                json={"consolidated_at": now},
+                headers={"Prefer": "return=minimal"},
+            )
+            if response.status_code in (200, 204):
+                marked += len(chunk)
+                continue
+            errors += 1
+            message = f"mark_error: status={response.status_code}"
+            messages.append(message)
+            _LOGGER.error("Error marking aportes consolidated: %s", response.status_code)
+        return (marked, errors, messages)
+
+
+def _is_fatal_write_error(exc: Exception) -> bool:
+    if isinstance(exc, TypeError):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code in (400, 401, 403)
+    return False
 
 
 def _write_person_candidates(
-    client: httpx.Client,
+    adapter: SupabasePersonDedupAdapter,
     candidates: list[dict[str, Any]],
-) -> tuple[int, int, int, list[str]]:
-    """Insert/update candidates, returning inserted_or_updated, duplicates, errors."""
-    written = 0
-    idempotent = 0
-    errors = 0
-    messages: list[str] = []
+) -> PersonCandidateWriteResult:
+    result = PersonCandidateWriteResult()
+    valid: list[tuple[dict[str, Any], set[str]]] = []
 
     for candidate in candidates:
+        source_ids = _source_record_ids(candidate)
         try:
-            payload = _candidate_payload(candidate)
-            existing = _find_existing_candidate(client, payload)
-            was_existing = existing is not None
-            if existing:
-                candidate_id = existing.get("candidate_id")
-                if not candidate_id:
-                    raise ValueError("existing candidate missing candidate_id")
-                response = client.patch(
-                    f"/rest/v1/dedup_candidates?candidate_id=eq.{candidate_id}",
-                    json={
-                        "score": payload["score"],
-                        "reasons": payload["reasons"],
-                        "priority": payload["priority"],
-                        "decision": "pending",
-                    },
-                    headers={"Prefer": "return=minimal"},
-                )
-            else:
-                response = client.post(
-                    "/rest/v1/dedup_candidates",
-                    json=payload,
-                    headers={"Prefer": "return=minimal"},
-                )
-            if response.status_code not in (200, 201, 204):
-                raise httpx.HTTPStatusError(
-                    f"dedup_candidates write failed: {response.status_code}",
-                    request=response.request,
-                    response=response,
-                )
-            written += 1
-            if was_existing:
-                idempotent += 1
-        except Exception as exc:
-            errors += 1
-            messages.append(f"upsert_error: {exc}")
-            _LOGGER.error("Error writing dedup candidate: %s", exc)
+            valid.append((_candidate_payload(candidate), source_ids))
+        except ValueError as exc:
+            result.errors += 1
+            result.mark_blocked_record_ids.update(source_ids)
+            result.messages.append(f"candidate_payload_error: {exc}")
+            _LOGGER.warning("Invalid dedup candidate payload: %s", exc)
 
-    return written, idempotent, errors, messages
+    payloads = [payload for payload, _ in valid]
+    try:
+        existing = adapter.find_existing_candidates(payloads)
+    except Exception as exc:
+        result.fatal = _is_fatal_write_error(exc)
+        result.errors += len(payloads) if payloads else 1
+        for _, source_ids in valid:
+            result.mark_blocked_record_ids.update(source_ids)
+        result.messages.append(f"existing_lookup_error: {exc}")
+        _LOGGER.error("Error looking up existing dedup candidates: %s", exc)
+        return result
 
-
-def _mark_person_consolidated(client: httpx.Client, record_ids: list[str]) -> tuple[int, int, list[str]]:
-    if not record_ids:
-        return (0, 0, [])
-
-    marked = 0
-    errors = 0
-    messages: list[str] = []
-    now = datetime.now(timezone.utc).isoformat()
-    for i in range(0, len(record_ids), 100):
-        chunk = record_ids[i : i + 100]
-        response = client.patch(
-            f"/rest/v1/aportes?id=in.({','.join(chunk)})",
-            json={"consolidated_at": now},
-            headers={"Prefer": "return=minimal"},
-        )
-        if response.status_code in (200, 204):
-            marked += len(chunk)
+    new_payloads: list[dict[str, Any]] = []
+    new_source_ids: set[str] = set()
+    for payload, source_ids in valid:
+        existing_row = existing.get(_candidate_key(payload))
+        if existing_row is None:
+            new_payloads.append(payload)
+            new_source_ids.update(source_ids)
             continue
-        errors += 1
-        message = f"mark_error: status={response.status_code}"
-        messages.append(message)
-        _LOGGER.error("Error marking aportes consolidated: %s", response.status_code)
-    return (marked, errors, messages)
+
+        candidate_id = existing_row.get("candidate_id")
+        if not isinstance(candidate_id, str) or not candidate_id:
+            result.errors += 1
+            result.mark_blocked_record_ids.update(source_ids)
+            result.messages.append("upsert_error: existing candidate missing candidate_id")
+            continue
+        try:
+            adapter.update_candidate(candidate_id, payload)
+            result.written += 1
+            result.idempotent += 1
+        except Exception as exc:
+            result.errors += 1
+            result.mark_blocked_record_ids.update(source_ids)
+            result.messages.append(f"upsert_error: {exc}")
+            _LOGGER.error("Error updating dedup candidate: %s", exc)
+            if _is_fatal_write_error(exc):
+                result.fatal = True
+                return result
+
+    try:
+        result.written += adapter.insert_candidates(new_payloads)
+    except Exception as exc:
+        result.errors += len(new_payloads)
+        result.mark_blocked_record_ids.update(new_source_ids)
+        result.messages.append(f"upsert_error: {exc}")
+        _LOGGER.error("Error inserting dedup candidates: %s", exc)
+        result.fatal = _is_fatal_write_error(exc)
+
+    return result
 
 
 def run_person_consolidation(
@@ -473,12 +551,16 @@ def run_person_consolidation(
     """Run Person dedup candidate generation end-to-end."""
     start_time = time.monotonic()
     result = PersonConsolidationResult(run_id=str(uuid.uuid4()), entity_type=config.entity_type)
-    http_client = client if client is not None else _build_person_client(config)
+    adapter = (
+        SupabasePersonDedupAdapter(client)
+        if client is not None
+        else SupabasePersonDedupAdapter.from_config(config)
+    )
     cursor = _INITIAL_CURSOR
 
     while True:
         try:
-            rows = _fetch_person_batch(http_client, config, cursor)
+            rows = adapter.fetch_batch(config, cursor)
         except Exception as exc:
             result.errors.append(f"fetch_error: {exc}")
             break
@@ -497,20 +579,20 @@ def run_person_consolidation(
                 result.pairs_compared += n * (n - 1) // 2
 
         candidates = find_candidates(blocks, config.threshold)
-        written, duplicates, upsert_errors, upsert_messages = _write_person_candidates(
-            http_client,
-            candidates,
-        )
-        result.candidates_inserted_or_updated += written
-        result.duplicates_skipped += duplicates
-        result.upsert_errors += upsert_errors
-        result.errors.extend(upsert_messages)
-
-        if upsert_errors:
+        write_result = _write_person_candidates(adapter, candidates)
+        result.candidates_inserted_or_updated += write_result.written
+        result.duplicates_skipped += write_result.idempotent
+        result.upsert_errors += write_result.errors
+        result.errors.extend(write_result.messages)
+        if write_result.fatal:
             break
 
-        ids = [str(row["id"]) for row in rows if row.get("id")]
-        _, mark_errors, mark_messages = _mark_person_consolidated(http_client, ids)
+        ids = [
+            str(row["id"])
+            for row in rows
+            if row.get("id") and str(row["id"]) not in write_result.mark_blocked_record_ids
+        ]
+        _, mark_errors, mark_messages = adapter.mark_consolidated(ids)
         result.mark_errors += mark_errors
         result.errors.extend(mark_messages)
         if mark_errors:
