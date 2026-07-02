@@ -298,7 +298,7 @@ class PersonConsolidationConfig:
     ``Authorization: Bearer`` (rol dedicado ``consolidation_job``, sin
     service_role). El JWT solo se LEE del entorno; el adapter NO lo firma.
     Depende de la migracion de backend del rol consolidation_job (grants +
-    policies) y del secret ``SUPABASE_CONSOLIDATION_JWT`` (aun inexistentes) para
+    policies) y de la credencial ``SUPABASE_CONSOLIDATION_JWT`` (aun inexistentes) para
     correr contra Supabase real; no cambia trust_tier ni el schema.
     """
 

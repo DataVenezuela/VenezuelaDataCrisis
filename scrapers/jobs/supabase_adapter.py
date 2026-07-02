@@ -34,7 +34,7 @@ DEPENDENCIA DE BACKEND (critico)
 Este auth depende de una migracion de backend (en DataVenezuela/dataVenezuela)
 que cree el rol ``consolidation_job`` (NOBYPASSRLS + grant al authenticator +
 policies dedicadas TO consolidation_job sobre events/acopio_centers/
-dedup_candidates/dedup_decisions y aportes.consolidated_at) y del secret
+dedup_candidates/dedup_decisions y aportes.consolidated_at) y de la credencial
 ``SUPABASE_CONSOLIDATION_JWT``, ambos AUN INEXISTENTES. Sin esa migracion los
 requests contra Supabase real dan permission-denied. El cambio de credencial NO
 altera el criterio de winner-selection/trust_tier ni el schema.
