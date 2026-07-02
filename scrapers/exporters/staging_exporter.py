@@ -240,15 +240,23 @@ class StagingExporter:
 
     def _set_watermark(self, source_slug: str, watermark_at: str) -> bool:
         assert self._client is not None
-        resp = self._client.post(
+        resp = self._request_with_retry(
+            self._client.post,
             _WATERMARKS_PATH,
-            json={"slug": source_slug, "watermark_at": watermark_at},
+            {"slug": source_slug, "watermark_at": watermark_at},
             headers={"Prefer": "resolution=merge-duplicates"},
         )
-        return resp.status_code in (200, 201)
+        ok = resp.status_code in (200, 201)
+        if not ok:
+            log.warning(
+                "POST watermark %s status=%s body=%r",
+                source_slug, resp.status_code, resp.text[:300],
+            )
+        return ok
 
-    def _post_with_retry(
+    def _request_with_retry(
         self,
+        method,  # httpx bound method: self._client.post / self._client.put
         path: str,
         payload: list[dict[str, object]] | dict[str, object],
         *,
@@ -256,26 +264,27 @@ class StagingExporter:
         headers: dict[str, str] | None = None,
     ) -> httpx.Response:
         assert self._client is not None
+        verb = method.__name__.upper()
         last_exc: httpx.HTTPError | None = None
         resp: httpx.Response | None = None
         for attempt in range(1, _MAX_POST_RETRIES + 1):
             try:
-                resp = self._client.post(path, json=payload, timeout=timeout, headers=headers)
+                resp = method(path, json=payload, timeout=timeout, headers=headers)
             except (httpx.TimeoutException, httpx.NetworkError) as exc:
                 last_exc = exc
                 if attempt < _MAX_POST_RETRIES:
                     delay = backoff_delay(attempt)
                     log.warning(
-                        "%s en POST %s intento %d/%d — reintento en %.1fs",
-                        type(exc).__name__, path, attempt, _MAX_POST_RETRIES, delay,
+                        "%s en %s %s intento %d/%d — reintento en %.1fs",
+                        type(exc).__name__, verb, path, attempt, _MAX_POST_RETRIES, delay,
                     )
                     time.sleep(delay)
                 continue
             if resp.status_code in _RETRYABLE_STATUS and attempt < _MAX_POST_RETRIES:
                 delay = backoff_delay(attempt)
                 log.warning(
-                    "HTTP %s en POST %s intento %d/%d — reintento en %.1fs",
-                    resp.status_code, path, attempt, _MAX_POST_RETRIES, delay,
+                    "HTTP %s en %s %s intento %d/%d — reintento en %.1fs",
+                    resp.status_code, verb, path, attempt, _MAX_POST_RETRIES, delay,
                 )
                 time.sleep(delay)
                 continue
@@ -329,8 +338,8 @@ class StagingExporter:
         for chunk in chunks:
             batch_headers = {"Prefer": "resolution=merge-duplicates,return=minimal"}
             try:
-                resp = self._post_with_retry(
-                    _APORTES_PATH, chunk, timeout=_batch_timeout, headers=batch_headers,
+                resp = self._request_with_retry(
+                    self._client.post, _APORTES_PATH, chunk, timeout=_batch_timeout, headers=batch_headers,
                 )
             except httpx.HTTPError as exc:
                 result.errors.append(f"POST {_APORTES_PATH} batch fallo: {exc}")
