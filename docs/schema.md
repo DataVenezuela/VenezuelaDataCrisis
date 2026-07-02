@@ -525,21 +525,25 @@ acopio_centers
 
 ### Campos
 
+Campos producidos por el parser (modelo Pydantic en `scrapers/models/acopio_center.py`):
+
 | Campo              | Tipo SQL         | Tipo JSONL                 | Nullable | Valores / Notas                   |
 | ------------------ | ---------------- | -------------------------- | -------: | --------------------------------- |
-| `acopio_id`        | `VARCHAR(36)` PK | `string`                   |       no | UUID v4                           |
-| `event_id`         | `VARCHAR(36)` FK | `string`                   |       no | Referencia a `events.event_id`    |
 | `name`             | `VARCHAR(300)`   | `string`                   |       no | Nombre del centro                 |
-| `location`         | `JSONB` / `JSON` | `object` `location_object` |       sí | Ubicación                         |
+| `event_id`         | `VARCHAR(36)` FK | `string`                   |       no | Referencia a `events.event_id`    |
+| `location_text`    | `TEXT`           | `string`                   |       no | Ubicación en texto libre          |
+| `coordinates`      | `JSONB`          | `object` `{lat, lon}`      |       sí | Coordenadas geográficas           |
+| `needs`            | `JSONB`          | `array<string>`            |       sí | Array de `need_keyword`           |
+| `status`           | `VARCHAR(30)`    | `string`                   |       no | Enum definido, default `unverified` |
+| `trust_tier`       | `VARCHAR(1)`     | `string`                   |       no | `A` / `B` / `C` / `D`, default `D` |
 | `confidence_score` | `NUMERIC(4,3)`   | `number`                   |       no | Default `0.000`                   |
-| `status`           | `VARCHAR(30)`    | `string`                   |       no | Enum definido                     |
-| `needs`            | `JSONB` / `JSON` | `array<string>`            |       sí | Array de `need_keyword`           |
-| `last_verified_at` | `TIMESTAMPTZ`    | `string` ISO 8601          |       sí | Última verificación               |
-| `managing_org`     | `VARCHAR(255)`   | `string`                   |       sí | Organización responsable          |
-| `contact_hmac`     | `VARCHAR(64)`    | `string`                   |       sí | HMAC SHA-256 del contacto         |
-| `contact_masked`   | `VARCHAR(30)`    | `string`                   |       sí | Contacto parcialmente enmascarado |
-| `capacity`         | `INTEGER`        | `number` integer           |       sí | Capacidad                         |
-| `current_load`     | `INTEGER`        | `number` integer           |       sí | Carga actual                      |
+| `fuente`           | `VARCHAR(100)`   | `string`                   |       no | Slug de la fuente de origen       |
+| `nota`             | `TEXT`           | `string`                   |       sí | Nota informativa                  |
+
+Campos agregados por el consolidation job (no forman parte del modelo Pydantic):
+
+| Campo              | Tipo SQL         | Tipo JSONL                 | Nullable | Valores / Notas                   |
+| ------------------ | ---------------- | -------------------------- | -------: | --------------------------------- |
 | `dedup_hash`       | `VARCHAR(64)`    | `string`                   |       sí | Hash estable para auto-merge exacto |
 
 ### Enums
@@ -577,26 +581,16 @@ otro
 
 ```json
 {
-  "acopio_id": "h8c9d0e1-f2a3-4567-bcde-678901234567",
   "event_id": "f0e1d2c3-b4a5-6789-0fed-cba987654321",
   "name": "Centro de Acopio Polideportivo Municipal San Felipe",
-  "location": {
-    "raw": "Polideportivo Municipal, San Felipe, Yaracuy",
-    "estado": "Yaracuy",
-    "municipio": "San Felipe",
-    "parroquia": null,
-    "lat": 10.3401,
-    "lng": -68.7456
-  },
+  "location_text": "Polideportivo Municipal, San Felipe, Yaracuy",
+  "coordinates": {"lat": 10.3401, "lon": -68.7456},
   "confidence_score": 0.850,
   "status": "active",
   "needs": ["agua", "alimentos", "medicamentos", "colchonetas", "pañales"],
-  "last_verified_at": "2026-06-26T08:00:00Z",
-  "managing_org": "Cruz Roja Venezuela — Seccional Yaracuy",
-  "contact_hmac": "9f1c3e7a2b4d6f8e0a2c4e6f8b0d2f4a6c8e0b2d4f6a8c0e2f4b6d8a0c2e4f6",
-  "contact_masked": "+58 412 ***7834",
-  "capacity": 400,
-  "current_load": 283
+  "trust_tier": "B",
+  "fuente": "acopio_ve",
+  "nota": null
 }
 ```
 
@@ -925,18 +919,14 @@ Vista SQL: `public_acopio`
 
 | Campo | Tipo JSONL | Notas |
 |-------|-----------|-------|
-| `acopio_id` | `string` UUID v4 | PK |
-| `event_id` | `string` UUID v4 | FK → events |
 | `name` | `string` | |
-| `location` | `object` `location_object` | |
+| `event_id` | `string` UUID v4 | FK → events |
+| `location_text` | `string` | |
+| `coordinates` | `object` `{lat, lon}` | nullable |
 | `confidence_score` | `number` | |
 | `status` | `string` enum | |
 | `needs` | `array<string>` | keywords normalizadas |
-| `last_verified_at` | `string` ISO 8601 | |
-| `managing_org` | `string` | |
-| `contact_masked` | `string` | enmascarado |
-| `capacity` | `number` | |
-| `current_load` | `number` | |
+| `trust_tier` | `string` | A/B/C/D |
 
 ## Vista pública: `events`
 
