@@ -293,46 +293,55 @@ class StagingExporter:
 
     def _set_watermark(self, source_slug: str, watermark_at: str) -> bool:
         assert self._client is not None
-        resp = self._client.put(
+        resp = self._request_with_retry(
+            self._client.put,
             f"{_WATERMARKS_PATH}/{source_slug}",
-            json={"watermarkAt": watermark_at},
+            {"watermarkAt": watermark_at},
         )
-        return resp.status_code in (200, 201)
+        ok = resp.status_code in (200, 201)
+        if not ok:
+            log.warning(
+                "PUT watermark %s status=%s body=%r",
+                source_slug, resp.status_code, resp.text[:300],
+            )
+        return ok
 
-    def _post_with_retry(
+    def _request_with_retry(
         self,
+        method,  # httpx bound method: self._client.post / self._client.put
         path: str,
         payload: dict[str, object],
         *,
         timeout: httpx.Timeout | None = None,
     ) -> httpx.Response:
-        """POST con exponential backoff en status transitorios y errores de red.
+        """Request con exponential backoff en status transitorios y errores de red.
 
         Reintenta en 429/500/502/503/504 y en TimeoutException/NetworkError
         usando backoff_delay (de _shared). Devuelve la ultima response; relanza
         la ultima excepcion de transporte si se agotan los reintentos sin response.
         """
         assert self._client is not None
+        verb = method.__name__.upper()
         last_exc: httpx.HTTPError | None = None
         resp: httpx.Response | None = None
         for attempt in range(1, _MAX_POST_RETRIES + 1):
             try:
-                resp = self._client.post(path, json=payload, timeout=timeout)
+                resp = method(path, json=payload, timeout=timeout)
             except (httpx.TimeoutException, httpx.NetworkError) as exc:
                 last_exc = exc
                 if attempt < _MAX_POST_RETRIES:
                     delay = backoff_delay(attempt)
                     log.warning(
-                        "%s en POST %s intento %d/%d — reintento en %.1fs",
-                        type(exc).__name__, path, attempt, _MAX_POST_RETRIES, delay,
+                        "%s en %s %s intento %d/%d — reintento en %.1fs",
+                        type(exc).__name__, verb, path, attempt, _MAX_POST_RETRIES, delay,
                     )
                     time.sleep(delay)
                 continue
             if resp.status_code in _RETRYABLE_STATUS and attempt < _MAX_POST_RETRIES:
                 delay = backoff_delay(attempt)
                 log.warning(
-                    "HTTP %s en POST %s intento %d/%d — reintento en %.1fs",
-                    resp.status_code, path, attempt, _MAX_POST_RETRIES, delay,
+                    "HTTP %s en %s %s intento %d/%d — reintento en %.1fs",
+                    resp.status_code, verb, path, attempt, _MAX_POST_RETRIES, delay,
                 )
                 time.sleep(delay)
                 continue
@@ -379,7 +388,7 @@ class StagingExporter:
         def _post_one(rec: dict[str, object]) -> None:
             try:
                 payload = self._build_payload(rec, source_slug)
-                resp = self._post_with_retry(_APORTES_PATH, payload)
+                resp = self._request_with_retry(self._client.post, _APORTES_PATH, payload)
             except httpx.HTTPError as exc:
                 with _lock:
                     result.errors.append(f"POST {_APORTES_PATH} fallo: {exc}")
@@ -461,7 +470,7 @@ class StagingExporter:
             # los individuales (~2 KB) que usan el default de 30s del cliente.
             _bulk_timeout = httpx.Timeout(connect=10.0, read=120.0, write=120.0, pool=10.0)
             try:
-                resp = self._post_with_retry(_APORTES_BULK_PATH, body, timeout=_bulk_timeout)
+                resp = self._request_with_retry(self._client.post, _APORTES_BULK_PATH, body, timeout=_bulk_timeout)
             except httpx.HTTPError as exc:
                 result.errors.append(f"POST {_APORTES_BULK_PATH} fallo: {exc}")
                 continue
