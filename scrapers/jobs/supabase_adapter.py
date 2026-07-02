@@ -210,16 +210,6 @@ class SupabaseConsolidationConfig:
         )
 
 
-def _read_optional(row: dict[str, object], column: str) -> object | None:
-    """Lee una columna que puede no existir en la respuesta (schema pendiente).
-
-    Devuelve None si la columna esta ausente o es null. No loguea el valor (puede
-    no ser PII, pero se mantiene la regla de no volcar filas crudas).
-    """
-    value = row.get(column)
-    return value if value is not None else None
-
-
 def _aporte_to_record(row: dict[str, object]) -> Record:
     """Proyecta una fila de aportes al Record que consume la logica pura.
 
@@ -227,7 +217,8 @@ def _aporte_to_record(row: dict[str, object]) -> Record:
     desempate que la decision del equipo pide (trust_tier / fetched_at /
     confidence_score). Esos tres NO son columnas garantizadas de aportes; si la
     respuesta no los trae, se degrada de forma segura (trust_tier vacio => rango
-    0; fetched_at / confidence_score None => desempate neutro).
+    0; fetched_at / confidence_score None => desempate neutro). ``row.get`` ya
+    devuelve None si la columna esta ausente o es null.
     """
     record: Record = {}
     for column, key in _APORTE_FIELD_MAP.items():
@@ -236,13 +227,13 @@ def _aporte_to_record(row: dict[str, object]) -> Record:
     # trust_tier: columna de aportes segun la decision del equipo (A=1..D=4). NO
     # existe todavia en el schema real (depende de migracion pendiente); si falta,
     # cae a _MISSING_TRUST_TIER y pick_winner lo trata como tier desconocido.
-    trust_tier = _read_optional(row, "trust_tier")
+    trust_tier = row.get("trust_tier")
     record["trust_tier"] = trust_tier if trust_tier is not None else _MISSING_TRUST_TIER
     # Desempates de la decision del equipo. En el schema real fetched_at vive en
     # person_sources/raw_artifacts y confidence_score en persons/acopio_centers,
     # no en aportes; se leen de forma opcional para no romper si estan ausentes.
-    record["fetched_at"] = _read_optional(row, "fetched_at")
-    record["confidence_score"] = _read_optional(row, "confidence_score")
+    record["fetched_at"] = row.get("fetched_at")
+    record["confidence_score"] = row.get("confidence_score")
     return record
 
 

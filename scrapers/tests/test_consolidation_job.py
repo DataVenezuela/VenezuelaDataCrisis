@@ -20,6 +20,7 @@ import scrapers.jobs.consolidation_job as consolidation_job
 
 from scrapers.jobs.consolidation_job import (
     PersonConsolidationConfig,
+    SupabasePersonDedupAdapter,
     canonical_from_winner,
     consolidate_entity_type,
     default_tier_rank,
@@ -596,3 +597,120 @@ def test_person_without_block_keys_and_event_id_generates_no_invalid_keys() -> N
     assert result.blocks == 0
     assert result.candidates_inserted_or_updated == 0
     assert transport.post_bodies == []
+
+
+# --- Person config from_env (analogo a Event/Acopio, review de mayerlim) -----
+
+_PERSON_URL = "https://proj.supabase.co"
+_PERSON_PUBLISHABLE_KEY = "publishable-key-xyz"
+_PERSON_CONSOLIDATION_JWT = "consolidation-jwt-abc"
+
+
+def _clear_person_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+    monkeypatch.delenv("SUPABASE_PUBLISHABLE_KEY", raising=False)
+    monkeypatch.delenv("SUPABASE_CONSOLIDATION_JWT", raising=False)
+
+
+def test_person_from_env_sin_variables_es_dry_run_info(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Ninguna env seteada (dry-run intencional en dev local): INFO, NO ERROR.
+    _clear_person_env(monkeypatch)
+    caplog.set_level(logging.DEBUG, logger="scrapers.jobs.consolidation_job")
+    assert PersonConsolidationConfig.from_env() is None
+    records = [
+        r for r in caplog.records if r.name == "scrapers.jobs.consolidation_job"
+    ]
+    assert records
+    assert all(r.levelno < logging.ERROR for r in records)
+    assert any(r.levelno == logging.INFO for r in records)
+
+
+def test_person_from_env_config_parcial_es_error(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Alguna env seteada y otra faltante (config parcial en prod): ERROR con las
+    # faltantes; devuelve None (dry-run) sin abortar.
+    _clear_person_env(monkeypatch)
+    monkeypatch.setenv("SUPABASE_URL", _PERSON_URL)
+    monkeypatch.setenv("SUPABASE_PUBLISHABLE_KEY", _PERSON_PUBLISHABLE_KEY)
+    # falta SUPABASE_CONSOLIDATION_JWT => config parcial
+    caplog.set_level(logging.DEBUG, logger="scrapers.jobs.consolidation_job")
+    assert PersonConsolidationConfig.from_env() is None
+    errors = [
+        r for r in caplog.records
+        if r.name == "scrapers.jobs.consolidation_job" and r.levelno == logging.ERROR
+    ]
+    assert errors
+    assert any("SUPABASE_CONSOLIDATION_JWT" in r.getMessage() for r in errors)
+
+
+def test_person_from_env_ok_con_todas_las_vars(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear_person_env(monkeypatch)
+    monkeypatch.setenv("SUPABASE_URL", _PERSON_URL + "/")
+    monkeypatch.setenv("SUPABASE_PUBLISHABLE_KEY", _PERSON_PUBLISHABLE_KEY)
+    monkeypatch.setenv("SUPABASE_CONSOLIDATION_JWT", _PERSON_CONSOLIDATION_JWT)
+    config = PersonConsolidationConfig.from_env()
+    assert config is not None
+    assert config.supabase_url == _PERSON_URL  # trailing slash removido
+    assert config.publishable_key == _PERSON_PUBLISHABLE_KEY
+    assert config.consolidation_jwt == _PERSON_CONSOLIDATION_JWT
+
+
+def test_person_from_config_headers_apikey_publishable_bearer_jwt() -> None:
+    """El adapter Person manda apikey=publishable y Bearer=JWT (NO la misma key).
+
+    Verifica el patron #200 en el path Person (analogo al test de Event/Acopio):
+    from_config arma headers distintos por credencial (apikey != Bearer), sin
+    service_role. Se lee el default de headers del httpx.Client, sin abrir red.
+    """
+    config = PersonConsolidationConfig(
+        supabase_url=_PERSON_URL,
+        publishable_key=_PERSON_PUBLISHABLE_KEY,
+        consolidation_jwt=_PERSON_CONSOLIDATION_JWT,
+    )
+    adapter = SupabasePersonDedupAdapter.from_config(config)
+    try:
+        headers = adapter._client.headers
+        assert headers["apikey"] == _PERSON_PUBLISHABLE_KEY
+        assert headers["Authorization"] == f"Bearer {_PERSON_CONSOLIDATION_JWT}"
+        # blindaje anti falso-verde: apikey y Bearer NO son el mismo valor.
+        assert headers["apikey"] != _PERSON_CONSOLIDATION_JWT
+    finally:
+        adapter.close()
+
+
+def test_person_run_cierra_client_propio(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Cuando run_person_consolidation arma el adapter (client=None), es dueno del
+    # httpx.Client y debe cerrarlo al terminar (fix de cierre, review de mayerlim).
+    closed: list[bool] = []
+
+    def _spy_close(self: SupabasePersonDedupAdapter) -> None:
+        closed.append(True)
+        self._client.close()
+
+    # fetch_batch vacio => corta al primer batch sin red real.
+    monkeypatch.setattr(
+        SupabasePersonDedupAdapter,
+        "fetch_batch",
+        lambda self, config, cursor: [],
+    )
+    monkeypatch.setattr(SupabasePersonDedupAdapter, "close", _spy_close)
+
+    run_person_consolidation(_person_config())
+
+    assert closed == [True]
+
+
+def test_person_run_no_cierra_client_inyectado() -> None:
+    # Si el caller inyecta el client (tests), run_person_consolidation NO debe
+    # cerrarlo: el caller es dueno de su ciclo de vida.
+    transport = _PersonTransport([[]])
+    client = _person_client(transport)
+    run_person_consolidation(_person_config(), client=client)
+    # El client sigue usable (no se cerro): un GET no lanza ClosedResourceError.
+    assert not client.is_closed
+    client.close()

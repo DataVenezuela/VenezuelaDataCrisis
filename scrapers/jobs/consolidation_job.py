@@ -311,19 +311,37 @@ class PersonConsolidationConfig:
 
     @classmethod
     def from_env(cls, **overrides: Any) -> "PersonConsolidationConfig | None":
-        url = os.getenv("SUPABASE_URL")
-        publishable_key = os.getenv("SUPABASE_PUBLISHABLE_KEY")
-        consolidation_jwt = os.getenv("SUPABASE_CONSOLIDATION_JWT")
-        if not url or not publishable_key or not consolidation_jwt:
+        """Construye la config desde el entorno; None si falta.
+
+        Espeja ``SupabaseConsolidationConfig.from_env`` (Event/Acopio): distingue
+        el dry-run intencional (NINGUNA env seteada, dev local) de una config
+        parcial en prod (alguna seteada, otra no). La primera loguea a INFO, la
+        segunda a ERROR listando las faltantes. En ambos casos devuelve None
+        (gatilla dry-run) sin abortar. NUNCA loguea el valor de la key ni del JWT.
+        """
+        values = {
+            "SUPABASE_URL": os.getenv("SUPABASE_URL"),
+            "SUPABASE_PUBLISHABLE_KEY": os.getenv("SUPABASE_PUBLISHABLE_KEY"),
+            "SUPABASE_CONSOLIDATION_JWT": os.getenv("SUPABASE_CONSOLIDATION_JWT"),
+        }
+        present = [k for k, v in values.items() if v]
+        if not present:
+            _LOGGER.info(
+                "person consolidation deshabilitado: ninguna SUPABASE_* seteada "
+                "(dry-run intencional)"
+            )
+            return None
+        if len(present) < len(values):
+            missing = [k for k, v in values.items() if not v]
             _LOGGER.error(
-                "SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY and "
-                "SUPABASE_CONSOLIDATION_JWT are required"
+                "person consolidation mal configurado: faltan %s; entrando en dry-run",
+                missing,
             )
             return None
         return cls(
-            supabase_url=str(url).rstrip("/"),
-            publishable_key=str(publishable_key),
-            consolidation_jwt=str(consolidation_jwt),
+            supabase_url=str(values["SUPABASE_URL"]).rstrip("/"),
+            publishable_key=str(values["SUPABASE_PUBLISHABLE_KEY"]),
+            consolidation_jwt=str(values["SUPABASE_CONSOLIDATION_JWT"]),
             entity_type=str(overrides.get("entity_type", _PERSON_ENTITY_TYPE)),
             batch_size=int(overrides.get("batch_size", _PERSON_DEFAULT_BATCH_SIZE)),
             threshold=float(overrides.get("threshold", _PERSON_DEFAULT_THRESHOLD)),
@@ -505,6 +523,15 @@ class SupabasePersonDedupAdapter:
         )
         response.raise_for_status()
 
+    def close(self) -> None:
+        self._client.close()
+
+    def __enter__(self) -> "SupabasePersonDedupAdapter":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+
     def mark_consolidated(self, record_ids: list[str]) -> tuple[int, int, list[str]]:
         if not record_ids:
             return (0, 0, [])
@@ -611,9 +638,15 @@ def run_person_consolidation(
     config: PersonConsolidationConfig,
     client: httpx.Client | None = None,
 ) -> PersonConsolidationResult:
-    """Run Person dedup candidate generation end-to-end."""
+    """Run Person dedup candidate generation end-to-end.
+
+    Si el caller inyecta un ``client`` (tests), el caller es dueno de cerrarlo.
+    Si no, este runner arma el adapter via ``from_config`` (abre un httpx.Client
+    propio) y lo cierra en un ``finally`` para no dejar el client sin cerrar.
+    """
     start_time = time.monotonic()
     result = PersonConsolidationResult(run_id=str(uuid.uuid4()), entity_type=config.entity_type)
+    caller_owns_client = client is not None
     adapter = (
         SupabasePersonDedupAdapter(client)
         if client is not None
@@ -621,53 +654,58 @@ def run_person_consolidation(
     )
     cursor = _INITIAL_CURSOR
 
-    while True:
-        try:
-            rows = adapter.fetch_batch(config, cursor)
-        except Exception as exc:
-            result.errors.append(f"fetch_error: {exc}")
-            break
+    try:
+        while True:
+            try:
+                rows = adapter.fetch_batch(config, cursor)
+            except Exception as exc:
+                result.errors.append(f"fetch_error: {exc}")
+                break
 
-        if not rows:
-            break
+            if not rows:
+                break
 
-        result.batches += 1
-        result.records_read += len(rows)
+            result.batches += 1
+            result.records_read += len(rows)
 
-        blocks = build_blocks(rows)
-        result.blocks += len(blocks)
-        for members in blocks.values():
-            n = len(members)
-            if n >= 2:
-                result.pairs_compared += n * (n - 1) // 2
+            blocks = build_blocks(rows)
+            result.blocks += len(blocks)
+            for members in blocks.values():
+                n = len(members)
+                if n >= 2:
+                    result.pairs_compared += n * (n - 1) // 2
 
-        candidates = find_candidates(blocks, config.threshold)
-        write_result = _write_person_candidates(adapter, candidates)
-        result.candidates_inserted_or_updated += write_result.written
-        result.duplicates_skipped += write_result.idempotent
-        result.upsert_errors += write_result.errors
-        result.errors.extend(write_result.messages)
-        if write_result.fatal:
-            break
+            candidates = find_candidates(blocks, config.threshold)
+            write_result = _write_person_candidates(adapter, candidates)
+            result.candidates_inserted_or_updated += write_result.written
+            result.duplicates_skipped += write_result.idempotent
+            result.upsert_errors += write_result.errors
+            result.errors.extend(write_result.messages)
+            if write_result.fatal:
+                break
 
-        ids = [
-            str(row["id"])
-            for row in rows
-            if row.get("id") and str(row["id"]) not in write_result.mark_blocked_record_ids
-        ]
-        _, mark_errors, mark_messages = adapter.mark_consolidated(ids)
-        result.mark_errors += mark_errors
-        result.errors.extend(mark_messages)
-        if mark_errors:
-            break
+            ids = [
+                str(row["id"])
+                for row in rows
+                if row.get("id") and str(row["id"]) not in write_result.mark_blocked_record_ids
+            ]
+            _, mark_errors, mark_messages = adapter.mark_consolidated(ids)
+            result.mark_errors += mark_errors
+            result.errors.extend(mark_messages)
+            if mark_errors:
+                break
 
-        last_row = rows[-1]
-        cursor = (
-            str(last_row.get("created_at", _INITIAL_CURSOR[0])),
-            str(last_row.get("id", _INITIAL_CURSOR[1])),
-        )
-        if len(rows) < config.batch_size:
-            break
+            last_row = rows[-1]
+            cursor = (
+                str(last_row.get("created_at", _INITIAL_CURSOR[0])),
+                str(last_row.get("id", _INITIAL_CURSOR[1])),
+            )
+            if len(rows) < config.batch_size:
+                break
+    finally:
+        # Solo cerramos el client que abrimos nosotros; el inyectado es del caller.
+        if not caller_owns_client:
+            adapter.close()
 
     result.execution_time_ms = int((time.monotonic() - start_time) * 1000)
     print(json.dumps(asdict(result)))
@@ -771,12 +809,18 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     port = _build_port()
-    summary = consolidate_entity_type(
-        port=port,
-        entity_type=args.entity_type,
-        batch_size=args.batch_size,
-        dry_run=args.dry_run,
-    )
+    # El port real mantiene un httpx.Client abierto; cerrarlo siempre al terminar
+    # (en el fake close() es no-op). Para un CLI que termina solo no es un crash,
+    # pero deja el patron listo si el job pasa a correr long-running.
+    try:
+        summary = consolidate_entity_type(
+            port=port,
+            entity_type=args.entity_type,
+            batch_size=args.batch_size,
+            dry_run=args.dry_run,
+        )
+    finally:
+        port.close()
     _LOGGER.info("resumen: %s", summary)
     return 0
 
