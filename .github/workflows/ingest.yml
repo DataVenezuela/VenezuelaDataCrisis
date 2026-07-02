@@ -27,19 +27,65 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
       - name: List enabled sources
         id: list
         env:
           CONFIG: ${{ inputs.config || 'scrapers/config/sources.venezuela.starter.yaml' }}
         run: |
-          pip install pyyaml --quiet
-          python3 - <<'EOF'
-          import yaml, json, os
-          with open(os.environ["CONFIG"]) as f:
-              cfg = yaml.safe_load(f)
-          ids = [s["id"] for s in cfg.get("sources", []) if s.get("enabled", False)]
+          python -m pip install pyyaml --quiet
+          python - <<'EOF'
+          import json, os, re, sys
+          from pathlib import Path
+
+          import yaml
+
+          SOURCE_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
+
+          def fail(message):
+              print(f"ERROR: {message}", file=sys.stderr)
+              raise SystemExit(1)
+
+          config_path = Path(os.environ["CONFIG"])
+          try:
+              cfg = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+          except Exception as exc:
+              fail(f"no se pudo leer YAML {config_path}: {exc}")
+
+          if not isinstance(cfg, dict):
+              fail("el YAML debe ser un objeto top-level")
+          sources = cfg.get("sources")
+          if not isinstance(sources, list):
+              fail("el YAML debe tener una lista top-level 'sources'")
+
+          ids = []
+          seen = set()
+          for idx, source in enumerate(sources):
+              if not isinstance(source, dict):
+                  fail(f"source #{idx} debe ser un objeto")
+              enabled = source.get("enabled", False)
+              if not isinstance(enabled, bool):
+                  fail(f"source #{idx} debe tener 'enabled' como booleano")
+              if not enabled:
+                  continue
+              source_id = source.get("id")
+              if not isinstance(source_id, str) or not source_id.strip():
+                  fail(f"source #{idx} enabled debe tener 'id' como texto no vacio")
+              if not SOURCE_ID_PATTERN.fullmatch(source_id):
+                  fail(
+                      f"source #{idx} id invalido {source_id!r}; "
+                      "solo se permiten letras, numeros, '-' y '_'"
+                  )
+              if source_id in seen:
+                  fail(f"source id duplicado en fuentes enabled: {source_id!r}")
+              seen.add(source_id)
+              ids.append(source_id)
+
           with open(os.environ["GITHUB_OUTPUT"], "a") as out:
-              out.write(f'matrix={{"source_id":{json.dumps(ids)}}}\n')
+              out.write(f'matrix={json.dumps({"source_id": ids}, separators=(",", ":"))}\n')
               out.write(f'has_sources={"true" if ids else "false"}\n')
           EOF
         shell: bash
@@ -66,10 +112,23 @@ jobs:
           cache: pip
           cache-dependency-path: scrapers/requirements.txt
 
+      - name: Resolve spaCy cache path
+        id: spacy-cache-path
+        run: |
+          SITE_PACKAGES=$(python - <<'EOF'
+          import sysconfig
+
+          print(sysconfig.get_paths()["purelib"])
+          EOF
+          )
+          echo "site_packages=$SITE_PACKAGES" >> "$GITHUB_OUTPUT"
+
       - name: Cache spaCy model
         uses: actions/cache@v4
         with:
-          path: ~/.local/lib/python3.12/site-packages/es_core_news_sm
+          path: |
+            ${{ steps.spacy-cache-path.outputs.site_packages }}/es_core_news_sm
+            ${{ steps.spacy-cache-path.outputs.site_packages }}/es_core_news_sm-3.8.0.dist-info
           key: spacy-model-es-core-news-sm-3.8.0
 
       - name: Install dependencies
@@ -90,7 +149,7 @@ jobs:
         run: |
           python -m scrapers.cli --verbose ingest \
             --config "$CONFIG" \
-            --source "${{ matrix.source_id }}" \
+            --source "$SOURCE_ID" \
             --output-dir scrapers/runtime_output
 
       - name: Upload artifacts
