@@ -1,15 +1,11 @@
 -- Issue #200: Rol dedicado scraper_ingest + grants mínimos.
--- Usar SUPABASE_JWT_SECRET del proyecto para firmar un JWT con
--- {"role": "scraper_ingest"} y guardarlo como SUPABASE_INGEST_JWT
--- en GitHub Secrets. El JWT se genera una sola vez offline y PostgREST
--- valida la firma localmente sin requests extra de auth.
 --
--- ADR 0001 define Supabase como plano interno (nunca recibe tráfico público).
--- El rol NOBYPASSRLS permite que las políticas RLS existentes sigan vigentes.
+-- Requisitos previos en dataVenezuela (backend):
+--   - Migración: RLS policies FOR INSERT/UPDATE TO scraper_ingest
+--     sobre public.aportes y public.source_watermarks
+--   - Migración: UNIQUE(source_id, external_id) en public.aportes
 --
--- Ejecutar en el SQL Editor de Supabase antes del primer deploy del PR.
---
--- Generar el JWT (Python):
+-- Generar el JWT:
 --   import jwt, os
 --   from datetime import datetime, timedelta, timezone
 --   token = jwt.encode(
@@ -20,8 +16,16 @@
 --       algorithm="HS256"
 --   )
 --   print(token)
+--
+-- Guardar como SUPABASE_INGEST_JWT en GitHub Secrets.
+--
+-- Ejecutar en el SQL Editor de Supabase ANTES del primer deploy del PR.
 
-CREATE ROLE scraper_ingest WITH LOGIN NOBYPASSRLS;
+CREATE ROLE scraper_ingest WITH NOLOGIN NOINHERIT NOBYPASSRLS;
+
+-- PostgREST autentica como authenticator y hace SET ROLE al claim del JWT.
+GRANT scraper_ingest TO authenticator;
+
 GRANT USAGE ON SCHEMA public TO scraper_ingest;
 GRANT INSERT, UPDATE ON public.aportes TO scraper_ingest;
 GRANT INSERT, UPDATE ON public.source_watermarks TO scraper_ingest;

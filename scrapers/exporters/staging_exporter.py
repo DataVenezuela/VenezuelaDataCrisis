@@ -35,7 +35,9 @@ log = logging.getLogger(__name__)
 
 _DEFAULT_WATERMARK = "1970-01-01T00:00:00Z"
 _APORTES_PATH = "/rest/v1/aportes"
+_APORTES_UPSERT_PATH = "/rest/v1/aportes?on_conflict=source_id,external_id"
 _WATERMARKS_PATH = "/rest/v1/source_watermarks"
+_SCRAPER_ID = "00000000-0000-0000-0000-000000000001"
 
 _WATERMARK_SAFETY_MARGIN = timedelta(minutes=5)
 _FETCHED_AT_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
@@ -171,6 +173,38 @@ class StagingExporter:
                 follow_redirects=False,
             )
 
+    # -- source resolution ----------------------------------------------------
+
+    def _resolve_source_id(self, source_slug: str) -> str | None:
+        """Resuelve ``source_slug`` → UUID de ``sources`` via PostgREST.
+
+        Cachea el resultado en ``self._source_id_cache`` para no repetir el
+        GET en cada payload de la misma corrida.
+        """
+        if not self.enabled or self._client is None:
+            return None
+        if not hasattr(self, "_source_id_cache"):
+            self._source_id_cache: dict[str, str] = {}
+        cached = self._source_id_cache.get(source_slug)
+        if cached is not None:
+            return cached
+        try:
+            resp = self._client.get(
+                "/rest/v1/sources",
+                params={"slug": f"eq.{source_slug}", "select": "id"},
+            )
+            if resp.status_code == 200:
+                rows = resp.json()
+                if isinstance(rows, list) and len(rows) > 0:
+                    sid = str(rows[0].get("id", ""))
+                    if sid:
+                        self._source_id_cache[source_slug] = sid
+                        return sid
+            log.warning("no se pudo resolver source_id para %s: status=%s", source_slug, resp.status_code)
+        except (httpx.HTTPError, ValueError, AttributeError) as exc:
+            log.warning("error resolviendo source_id para %s: %s", source_slug, exc)
+        return None
+
     # -- payload --------------------------------------------------------------
 
     def _build_payload(self, rec: dict[str, object], source_slug: str) -> dict[str, object]:
@@ -190,6 +224,7 @@ class StagingExporter:
             external_id = compute_external_id(rec, entity_type)
             dedup_hash = specs.dedup_key(rec, entity_type)
 
+        source_id = self._resolve_source_id(source_slug)
         payload: dict[str, object] = {
             "run_id": self.run_id,
             "entity_type": _entity_type_slug(entity_type),
@@ -197,7 +232,8 @@ class StagingExporter:
             "dedup_version": spec.version,
             "block_keys": specs.block_keys(rec, entity_type),
             "content_hash": _content_hash(clean),
-            "source_slug": source_slug,
+            "source_id": source_id or source_slug,
+            "scraper_id": _SCRAPER_ID,
             "raw_json": clean,
         }
         for key, value in (
@@ -219,7 +255,7 @@ class StagingExporter:
         try:
             resp = self._client.get(
                 _WATERMARKS_PATH,
-                params={"slug": f"eq.{source_slug}", "select": "watermark_at"},
+                params={"source_slug": f"eq.{source_slug}", "select": "watermark_at"},
             )
             if resp.status_code == 200:
                 rows = resp.json()
@@ -247,7 +283,7 @@ class StagingExporter:
         assert self._client is not None
         resp = self._client.post(
             _WATERMARKS_PATH,
-            json={"slug": source_slug, "watermark_at": watermark_at},
+            json={"source_slug": source_slug, "watermark_at": watermark_at},
             headers={"Prefer": "resolution=merge-duplicates"},
         )
         return resp.status_code in (200, 201)
@@ -349,7 +385,7 @@ class StagingExporter:
             batch_headers = {"Prefer": "resolution=merge-duplicates,return=minimal"}
             try:
                 resp = self._post_with_retry(
-                    _APORTES_PATH, chunk, timeout=_batch_timeout, headers=batch_headers,
+                    _APORTES_UPSERT_PATH, chunk, timeout=_batch_timeout, headers=batch_headers,
                 )
             except httpx.HTTPError as exc:
                 result.errors.append(f"POST {_APORTES_PATH} batch fallo: {exc}")

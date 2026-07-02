@@ -155,6 +155,14 @@ es dead code — no la recrees.
 La migración desde `STAGING_*` a `SUPABASE_*` se hizo en el PR del issue #200.
 Si alguna env var antigua aparece en docs o workflows, actualizarla a la nueva.
 
+Auth via custom JWT firmado con `role: scraper_ingest` (`SUPABASE_INGEST_JWT`)
++ publishable key en header `apikey` (`SUPABASE_PUBLISHABLE_KEY`).
+
+El rol `scraper_ingest` se crea con `NOLOGIN NOINHERIT NOBYPASSRLS` y se
+concede a `authenticator` para que PostgREST pueda hacer SET ROLE.
+Además necesita RLS policies en `aportes` y `source_watermarks` del lado
+de dataVenezuela (issue cross-repo).
+
 `PII_SALT` y `PII_HMAC_SECRET` se cargan del **mismo único secret** de
 GitHub Actions (`secrets.PII_HMAC_SECRET`, ver `ingest.yml:82-83`). No existe
 un `secrets.PII_SALT` separado. Si te piden rotar o auditar secretos, no

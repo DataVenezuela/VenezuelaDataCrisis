@@ -114,7 +114,7 @@ class TestPayload:
         body = self._export_one(_person("Juan"))
         always_present = {
             "run_id", "entity_type", "external_id", "dedup_version",
-            "block_keys", "content_hash", "source_slug", "raw_json",
+            "block_keys", "content_hash", "source_id", "scraper_id", "raw_json",
         }
         assert always_present.issubset(body.keys())
 
@@ -244,7 +244,7 @@ class TestWatermark:
             source_fetched_ats=["2026-06-24T15:00:00Z", "2026-06-24T16:00:00Z"],
         )
         assert t.watermark_posts
-        assert t.watermark_posts[-1]["slug"] == "demo"
+        assert t.watermark_posts[-1]["source_slug"] == "demo"
         assert t.watermark_posts[-1]["watermark_at"] == "2026-06-24T15:55:00Z"
 
     def test_watermark_not_set_on_post_failure(self) -> None:
@@ -292,7 +292,7 @@ class TestWatermark:
         _exporter(_Transport()).export_source(
             [_person("Juan")], source_slug="fuente-x", source_fetched_ats=["2026-06-24T16:00:00Z"]
         )
-        assert captured["body"] == {"slug": "fuente-x", "watermark_at": "2026-06-24T15:55:00Z"}
+        assert captured["body"] == {"source_slug": "fuente-x", "watermark_at": "2026-06-24T15:55:00Z"}
         assert "resolution=merge-duplicates" in captured["headers"].get("prefer", "")
 
     def test_watermark_is_per_source_slug(self) -> None:
@@ -304,7 +304,7 @@ class TestWatermark:
         exp.export_source(
             [_person("Ana")], source_slug="fuente-b", source_fetched_ats=["2026-06-24T20:00:00Z"]
         )
-        slugs_to_watermark = {p["slug"]: p["watermark_at"] for p in t.watermark_posts}
+        slugs_to_watermark = {p["source_slug"]: p["watermark_at"] for p in t.watermark_posts}
         assert slugs_to_watermark == {
             "fuente-a": "2026-06-24T09:55:00Z",
             "fuente-b": "2026-06-24T19:55:00Z",
@@ -512,7 +512,7 @@ class TestBatchExport:
             source_fetched_ats=["2026-06-24T16:00:00Z"],
         )
         assert t.watermark_posts
-        assert t.watermark_posts[-1]["slug"] == "demo"
+        assert t.watermark_posts[-1]["source_slug"] == "demo"
         assert t.watermark_posts[-1]["watermark_at"] == "2026-06-24T15:55:00Z"
 
     def test_error_http_bloquea_watermark(self) -> None:

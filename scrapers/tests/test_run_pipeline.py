@@ -553,7 +553,7 @@ sources:
             "scrapers.pipelines.run_pipeline._get_parser", side_effect=lambda *_: _mock_parser()
         ):
             run_pipeline(config_path=cfg, output_dir=tmp_path / "out")
-        slugs = {p["slug"] for p in transport.watermark_posts}
+        slugs = {p["source_slug"] for p in transport.watermark_posts}
         assert slugs == {"fuente_a", "fuente_b"}
 
 
@@ -625,7 +625,7 @@ sources:
         assert summary["sources_processed"] == 5
         assert summary["staging_sent"] == 10  # 2 personas x 5 fuentes
         assert summary["errors"] == []
-        slugs = {p["slug"] for p in transport.watermark_posts}
+        slugs = {p["source_slug"] for p in transport.watermark_posts}
         assert slugs == {f"fuente_{i}" for i in range(5)}
 
     def test_max_workers_one_is_sequential_default(self, tmp_path: Path) -> None:
