@@ -76,7 +76,9 @@ def test_tres_aportes_mismo_hash_una_fila_y_tres_marcados() -> None:
     assert adapter.consolidated_ids == {"a0", "a1", "a2"}
 
 
-def test_gana_el_de_mayor_tier() -> None:
+def test_gana_el_de_menor_tier() -> None:
+    # Decision del equipo (#82): A=1..D=4, GANA EL MENOR (A es la fuente mas
+    # confiable), asi que el aporte con tier A gana el grupo.
     aportes = [
         _event_aporte("baja", trust_tier="D", source_id="social"),
         _event_aporte("alta", trust_tier="A", source_id="oficial"),
@@ -253,23 +255,27 @@ def test_pick_winner_desempate_determinista_por_created_at_y_source_id() -> None
 
 
 def test_pick_winner_tier_rank_inyectable() -> None:
-    # Un mapeo inverso: "D" vale mas que "A".
+    # Un mapeo inverso donde "D" es el mejor (menor rango). Como pick_winner elige
+    # el MENOR rango, con este mapeo gana "d"; con el default (A=1) gana "a".
     def inverse_rank(tier: str) -> int:
-        return {"D": 4, "C": 3, "B": 2, "A": 1}.get(tier.upper(), 0)
+        return {"D": 1, "C": 2, "B": 3, "A": 4}.get(tier.upper(), 99)
 
     group: list[Record] = [
         {"id": "a", "trust_tier": "A", "created_at": "x", "source_id": "x"},
         {"id": "d", "trust_tier": "D", "created_at": "x", "source_id": "x"},
     ]
     assert pick_winner(group, tier_rank=inverse_rank)["id"] == "d"
-    assert pick_winner(group)["id"] == "a"  # default: A gana
+    assert pick_winner(group)["id"] == "a"  # default: A=1 gana (menor)
 
 
-def test_default_tier_rank_desconocido_es_cero() -> None:
-    assert default_tier_rank("A") == 4
-    assert default_tier_rank("a") == 4
-    assert default_tier_rank("Z") == 0
-    assert default_tier_rank("") == 0
+def test_default_tier_rank_menor_gana() -> None:
+    # Decision del equipo (#82): A=1, B=2, C=3, D=4; un tier desconocido cae al
+    # peor rango (mayor que D) para que nunca le gane a uno conocido.
+    assert default_tier_rank("A") == 1
+    assert default_tier_rank("a") == 1
+    assert default_tier_rank("D") == 4
+    assert default_tier_rank("Z") > default_tier_rank("D")
+    assert default_tier_rank("") > default_tier_rank("D")
 
 
 def test_canonical_from_winner_adjunta_metadata() -> None:

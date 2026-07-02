@@ -17,9 +17,10 @@ Ejecucion:
   python -m scrapers.jobs.consolidation_job \
       --entity-type Event --batch-size 500 [--dry-run]
 
-El acceso a datos real (adapter concreto) queda pendiente de la decision de
-arquitectura del backend; ver scrapers/jobs/ports.py. Esta CLI, tal cual, opera
-sobre un adapter vacio y esta pensada para cablearse a ese adapter cuando exista.
+El acceso a datos real es `SupabaseConsolidationAdapter` (PostgREST directo,
+decision del equipo #82), que se cablea via `_build_port()` desde las env vars
+SUPABASE_URL + SUPABASE_SERVICE_KEY; si faltan, cae a un `FakeInMemoryAdapter`
+vacio (dry-run seguro, sin red). Ver scrapers/jobs/supabase_adapter.py.
 """
 
 from __future__ import annotations
@@ -42,6 +43,10 @@ from scrapers.dedup.clustering import find_candidates
 from scrapers.dedup import specs
 from scrapers.dedup.fingerprint import FINGERPRINT_VERSION
 from scrapers.jobs.ports import ConsolidationDataPort, FakeInMemoryAdapter, Record
+from scrapers.jobs.supabase_adapter import (
+    SupabaseConsolidationAdapter,
+    SupabaseConsolidationConfig,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -56,26 +61,28 @@ AUTOMERGE_ENTITY_TYPES: tuple[str, ...] = tuple(
     name for name, spec in specs.SPECS.items() if spec.allow_automerge
 )
 
-# Mapeo de tier -> rango numerico (mayor gana). Reusa la escala del dedup legacy
-# (scrapers/dedup/deduplicator._TIER_RANK): los modelos Python usan letras
-# A/B/C/D. El backend usa enteros 1/2/3 y su read-path aun no expone trust_tier;
-# el ORIGEN y MAPEO REAL de tier queda PENDIENTE de definicion del equipo. Por
-# eso el rango es inyectable (ver pick_winner) y este dict es solo el default.
-DEFAULT_TIER_RANK: dict[str, int] = {"A": 4, "B": 3, "C": 2, "D": 1}
+# Mapeo de tier -> rango numerico. Decision del equipo (#82): trust_tier es una
+# columna de aportes con letras A/B/C/D mapeadas a 1/2/3/4, y GANA EL MENOR numero
+# (A=1 es la fuente mas confiable). Ver docstring de `pick_winner` para el criterio
+# completo y para la nota de schema (aportes.trust_tier depende de una migracion
+# de backend aun pendiente). El rango es inyectable para tests.
+DEFAULT_TIER_RANK: dict[str, int] = {"A": 1, "B": 2, "C": 3, "D": 4}
 
-# Rango por defecto para un tier desconocido/ausente: el mas bajo.
-_UNKNOWN_TIER_RANK = 0
+# Rango por defecto para un tier desconocido/ausente. Como GANA EL MENOR, un tier
+# desconocido debe PERDER frente a cualquier tier conocido: se le asigna el peor
+# rango posible (mayor que cualquier valor de DEFAULT_TIER_RANK).
+_UNKNOWN_TIER_RANK = max(DEFAULT_TIER_RANK.values()) + 1
 
 
 TierRankFn = Callable[[str], int]
 
 
 def default_tier_rank(tier: str) -> int:
-    """Rango numerico por defecto de un tier (mayor gana).
+    """Rango numerico por defecto de un tier; MENOR gana (A=1 es el mejor).
 
-    Normaliza a mayusculas y cae a `_UNKNOWN_TIER_RANK` si el tier no esta en
-    `DEFAULT_TIER_RANK`. El mapeo real (letras vs enteros 1/2/3 del backend)
-    queda pendiente de la definicion del equipo; ver docstring de `pick_winner`.
+    Decision del equipo (#82): A=1, B=2, C=3, D=4. Normaliza a mayusculas y cae a
+    `_UNKNOWN_TIER_RANK` (el peor) si el tier no esta en `DEFAULT_TIER_RANK`, para
+    que un tier desconocido/ausente nunca le gane a uno conocido.
     """
     return DEFAULT_TIER_RANK.get((tier or "").strip().upper(), _UNKNOWN_TIER_RANK)
 
@@ -100,32 +107,68 @@ def group_by_dedup_hash(records: Iterable[Record]) -> dict[str, list[Record]]:
     return groups
 
 
+def _neg_confidence_score(rec: Record) -> float:
+    """-confidence_score del record (mayor confidence primero); 0.0 si falta/invalido."""
+    raw = rec.get("confidence_score")
+    if isinstance(raw, bool) or not isinstance(raw, (int, float, str)):
+        return 0.0
+    try:
+        return -float(raw)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _fetched_at_epoch(rec: Record) -> float:
+    """Epoch (segundos) de ``fetched_at`` ISO-8601; -inf si falta/invalido.
+
+    Se usa para ordenar por fetched_at DESCENDENTE con ``min()``: la clave de
+    orden lo niega, asi que un fetched_at mas reciente (epoch mayor) produce una
+    clave menor y gana. Un fetched_at ausente/invalido queda como el mas antiguo
+    posible (nunca gana el desempate por recencia).
+    """
+    raw = rec.get("fetched_at")
+    if not isinstance(raw, str) or not raw:
+        return float("-inf")
+    try:
+        text = raw.replace("Z", "+00:00")
+        return datetime.fromisoformat(text).timestamp()
+    except ValueError:
+        return float("-inf")
+
+
 def pick_winner(group: list[Record], tier_rank: TierRankFn = default_tier_rank) -> Record:
     """Elige el aporte ganador de un grupo de duplicados exactos. Funcion pura.
 
-    Criterio (determinista):
-      1. Mayor rango de tier segun ``tier_rank`` (inyectable).
-      2. Desempate ESTABLE cuando dos duplicados empatan en tier: gana el de
-         ``created_at`` mas antiguo (el que se vio primero) y, si tambien empata,
-         el de ``source_id`` menor lexicografico. Ambos claves siempre presentes
-         => resultado independiente del orden de entrada.
+    Criterio (decision del equipo #82, determinista):
+      1. MENOR rango de tier segun ``tier_rank`` (inyectable; default A=1..D=4,
+         gana el menor => la fuente mas confiable).
+      2. Desempate: ``fetched_at`` mas reciente (descendente).
+      3. Desempate: mayor ``confidence_score`` (descendente).
+      4. Desempate ESTABLE final: ``created_at`` mas antiguo y luego ``source_id``
+         menor lexicografico. Ambas claves siempre presentes => resultado
+         independiente del orden de entrada.
 
-    Nota sobre tier: los modelos Python usan letras A/B/C/D; el backend usa
-    enteros 1/2/3 y hoy su read-path NO expone trust_tier. Por eso ``tier_rank``
-    se INYECTA (default `default_tier_rank`) y el origen/mapeo real de tier queda
-    PENDIENTE de la definicion del equipo. El desempate no depende del tier, asi
-    que sigue siendo determinista aun con un mapeo provisional.
+    Nota sobre tier: los modelos Python usan letras A/B/C/D. La decision del
+    equipo las mapea a 1/2/3/4 y hace ganar al MENOR. IMPORTANTE: la columna
+    ``aportes.trust_tier`` NO existe todavia en el schema real del backend
+    (supabase/migrations 0001/0008); el mapeo de la decision DEPENDE de una
+    migracion pendiente. El adapter degrada de forma segura si la columna falta
+    (tier vacio => rango peor), y los desempates por fetched_at/confidence_score
+    mantienen el determinismo aun sin tier.
     """
     if not group:
         raise ValueError("pick_winner requiere un grupo no vacio")
 
-    def sort_key(rec: Record) -> tuple[int, str, str]:
+    def sort_key(rec: Record) -> tuple[int, float, float, str, str]:
         rank = tier_rank(str(rec.get("trust_tier") or ""))
+        neg_fetched_at = -_fetched_at_epoch(rec)
+        neg_conf = _neg_confidence_score(rec)
         created_at = str(rec.get("created_at") or "")
         source_id = str(rec.get("source_id") or "")
-        # -rank: mayor tier primero. created_at/source_id ascendentes para un
-        # desempate estable e independiente del orden de entrada.
-        return (-rank, created_at, source_id)
+        # rank ascendente (menor tier gana); neg_fetched_at y neg_conf ya negados
+        # para que min() elija el mas reciente / mayor confidence; created_at y
+        # source_id ascendentes para un desempate final estable.
+        return (rank, neg_fetched_at, neg_conf, created_at, source_id)
 
     return min(group, key=sort_key)
 
@@ -656,13 +699,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def _build_port() -> ConsolidationDataPort:
-    """Construye el PORT de datos a usar por la CLI.
+    """Construye el PORT de datos a usar por la CLI para Event/AcopioCenter.
 
-    Hoy devuelve un `FakeInMemoryAdapter` vacio porque el adapter concreto de
-    produccion (PostgREST directo vs Vercel) sigue PENDIENTE de la decision del
-    equipo. Este es el unico punto a cambiar cuando esa decision se tome.
+    Decision del equipo (#82): acceso DIRECTO a Supabase PostgREST desde GitHub
+    Actions. Si `SUPABASE_URL` + `SUPABASE_SERVICE_KEY` estan seteadas y son
+    validas (https), construye el adapter real; si faltan, cae a un
+    `FakeInMemoryAdapter` vacio (dry-run seguro, sin red), igual que el patron de
+    dry-run del staging_exporter. Asi `--dry-run` sin env corre sin tocar la red.
     """
-    return FakeInMemoryAdapter()
+    config = SupabaseConsolidationConfig.from_env()
+    if config is None:
+        return FakeInMemoryAdapter()
+    return SupabaseConsolidationAdapter.from_config(config)
 
 
 def main(argv: list[str] | None = None) -> int:
