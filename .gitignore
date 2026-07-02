@@ -4,6 +4,9 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+# Stray analysis file
+docs/ingest-limit-analysis.md
+
 # C extensions
 *.so
 
