@@ -220,6 +220,11 @@ class StagingExporter:
                 rows = resp.json()
                 if isinstance(rows, list) and len(rows) > 0:
                     return str(rows[0].get("watermark_at", _DEFAULT_WATERMARK))
+            else:
+                log.warning(
+                    "get_watermark %s: status %s body=%r",
+                    source_slug, resp.status_code, resp.text[:300],
+                )
             return _DEFAULT_WATERMARK
         except (httpx.HTTPError, ValueError, AttributeError) as exc:
             log.warning("no se pudo leer watermark de %s: %s", source_slug, exc)
@@ -320,11 +325,12 @@ class StagingExporter:
         payloads = [self._build_payload(rec, source_slug) for rec in records]
         chunks = [payloads[i : i + size] for i in range(0, len(payloads), size)]
 
+        _batch_timeout = httpx.Timeout(connect=10.0, read=120.0, write=120.0, pool=10.0)
         for chunk in chunks:
             batch_headers = {"Prefer": "resolution=merge-duplicates,return=minimal"}
             try:
                 resp = self._post_with_retry(
-                    _APORTES_PATH, chunk, headers=batch_headers,
+                    _APORTES_PATH, chunk, timeout=_batch_timeout, headers=batch_headers,
                 )
             except httpx.HTTPError as exc:
                 result.errors.append(f"POST {_APORTES_PATH} batch fallo: {exc}")
