@@ -27,7 +27,7 @@ _APORTES_COLUMNS = {
 }
 
 # Columnas de public.source_watermarks según 0008
-_WATERMARK_COLUMNS = {"source_slug", "watermark_at"}
+_WATERMARK_COLUMNS = {"slug", "watermark_at"}
 
 # Columnas que produce _build_payload (obligatorias + opcionales)
 _PAYLOAD_REQUIRED = {"run_id", "entity_type", "external_id", "dedup_version",
@@ -106,8 +106,8 @@ class TestPayloadContract:
 class TestWatermarkContract:
     """Valida columnas del watermark contra el schema real de source_watermarks."""
 
-    def test_watermark_body_uses_source_slug(self) -> None:
-        """La PK de source_watermarks es source_slug, no slug."""
+    def test_watermark_path_targets_source_watermarks(self) -> None:
+        """La PK de source_watermarks es slug (no source_slug)."""
         from scrapers.exporters.staging_exporter import _WATERMARKS_PATH as wp
         assert "source_watermarks" in wp
 

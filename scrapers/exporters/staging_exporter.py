@@ -267,7 +267,7 @@ class StagingExporter:
         try:
             resp = self._client.get(
                 _WATERMARKS_PATH,
-                params={"source_slug": f"eq.{source_slug}", "select": "watermark_at"},
+                params={"slug": f"eq.{source_slug}", "select": "watermark_at"},
             )
             if resp.status_code == 200:
                 rows = resp.json()
@@ -296,7 +296,7 @@ class StagingExporter:
         try:
             resp = self._post_with_retry(
                 _WATERMARKS_PATH,
-                {"source_slug": source_slug, "watermark_at": watermark_at},
+                {"slug": source_slug, "watermark_at": watermark_at},
                 headers={"Prefer": "resolution=merge-duplicates"},
             )
         except httpx.HTTPError:
