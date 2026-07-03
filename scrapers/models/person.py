@@ -27,6 +27,7 @@ class Person(BaseModel):
     nota: str | None = None
     foto: str | None = None
     deterministic_id: str | None = None
+    source_record_id: str | None = None
     fuente: str
 
     @field_validator("full_name", "fuente")

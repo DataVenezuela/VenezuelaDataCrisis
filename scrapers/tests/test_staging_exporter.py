@@ -224,6 +224,54 @@ class TestIdempotency:
         assert a != b
 
 
+# --- source_record_id -------------------------------------------------------
+
+
+class TestSourceRecordId:
+    def _export_one(self, rec: dict[str, Any], slug: str = "encuentralos_tecnosoft") -> dict[str, Any]:
+        t = _RecordingTransport()
+        _exporter(t).export_source([rec], source_slug=slug, source_fetched_ats=["2026-06-24T15:00:00Z"])
+        return t.batch_posts[0][0]
+
+    def test_source_record_id_used_as_external_id_base(self) -> None:
+        import hashlib
+        native_id = "892170c1-962c-4566-9331-3c98bb76c7ec"
+        rec = _person("Juan Demo")
+        rec["_source_record_id"] = native_id
+        body = self._export_one(rec, slug="encuentralos_tecnosoft")
+        seed = f"person|encuentralos_tecnosoft|{native_id}"
+        expected = hashlib.sha256(seed.encode()).hexdigest()
+        assert body["external_id"] == expected
+
+    def test_source_record_id_overrides_deterministic_id(self) -> None:
+        """_source_record_id tiene prioridad sobre deterministic_id."""
+        rec1 = _person("Juan Demo", det="same_det")
+        rec1["_source_record_id"] = "uuid-000001"
+        rec2 = _person("Juan Demo", det="same_det")
+        rec2["_source_record_id"] = "uuid-000002"
+        body1 = self._export_one(rec1)
+        body2 = self._export_one(rec2)
+        assert body1["external_id"] != body2["external_id"]
+
+    def test_source_record_id_stored_in_payload(self) -> None:
+        """_source_record_id se persiste en la columna source_record_id."""
+        rec = _person("Juan Demo")
+        rec["_source_record_id"] = "test-uuid-999"
+        body = self._export_one(rec)
+        assert body.get("source_record_id") == "test-uuid-999"
+
+    def test_without_source_record_id_falls_back_to_deterministic(self) -> None:
+        rec = _person("Juan Demo", det="detid-fallback")
+        body = self._export_one(rec)
+        assert body["external_id"] == "detid-fallback"
+
+    def test_external_id_is_64_hexchars(self) -> None:
+        rec = _person("Juan Demo")
+        rec["_source_record_id"] = "some-native-uuid"
+        body = self._export_one(rec)
+        assert re.fullmatch(r"[0-9a-f]{64}", body["external_id"])
+
+
 # --- block keys -------------------------------------------------------------
 
 class TestBlockKeys:
