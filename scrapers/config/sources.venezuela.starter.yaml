@@ -68,7 +68,7 @@ sources:
     probe_limit: 1000
     max_concurrent_pages: 32
     max_concurrent_posts: 8
-    bulk_size: 500
+    bulk_size: 100
     full_scan: true
     cursor_field: "creado"
 

@@ -27,9 +27,10 @@ class SourceConfig:
     # Tope de requests por ventana de 60s. Solo lo aplica ApiAdapter (paginacion);
     # None/ausente = sin limite. Ver scrapers/adapters/_shared.RateLimiter.
     rate_limit_per_minute: int | None = None
-    # Cuántos aportes enviar por request a /api/aportes/bulk. Si está seteado,
-    # export_source_bulk() reemplaza el loop individual de export_source().
-    # None/ausente = comportamiento original (un POST por registro).
+    # Cuántos aportes por batch en el POST a /rest/v1/aportes (PostgREST).
+    # None/ausente = _DEFAULT_BATCH_SIZE (100) en StagingExporter.export_source().
+    # No confundir con max_concurrent_posts: bulk_size controla el tamaño de
+    # cada batch, max_concurrent_posts cuántos batches van en paralelo (#212).
     bulk_size: int | None = None
     # Cuando es True, el pipeline omite el parámetro updated_after en el fetch
     # porque la API upstream lo ignora o no lo soporta. El pipeline baja el

@@ -3,8 +3,8 @@
 La documentación en `docs/` describe el diseño; este archivo describe **lo que
 es verdad hoy**, incluyendo brechas entre el diseño y el código.
 
-Última actualización: 30 de junio de 2026, tras el primer dump real a
-producción.
+Última actualización: 3 de julio de 2026, tras el fix de max_concurrent_posts
+(#212).
 
 ---
 
@@ -130,13 +130,11 @@ tiene `timeout-minutes: 15` — insuficiente para ese volumen.
 **Si te piden resolver esto:** el fix son dos cosas separadas, no confundirlas:
 1. Agregar `page_size` a `SourceConfig` y pasarlo en `_get_adapter` (reduce
    el número de fetches HTTP).
-2. El cuello de botella más grande es el **POST**, no el fetch — el exporter
-   manda un POST individual por registro a `/api/aportes`. Subir `page_size`
-   no resuelve eso. Cualquier solución de paralelismo en el exporter necesita
-   revisión cuidadosa porque toca el watermark: `export_source` solo avanza
-   el watermark si *todos* los POST de la fuente terminaron en 200/201 —
-   paralelizar sin preservar esa garantía rompe la semántica de "at-least-once"
-   delivery.
+2. El cuello de botella más grande solía ser el **POST**, pero desde #212 el
+   exporter envía batches concurrentemente si `max_concurrent_posts > 1`
+   en el YAML de la fuente. Usa `ThreadPoolExecutor` internamente y preserva
+   la semántica at-least-once (el watermark solo avanza si todos los batches
+   terminaron en 200/201). Subir `page_size` ya no es prioritario.
 
 ### Variables de entorno reales — no confiar en README.md
 

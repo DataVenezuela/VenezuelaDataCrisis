@@ -798,19 +798,14 @@ def _run_source(
     # 9. Staging export — upsert directo a Supabase via PostgREST
     # source_errors se pasa para que el watermark NO avance si hubo errores
     # previos de la fuente (parse/PII/enriquecimiento/proteccion de menores).
-    if source.max_concurrent_posts is not None:
-        log.warning(
-            "[%s] max_concurrent_posts=%s ya no se usa: el export usa batch "
-            "con PostgREST (batch_size=%s). Configurar bulk_size en el YAML "
-            "para controlar el tamano del lote.",
-            source.id, source.max_concurrent_posts, source.bulk_size or 100,
-        )
+    # max_concurrent_posts activa el envio concurrente de batches si > 1.
     result = exporter.export_source(
         records,
         source_slug=source.id,
         source_fetched_ats=fetched_ats,
         source_errors=source_errors,
         batch_size=source.bulk_size,
+        max_concurrent_posts=source.max_concurrent_posts,
     )
     # Arrastrar los errores previos de la fuente al frente del resultado.
     result.errors[0:0] = source_errors
@@ -872,8 +867,10 @@ def run_pipeline(
         Ruta al YAML de configuracion de fuentes.
     output_dir:
         Reservado para artefactos/logs. El export a JSONL desaparecio; el
-        destino ahora es la tabla aportes via /api/aportes. Se conserva en la
-        firma por compatibilidad con la CLI.
+        destino ahora es la tabla aportes via PostgREST directo
+        (/rest/v1/aportes, StagingExporter, no /api/aportes de Vercel,
+        deprecado para ingest desde #200/#203). Se conserva en la firma por
+        compatibilidad con la CLI.
     limit:
         Numero maximo de entidades por fuente (None = sin limite).
     max_workers:
@@ -959,8 +956,8 @@ def run_pipeline(
                     staging_errors += len(result.errors)
                     sources_processed += int(ok)
                     quarantine_batch.extend(thread_quarantine_batch)
-    
-     
+
+
     finally:
         if quarantine_batch:
             qres = quarantine_exporter.quarantine_many(quarantine_batch)
@@ -969,10 +966,14 @@ def run_pipeline(
             all_errors.extend(
                 f"cuarentena: {e}" for e in qres.errors
             )
+            # Agregado de TODAS las fuentes de esta corrida, no de una sola:
+            # `source` (variable de loop) no existe acá en la rama paralela
+            # (max_workers>1), donde viene de un list comprehension con su
+            # propio scope.
             log.info(
-                "%s: %d a cuarentena (%d duplicados, %d errores)",
-                source.id, qres.sent, qres.duplicates, len(qres.errors),
-            ) 
+                "cuarentena (todas las fuentes): %d enviados (%d duplicados, %d errores)",
+                qres.sent, qres.duplicates, len(qres.errors),
+            )
 
         exporter.close()
         quarantine_exporter.close()

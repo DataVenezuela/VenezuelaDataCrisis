@@ -12,6 +12,11 @@ Sin red real en tests: el httpx.Client es inyectable via el parametro
 Si faltan las env vars SUPABASE_*, el exporter entra en dry-run silencioso:
 no abre cliente, calcula payloads para validarlos, loguea a INFO lo que
 enviaria, y devuelve ExportResult vacio.
+
+El envio concurrente de batches se activa pasando ``max_concurrent_posts > 1``;
+usa ``concurrent.futures.ThreadPoolExecutor``. El watermark solo avanza si
+TODOS los batches del source terminaron en 200/201, preservando la semantica
+at-least-once (el thread pool aguanta hasta que todos terminan, fallos o no).
 """
 
 from __future__ import annotations
@@ -22,6 +27,7 @@ import logging
 import os
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
@@ -376,6 +382,7 @@ class StagingExporter:
         source_fetched_ats: list[str],
         source_errors: list[str] | None = None,
         batch_size: int | None = None,
+        max_concurrent_posts: int | None = None,
     ) -> ExportResult:
         """Exporta los records de ``source_slug``; avanza su watermark si todo OK.
 
@@ -389,6 +396,8 @@ class StagingExporter:
         avanza.
 
         ``batch_size`` controla el tamano del lote (default: _DEFAULT_BATCH_SIZE).
+        ``max_concurrent_posts`` controla cuantos batches enviar en paralelo
+        (default 1 = secuencial). Usa ``ThreadPoolExecutor`` internamente.
         """
         result = ExportResult()
         size = batch_size or _DEFAULT_BATCH_SIZE
@@ -419,63 +428,31 @@ class StagingExporter:
         chunks = [payloads[i : i + size] for i in range(0, len(payloads), size)]
 
         _batch_timeout = httpx.Timeout(connect=10.0, read=120.0, write=120.0, pool=10.0)
-        for chunk in chunks:
-            batch_headers = {"Prefer": "resolution=merge-duplicates,return=minimal"}
-            try:
-                resp = self._post_with_retry(
-                    _APORTES_UPSERT_PATH, chunk, timeout=_batch_timeout, headers=batch_headers,
-                )
-            except httpx.HTTPError as exc:
-                result.errors.append(f"POST {_APORTES_UPSERT_PATH} batch fallo: {exc}")
-                continue
-            except Exception as exc:
-                result.errors.append(f"POST {_APORTES_UPSERT_PATH} batch error inesperado: {exc}")
-                continue
+        batch_headers = {"Prefer": "resolution=merge-duplicates,return=minimal"}
 
-            if resp.status_code in (200, 201):
-                result.sent += len(chunk)
-            elif len(chunk) > 1:
-                # Batch rechazado — reintentar registro a registro para no perder
-                # los registros válidos si solo uno viola una constraint.
-                log.warning(
-                    "POST %s status=%s en batch de %d — reintentando individualmente",
-                    _APORTES_UPSERT_PATH, resp.status_code, len(chunk),
-                )
-                for single in chunk:
-                    try:
-                        r = self._post_with_retry(
-                            _APORTES_UPSERT_PATH, [single],
-                            timeout=_batch_timeout, headers=batch_headers,
-                        )
-                    except httpx.HTTPError as exc:
-                        result.errors.append(f"POST individual fallo: {exc}")
-                        continue
-                    except Exception as exc:
-                        result.errors.append(f"POST individual error inesperado: {exc}")
-                        continue
-                    if r.status_code in (200, 201):
-                        result.sent += 1
-                    else:
-                        log.warning(
-                            "POST %s status=%s external_id=%s body=%s",
-                            _APORTES_UPSERT_PATH, r.status_code,
-                            single.get("external_id"), r.text[:300],
-                        )
-                        result.errors.append(
-                            f"{_APORTES_UPSERT_PATH} status {r.status_code} "
-                            f"(external_id={single.get('external_id')})"
-                        )
-            else:
-                log.warning(
-                    "POST %s status=%s body=%s",
-                    _APORTES_UPSERT_PATH,
-                    resp.status_code,
-                    resp.text[:300],
-                )
-                result.errors.append(
-                    f"{_APORTES_UPSERT_PATH} status {resp.status_code} "
-                    f"(external_id={chunk[0].get('external_id')})"
-                )
+        workers = max(1, max_concurrent_posts or 1)
+
+        if max_concurrent_posts is None or max_concurrent_posts <= 1:
+            log.info(
+                "[%s] exportando %d batches secuencial (max_concurrent_posts=%s); ",
+                source_slug, len(chunks), max_concurrent_posts,
+            )
+            for chunk in chunks:
+                _sent, _errors = self._post_chunk(chunk, _batch_timeout, batch_headers)
+                result.sent += _sent
+                result.errors.extend(_errors)
+
+        else:
+            log.info(
+                "export_source %s: enviando %d batches con %d workers concurrentes",
+                source_slug, len(chunks), workers,
+            )
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = [pool.submit(self._post_chunk, chunk, _batch_timeout, batch_headers) for chunk in chunks]
+                for future in as_completed(futures):
+                    _sent, _errors = future.result()
+                    result.sent += _sent
+                    result.errors.extend(_errors)
 
         watermark_err = self._advance_watermark(
             source_slug, source_fetched_ats, bool(source_errors) or bool(result.errors)
@@ -484,6 +461,83 @@ class StagingExporter:
             result.errors.append(watermark_err)
 
         return result
+
+    def _post_chunk(
+        self,
+        chunk: list[dict[str, object]],
+        timeout: httpx.Timeout,
+        headers: dict[str, str],
+    ) -> tuple[int, list[str]]:
+        """POSTea un solo chunk; reintenta registro a registro si el batch es rechazado.
+
+        Returns
+        -------
+        Tuple de (sent, errors) para este chunk.
+        """
+        sent = 0
+        errors: list[str] = []
+        try:
+            try:
+                resp = self._post_with_retry(
+                    _APORTES_UPSERT_PATH, chunk, timeout=timeout, headers=headers,
+                )
+            except httpx.HTTPError as exc:
+                errors.append(f"POST {_APORTES_UPSERT_PATH} batch fallo: {exc}")
+                return sent, errors
+            except Exception as exc:
+                errors.append(f"POST {_APORTES_UPSERT_PATH} batch error inesperado: {exc}")
+                return sent, errors
+
+            if resp.status_code in (200, 201):
+                sent += len(chunk)
+                return sent, errors
+
+            if len(chunk) > 1:
+                log.warning(
+                    "POST %s status=%s body=%s en batch de %d — reintentando individualmente",
+                    _APORTES_UPSERT_PATH, resp.status_code, resp.text[:500], len(chunk),
+                )
+                for single in chunk:
+                    try:
+                        r = self._post_with_retry(
+                            _APORTES_UPSERT_PATH, [single],
+                            timeout=timeout, headers=headers,
+                        )
+                    except httpx.HTTPError as exc:
+                        errors.append(f"POST individual fallo: {exc}")
+                        continue
+                    except Exception as exc:
+                        errors.append(f"POST individual error inesperado: {exc}")
+                        continue
+                    if r.status_code in (200, 201):
+                        sent += 1
+                    else:
+                        log.warning(
+                            "POST %s status=%s external_id=%s body=%s",
+                            _APORTES_UPSERT_PATH, r.status_code,
+                            single.get("external_id"), r.text[:300],
+                        )
+                        errors.append(
+                            f"{_APORTES_UPSERT_PATH} status {r.status_code} "
+                            f"(external_id={single.get('external_id')})"
+                        )
+                return sent, errors
+
+            log.warning(
+                "POST %s status=%s body=%s",
+                _APORTES_UPSERT_PATH,
+                resp.status_code,
+                resp.text[:300],
+            )
+            errors.append(
+                f"{_APORTES_UPSERT_PATH} status {resp.status_code} "
+                f"(external_id={chunk[0].get('external_id')})"
+            )
+        except Exception as exc:
+            log.error("_post_chunk: error inesperado no capturado: %s", exc)
+            errors.append(f"POST {_APORTES_UPSERT_PATH} error inesperado: {exc}")
+
+        return sent, errors
 
     # -- ciclo de vida --------------------------------------------------------
 
