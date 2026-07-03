@@ -1,11 +1,11 @@
-# ADR 0003 — Reestructuración de repos: pipeline público, deployment y web privados
+# ADR 0003: Reestructuración de repos, pipeline público, deployment y web privados
 
 | Campo | Valor |
 |---|---|
 | Estado | Propuesta |
 | Fecha | 2026-07-04 |
 | Decisores | Infraestructura, DB/API, Scrapers/Cleaners |
-| Reemplaza a | — |
+| Reemplaza a | - |
 | Complementa | `docs/adr/0001-arquitectura-serving-publico.md`, `docs/adr/0002-endurecimiento-seguridad-cloudflare.md` |
 | Relacionado con | `CONTRIBUTING.md`, `docs/base-standards.md §2`, issue #224 |
 
@@ -68,7 +68,7 @@ sensibles, credenciales de acceso a la BD.
 Se separa el *deployment* en dos repos privados nuevos, dejando este repo
 (`VZLA_DEDUP`) como el único componente público.
 
-### 3.1 Repo público — `VZLA_DEDUP` (sin cambios de rol)
+### 3.1 Repo público: `VZLA_DEDUP` (sin cambios de rol)
 
 Sigue siendo el pipeline de scraping: adapters, parsers, normalización, PII
 masking, contratos, documentación técnica y ADRs. Contribuciones abiertas,
@@ -106,7 +106,7 @@ limitado, backups y reforzable con auditoría de Supabase (§7).
 
 ---
 
-## 4. Diagrama — arquitectura de repos
+## 4. Diagrama: arquitectura de repos
 
 ```mermaid
 flowchart TD
@@ -138,7 +138,7 @@ Flujo de datos: `ING → SB → BUILD → D1`. El DDL nunca entra por ningún re
 
 ---
 
-## 5. Diagrama — flujo de verificación humana
+## 5. Diagrama: flujo de verificación humana
 
 ```mermaid
 flowchart LR

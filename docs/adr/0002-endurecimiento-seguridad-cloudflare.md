@@ -1,11 +1,11 @@
-# ADR 0002 — Endurecimiento de seguridad del plano público con Cloudflare
+# ADR 0002: Endurecimiento de seguridad del plano público con Cloudflare
 
 | Campo | Valor |
 |---|---|
 | Estado | Propuesta |
 | Fecha | 2026-06-28 |
 | Decisores | Infraestructura, DB/API, Scrapers/Cleaners |
-| Reemplaza a | — |
+| Reemplaza a | - |
 | Complementa | `docs/adr/0001-arquitectura-serving-publico.md` |
 | Relacionado con | `docs/pipeline.md §14`, `docs/schema.md` (Vista pública), `docs/base-standards.md §10`, `docs/implementation-plan.md` Fase 4 |
 
@@ -16,8 +16,8 @@
 La ADR 0001 fijó la arquitectura de **dos planos**: un plano interno (Supabase /
 PostgreSQL, fuente de verdad con datos completos) y un **plano público de
 solo-lectura** servido desde el borde de Cloudflare (Worker + D1 con la
-proyección sanitizada). Esa ADR enumeró los controles de borde —WAF, caché,
-rate-limit, Turnstile— pero solo a alto nivel (§8 y §12.4).
+proyección sanitizada). Esa ADR enumeró los controles de borde (WAF, caché,
+rate-limit, Turnstile), pero solo a alto nivel (§8 y §12.4).
 
 Esta ADR **no reabre** la decisión arquitectónica de la 0001: la **implementa y
 la endurece**. Concreta *cómo* se configura cada control de Cloudflare, en qué
@@ -61,7 +61,7 @@ busca que ni siquiera eso sea trivial de cosechar en masa.
 
 ---
 
-## 3. Decisión — Defensa en profundidad en el borde
+## 3. Decisión: Defensa en profundidad en el borde
 
 Se adopta una cadena de control en capas. Cada petición del público atraviesa,
 **en este orden**, los siguientes filtros antes de tocar lógica de aplicación.
@@ -79,7 +79,7 @@ flowchart TD
     CACHE -->|miss| W["Worker: validación de contrato + input + query parametrizada"]
     W --> D1[("D1: solo proyección sanitizada, FTS5")]
 
-    CACHE -->|hit| RESP["Respuesta cacheada — el Worker no se ejecuta"]
+    CACHE -->|hit| RESP["Respuesta cacheada, el Worker no se ejecuta"]
 ```
 
 **Lema de diseño:** *el origen no existe para el público.* No hay IP de origen
@@ -120,7 +120,7 @@ y el dato sensible físicamente no está en este plano.
 * No se publica ningún puerto de origen → la superficie L3/L4 atacable es la de
   la red de Cloudflare, no la nuestra.
 
-### 4.4 WAF — Web Application Firewall
+### 4.4 WAF: Web Application Firewall
 
 Tres niveles, de genérico a específico:
 
@@ -179,7 +179,7 @@ con métricas reales):
 El rate-limit vive en el borde: una ráfaga bloqueada **no** ejecuta el Worker ni
 lee D1, así que no consume cuota ni cómputo.
 
-### 4.7 Caché — el control que sostiene el pico
+### 4.7 Caché: el control que sostiene el pico
 
 El workload es lectura-dominante y **muy repetitivo** (los mismos nombres/zonas
 que están en las noticias). La caché de borde es a la vez una optimización de
@@ -234,7 +234,7 @@ CORS: por defecto **denegado**. Si una UI pública oficial necesita consumir el
 API, se habilita `Access-Control-Allow-Origin` **solo** para ese origen
 explícito, nunca `*`.
 
-### 4.10 Worker — controles de aplicación
+### 4.10 Worker: controles de aplicación
 
 Aunque el borde filtra la mayoría, el Worker no confía en nada:
 
@@ -249,7 +249,7 @@ Aunque el borde filtra la mayoría, el Worker no confía en nada:
 * Manejo de error genérico: nunca devolver stack traces, nombres de tabla ni
   detalles internos en la respuesta.
 
-### 4.11 Búsqueda por cédula — anti-verificación masiva (refuerza ADR 0001 §8)
+### 4.11 Búsqueda por cédula: anti-verificación masiva (refuerza ADR 0001 §8)
 
 * El `cedula_hmac` se computa **server-side** en el Worker con `PII_HMAC_SECRET`;
   el cliente nunca envía ni recibe el HMAC crudo de forma que permita precómputo.
@@ -268,7 +268,7 @@ Aunque el borde filtra la mayoría, el Worker no confía en nada:
   Secrets (los usa el build job), no en el borde público.
 * **Logpush / logs del Worker sin PII**: se extiende `docs/pipeline.md §14` al API.
   Prohibido loguear query strings con cédulas o nombres completos. Se loguea ruta,
-  status, latencia, código de caché, score de bot — nunca el término buscado.
+  status, latencia, código de caché, score de bot, nunca el término buscado.
 * Retención de logs mínima necesaria; rotación corta.
 
 ---
@@ -279,7 +279,7 @@ El borde protege el plano público. Pero el activo crítico (PII en claro) vive 
 el **plano interno** y se publica a D1 por el **build job**. Esos caminos también
 se endurecen, todo lo posible, con Cloudflare:
 
-### 5.1 Plano interno (Supabase) — nunca público
+### 5.1 Plano interno (Supabase): nunca público
 
 * Supabase **no recibe tráfico del público** (ADR 0001 §3.1). La UI de operadores
   / Verification se protege detrás de **Cloudflare Access** (Zero Trust): SSO +
@@ -291,7 +291,7 @@ se endurecen, todo lo posible, con Cloudflare:
   menor privilegio (el build job usa un rol **solo-lectura** sobre las vistas
   públicas `public_*`, §1 de la vista pública en `docs/schema.md`).
 
-### 5.2 Build job (Supabase → D1) — integridad del artefacto
+### 5.2 Build job (Supabase → D1): integridad del artefacto
 
 * Corre en GitHub Actions con `permissions: contents: read` (ya aplicado en
   `build_public_index.yml`).
@@ -364,7 +364,7 @@ la config de borde se versiona así:
 | Worker + D1 + caché + DDoS L3/4/7 + WAF managed básico + Turnstile | Cloudflare Free/Pro | $0–20 / mes |
 | Bot Management avanzado / API Shield schema validation | Add-on (opcional) | según necesidad; degradable a reglas WAF + validación en Worker |
 | Cloudflare Access (operadores internos) | Zero Trust (hasta 50 usuarios gratis) | $0 |
-| Plano interno (Supabase) | plan actual del equipo | — |
+| Plano interno (Supabase) | plan actual del equipo | - |
 
 La mayoría de los controles caben en planes gratuitos/baratos. Los add-ons
 (Bot Management, API Shield) son **mejoras**, no requisitos: su ausencia se
@@ -453,5 +453,5 @@ contiene PII; el peor caso de brecha del borde son datos ya sanitizados.
 Duplicar es tolerable.
 Perder trazabilidad no.
 Exponer PII no.
-El plano público no posee datos en claro — y el borde lo defiende en cada capa.
+El plano público no posee datos en claro. El borde lo defiende en cada capa.
 ```
