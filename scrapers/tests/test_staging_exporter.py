@@ -741,6 +741,106 @@ class TestDryRun:
         assert any("https" in r.getMessage() for r in caplog.records if r.levelname == "ERROR")
 
 
+# --- watermark parcial (#217) -----------------------------------------------
+
+
+class _PartialInsertTransport(httpx.BaseTransport):
+    """Devuelve 201 para el primer POST a /aportes y 500 para los siguientes."""
+
+    def __init__(self) -> None:
+        self._aportes_calls = 0
+        self.watermark_posts: list[dict[str, Any]] = []
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/rest/v1/sources":
+            return httpx.Response(200, json=[{"id": _SOURCE_UUID}])
+        if request.url.path == "/rest/v1/source_watermarks":
+            if request.method == "GET":
+                return httpx.Response(200, json=[])
+            self.watermark_posts.append(json.loads(request.content))
+            return httpx.Response(200, json={})
+        if request.url.path == "/rest/v1/aportes":
+            self._aportes_calls += 1
+            return httpx.Response(201 if self._aportes_calls == 1 else 500, json={})
+        return httpx.Response(404)
+
+
+class TestPartialWatermark:
+    """Cobertura del avance parcial de watermark (issue #217)."""
+
+    def test_watermark_avanza_con_insert_parcial(self) -> None:
+        """sent>0 aunque haya errores de insert → watermark avanza."""
+        t = _PartialInsertTransport()
+        res = _exporter(t).export_source(
+            [_person("Juan", det="d1"), _person("Ana", det="d2")],
+            source_slug="demo",
+            source_fetched_ats=["2026-06-24T16:00:00Z"],
+            batch_size=1,
+        )
+        assert res.sent == 1
+        assert res.errors
+        assert t.watermark_posts, "watermark debe avanzar cuando al menos un registro fue enviado"
+        assert t.watermark_posts[-1]["watermark_at"] == "2026-06-24T15:55:00Z"
+
+    def test_watermark_no_avanza_si_sent_cero(self) -> None:
+        """sent==0 → watermark no avanza aunque haya fetched_ats."""
+        t = _RecordingTransport(aportes_status=500)
+        res = _exporter(t).export_source(
+            [_person("Juan", det="d1")],
+            source_slug="demo",
+            source_fetched_ats=["2026-06-24T16:00:00Z"],
+        )
+        assert res.sent == 0
+        assert t.watermark_posts == []
+
+    def test_watermark_no_avanza_si_source_errors_con_sent_positivo(self) -> None:
+        """source_errors bloquea watermark incluso cuando sent>0."""
+        t = _RecordingTransport(aportes_status=201)
+        res = _exporter(t).export_source(
+            [_person("Juan", det="d1")],
+            source_slug="demo",
+            source_fetched_ats=["2026-06-24T16:00:00Z"],
+            source_errors=["proteccion de menores fail-closed"],
+        )
+        assert res.sent == 1
+        assert t.watermark_posts == []
+
+    def test_fallback_individual_parcial_avanza_watermark(self) -> None:
+        """Bulk 400 → fallback individual → 1 ok, 1 error → watermark avanza."""
+
+        class _BulkFail(httpx.BaseTransport):
+            def __init__(self) -> None:
+                self._individual_calls = 0
+                self.watermark_posts: list[dict[str, Any]] = []
+
+            def handle_request(self, request: httpx.Request) -> httpx.Response:
+                if request.url.path == "/rest/v1/sources":
+                    return httpx.Response(200, json=[{"id": _SOURCE_UUID}])
+                if request.url.path == "/rest/v1/source_watermarks":
+                    if request.method == "GET":
+                        return httpx.Response(200, json=[])
+                    self.watermark_posts.append(json.loads(request.content))
+                    return httpx.Response(200, json={})
+                if request.url.path == "/rest/v1/aportes":
+                    body = json.loads(request.content)
+                    if len(body) > 1:
+                        return httpx.Response(400, json={"message": "bulk rejected"})
+                    self._individual_calls += 1
+                    return httpx.Response(201 if self._individual_calls == 1 else 500, json={})
+                return httpx.Response(404)
+
+        t = _BulkFail()
+        res = _exporter(t).export_source(
+            [_person("P1", det="d1"), _person("P2", det="d2")],
+            source_slug="demo",
+            source_fetched_ats=["2026-06-24T16:00:00Z"],
+            batch_size=10,
+        )
+        assert res.sent == 1
+        assert len(res.errors) == 1
+        assert t.watermark_posts, "watermark debe avanzar: bulk 400 + fallback parcial"
+
+
 # --- ciclo de vida ----------------------------------------------------------
 
 class TestLifecycle:

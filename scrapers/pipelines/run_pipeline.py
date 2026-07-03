@@ -753,8 +753,8 @@ def _run_source(
     records = _apply_minor_protection(records, source_errors, source, quarantine_batch)
 
     # 9. Staging export — upsert directo a Supabase via PostgREST
-    # source_errors se pasa para que el watermark NO avance si hubo errores
-    # previos de la fuente (parse/PII/enriquecimiento/proteccion de menores).
+    # source_errors bloquea el watermark si hubo errores pre-export
+    # (parse/PII/enriquecimiento). Errores de insert no lo bloquean (#217).
     if source.max_concurrent_posts is not None:
         log.warning(
             "[%s] max_concurrent_posts=%s ya no se usa: el export usa batch "
