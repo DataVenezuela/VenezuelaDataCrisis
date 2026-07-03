@@ -1,19 +1,19 @@
 -- Issue #200: Rol dedicado scraper_ingest + grants mínimos.
 --
 -- Requisitos previos en dataVenezuela (backend):
---   - Migración: RLS policies FOR INSERT/UPDATE TO scraper_ingest
+--   - RLS policies FOR INSERT/UPDATE TO scraper_ingest
 --     sobre public.aportes y public.source_watermarks
---   - Migración: UNIQUE(source_id, external_id) en public.aportes
---     (necesario para que on_conflict=source_id,external_id funcione)
---   - Migración que agregue las columnas trust_tier, fetched_at,
---     confidence_score a public.aportes (para el consolidation job)
+--   - Columnas trust_tier, fetched_at, confidence_score en public.aportes
+--     (para el consolidation job — issue separado)
 --
 -- Este script crea:
 --   1. El rol scraper_ingest (NOLOGIN, el SET ROLE lo hace PostgREST)
 --   2. La membresía a authenticator (obligatorio para SET ROLE)
 --   3. Grants mínimos sobre aportes, source_watermarks y sources
---   4. La fila del scraper en public.scrapers (necesaria si
---      aportes.scraper_id es FK a scrapers)
+--   4. Índice único compuesto (source_id, external_id) en public.aportes,
+--      requerido por on_conflict=source_id,external_id en el upsert PostgREST
+--   5. Fila de bot en auth.users + public.profiles para aportes.scraper_id
+--      (aportes.scraper_id es FK a public.profiles(id) → auth.users(id))
 --
 -- Generar el JWT (una sola vez, offline):
 --   import jwt, os
@@ -44,9 +44,40 @@ GRANT INSERT, UPDATE ON public.source_watermarks TO scraper_ingest;
 GRANT SELECT ON public.source_watermarks TO scraper_ingest;
 GRANT SELECT ON public.sources TO scraper_ingest;
 
--- 2. Fila del scraper en public.scrapers (necesaria si aportes.scraper_id
---    es FK a scrapers). El UUID debe coincidir con _SCRAPER_ID en
---    scrapers/exporters/staging_exporter.py.
-INSERT INTO public.scrapers (id, name, slug)
-VALUES ('00000000-0000-0000-0000-000000000001', 'VZLA_DEDUP pipeline', 'vzla_dedup')
+-- 2. Índice único compuesto requerido por on_conflict=source_id,external_id.
+--    external_id ya tiene UNIQUE individual; este índice cubre el par.
+CREATE UNIQUE INDEX IF NOT EXISTS aportes_source_id_external_id_key
+    ON public.aportes (source_id, external_id);
+
+-- 3. Fila de bot en auth.users + public.profiles para aportes.scraper_id.
+--    La cadena de FKs es: aportes.scraper_id → profiles(id) → auth.users(id).
+--    El UUID debe coincidir con _SCRAPER_ID en staging_exporter.py.
+INSERT INTO auth.users (
+    id,
+    email,
+    role,
+    aud,
+    created_at,
+    updated_at,
+    encrypted_password,
+    email_confirmed_at,
+    raw_app_meta_data,
+    raw_user_meta_data
+)
+VALUES (
+    '00000000-0000-0000-0000-000000000001',
+    'seed-scraper@internal.local',
+    'authenticated',
+    'authenticated',
+    now(),
+    now(),
+    '',
+    now(),
+    '{"provider":"email","providers":["email"]}',
+    '{}'
+)
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO public.profiles (id, role)
+VALUES ('00000000-0000-0000-0000-000000000001', 'public_submitter')
 ON CONFLICT (id) DO NOTHING;

@@ -185,15 +185,15 @@ class StagingExporter:
     def _resolve_source_id(self, source_slug: str) -> str | None:
         """Resuelve ``source_slug`` → UUID de ``sources`` via PostgREST.
 
-        Cachea el resultado en ``self._source_id_cache`` para no repetir el
-        GET en cada payload de la misma corrida. En dry-run devuelve un UUID
-        placeholder para que ``_build_payload`` no falle.
+        Cachea éxitos y fallos en ``self._source_id_cache`` (fallo = "")
+        para no repetir el GET en cada payload de la misma corrida.
+        En dry-run devuelve un UUID placeholder para que ``_build_payload`` no falle.
         """
         if not self.enabled or self._client is None:
             return "00000000-0000-0000-0000-000000000000"
         cached = self._source_id_cache.get(source_slug)
         if cached is not None:
-            return cached
+            return cached or None
         try:
             resp = self._client.get(
                 "/rest/v1/sources",
@@ -209,6 +209,7 @@ class StagingExporter:
             log.warning("no se pudo resolver source_id para %s: status=%s", source_slug, resp.status_code)
         except (httpx.HTTPError, ValueError, AttributeError) as exc:
             log.warning("error resolviendo source_id para %s: %s", source_slug, exc)
+        self._source_id_cache[source_slug] = ""
         return None
 
     # -- payload --------------------------------------------------------------
@@ -269,6 +270,11 @@ class StagingExporter:
                 _WATERMARKS_PATH,
                 params={"slug": f"eq.{source_slug}", "select": "watermark_at"},
             )
+            if resp.status_code in (401, 403):
+                raise PermissionError(
+                    f"get_watermark {source_slug}: sin permiso (status {resp.status_code}); "
+                    "verificar SUPABASE_INGEST_JWT y grants del rol scraper_ingest"
+                )
             if resp.status_code == 200:
                 rows = resp.json()
                 if isinstance(rows, list) and len(rows) > 0:

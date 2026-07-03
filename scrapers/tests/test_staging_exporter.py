@@ -18,6 +18,7 @@ from typing import Any
 from unittest.mock import patch
 
 import httpx
+import pytest
 
 from scrapers.dedup import specs
 from scrapers.exporters.staging_exporter import (
@@ -375,6 +376,22 @@ class TestGetWatermark:
                 return httpx.Response(200, json={"watermark_at": "2026-06-20T00:00:00Z"})
 
         assert _exporter(_Transport()).get_watermark("fuente-a") == "1970-01-01T00:00:00Z"
+
+    def test_raises_on_401(self) -> None:
+        class _Transport(httpx.BaseTransport):
+            def handle_request(self, request: httpx.Request) -> httpx.Response:
+                return httpx.Response(401)
+
+        with pytest.raises(PermissionError, match="scraper_ingest"):
+            _exporter(_Transport()).get_watermark("fuente-a")
+
+    def test_raises_on_403(self) -> None:
+        class _Transport(httpx.BaseTransport):
+            def handle_request(self, request: httpx.Request) -> httpx.Response:
+                return httpx.Response(403)
+
+        with pytest.raises(PermissionError, match="scraper_ingest"):
+            _exporter(_Transport()).get_watermark("fuente-a")
 
 
 # --- auth ---------------------------------------------------------------
