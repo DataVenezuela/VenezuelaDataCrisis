@@ -1,5 +1,10 @@
 -- Issue #200: Rol dedicado scraper_ingest + grants mínimos.
 --
+-- PRERREQUISITO BLOQUEANTE: DataVenezuela PR #40 (issue #39) debe estar
+-- mergeado y migrado en Supabase ANTES de ejecutar este script.
+-- PR #40 agrega las columnas scraper_id y source_id a public.aportes;
+-- sin ellas el CREATE UNIQUE INDEX de abajo falla y deja la DB a medio estado.
+--
 -- Requisitos previos en dataVenezuela (backend):
 --   - RLS policies FOR INSERT/UPDATE TO scraper_ingest
 --     sobre public.aportes y public.source_watermarks
@@ -30,10 +35,14 @@
 -- Guardar como SUPABASE_INGEST_JWT en GitHub Secrets.
 -- Guardar SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY también.
 --
--- Ejecutar en el SQL Editor de Supabase ANTES del primer deploy del PR.
+-- Ejecutar en el SQL Editor de Supabase DESPUÉS de que PR #40 aterrice
+-- y ANTES del primer deploy de este PR.
+-- El script es transaccional: si cualquier paso falla, nada queda aplicado.
+
+BEGIN;
 
 -- 1. Rol dedicado
-CREATE ROLE scraper_ingest WITH NOLOGIN NOINHERIT NOBYPASSRLS;
+CREATE ROLE IF NOT EXISTS scraper_ingest WITH NOLOGIN NOINHERIT NOBYPASSRLS;
 
 -- PostgREST autentica como authenticator y hace SET ROLE al claim del JWT.
 GRANT scraper_ingest TO authenticator;
@@ -81,3 +90,5 @@ ON CONFLICT (id) DO NOTHING;
 INSERT INTO public.profiles (id, role)
 VALUES ('00000000-0000-0000-0000-000000000001', 'public_submitter')
 ON CONFLICT (id) DO NOTHING;
+
+COMMIT;

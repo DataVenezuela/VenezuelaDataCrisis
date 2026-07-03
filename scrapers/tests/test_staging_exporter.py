@@ -565,6 +565,50 @@ class TestBatchExport:
         assert res.sent == 1
         assert t.watermark_posts == []
 
+    def test_watermark_post_401_registra_error_con_detalle(self) -> None:
+        class _Transport(httpx.BaseTransport):
+            def handle_request(self, request: httpx.Request) -> httpx.Response:
+                if request.url.path == "/rest/v1/sources":
+                    return httpx.Response(200, json=[{"id": _SOURCE_UUID}])
+                if request.url.path == "/rest/v1/aportes":
+                    return httpx.Response(201, json={})
+                if request.url.path == "/rest/v1/source_watermarks":
+                    if request.method == "GET":
+                        return httpx.Response(200, json=[])
+                    return httpx.Response(401)
+                return httpx.Response(404)
+
+        res = _exporter(_Transport()).export_source(
+            [_person("Juan")],
+            source_slug="demo",
+            source_fetched_ats=["2026-06-24T16:00:00Z"],
+        )
+        assert res.sent == 1
+        assert any("401" in e for e in res.errors)
+
+    def test_watermark_post_usa_on_conflict_slug(self) -> None:
+        captured_query: list[str] = []
+
+        class _Transport(httpx.BaseTransport):
+            def handle_request(self, request: httpx.Request) -> httpx.Response:
+                if request.url.path == "/rest/v1/sources":
+                    return httpx.Response(200, json=[{"id": _SOURCE_UUID}])
+                if request.url.path == "/rest/v1/aportes":
+                    return httpx.Response(201, json={})
+                if request.url.path == "/rest/v1/source_watermarks":
+                    if request.method == "GET":
+                        return httpx.Response(200, json=[])
+                    captured_query.append(str(request.url.query))
+                    return httpx.Response(200, json={})
+                return httpx.Response(404)
+
+        _exporter(_Transport()).export_source(
+            [_person("Juan")],
+            source_slug="demo",
+            source_fetched_ats=["2026-06-24T16:00:00Z"],
+        )
+        assert captured_query and "on_conflict=slug" in captured_query[0]
+
     def test_dry_run_no_envia_nada(self) -> None:
         exp = StagingExporter(None, run_id="run-1")
         res = exp.export_source(
@@ -574,6 +618,68 @@ class TestBatchExport:
         )
         assert res.sent == 0
         assert res.errors == []
+
+
+# --- fallback batch → individual --------------------------------------------
+
+class TestBatchFallback:
+    """Un batch rechazado (4xx) reintenta cada registro individualmente."""
+
+    def test_batch_400_retries_individually_valid_records_counted(self) -> None:
+        """400 en batch → fallback individual; registros válidos cuentan como sent."""
+
+        class _Transport(httpx.BaseTransport):
+            def handle_request(self, request: httpx.Request) -> httpx.Response:
+                if request.url.path == "/rest/v1/sources":
+                    return httpx.Response(200, json=[{"id": _SOURCE_UUID}])
+                if request.url.path == "/rest/v1/source_watermarks":
+                    return httpx.Response(200, json=[] if request.method == "GET" else {})
+                if request.url.path == "/rest/v1/aportes":
+                    body = json.loads(request.content)
+                    if len(body) > 1:
+                        return httpx.Response(400, json={"message": "constraint violation"})
+                    return httpx.Response(201, json={})
+                return httpx.Response(404)
+
+        records = [_person(f"P{i}", det=f"det{i}") for i in range(5)]
+        res = _exporter(_Transport()).export_source(
+            records, source_slug="demo",
+            source_fetched_ats=["2026-06-24T15:00:00Z"], batch_size=10,
+        )
+        assert res.sent == 5
+        assert res.errors == []
+
+    def test_batch_400_one_bad_record_others_sent(self) -> None:
+        """Un registro inválido genera error pero no bloquea los demás del batch."""
+        BAD_DET = "det-bad"
+
+        class _Transport(httpx.BaseTransport):
+            def handle_request(self, request: httpx.Request) -> httpx.Response:
+                if request.url.path == "/rest/v1/sources":
+                    return httpx.Response(200, json=[{"id": _SOURCE_UUID}])
+                if request.url.path == "/rest/v1/source_watermarks":
+                    return httpx.Response(200, json=[] if request.method == "GET" else {})
+                if request.url.path == "/rest/v1/aportes":
+                    body = json.loads(request.content)
+                    if len(body) > 1:
+                        return httpx.Response(400, json={"message": "batch rejected"})
+                    if body[0].get("external_id") == BAD_DET:
+                        return httpx.Response(400, json={"message": "bad record"})
+                    return httpx.Response(201, json={})
+                return httpx.Response(404)
+
+        records = [
+            _person("Good1", det="det-ok-1"),
+            _person("Bad", det=BAD_DET),
+            _person("Good2", det="det-ok-2"),
+        ]
+        res = _exporter(_Transport()).export_source(
+            records, source_slug="demo",
+            source_fetched_ats=["2026-06-24T15:00:00Z"], batch_size=10,
+        )
+        assert res.sent == 2
+        assert len(res.errors) == 1
+        assert BAD_DET in res.errors[0]
 
 
 # --- dry-run ----------------------------------------------------------------

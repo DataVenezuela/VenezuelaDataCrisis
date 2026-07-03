@@ -34,9 +34,9 @@ from scrapers.dedup import specs
 log = logging.getLogger(__name__)
 
 _DEFAULT_WATERMARK = "1970-01-01T00:00:00Z"
-_APORTES_PATH = "/rest/v1/aportes"
 _APORTES_UPSERT_PATH = "/rest/v1/aportes?on_conflict=source_id,external_id"
 _WATERMARKS_PATH = "/rest/v1/source_watermarks"
+_WATERMARKS_UPSERT_PATH = "/rest/v1/source_watermarks?on_conflict=slug"
 _SCRAPER_ID = "00000000-0000-0000-0000-000000000001"
 
 _WATERMARK_SAFETY_MARGIN = timedelta(minutes=5)
@@ -301,12 +301,17 @@ class StagingExporter:
         assert self._client is not None
         try:
             resp = self._post_with_retry(
-                _WATERMARKS_PATH,
+                _WATERMARKS_UPSERT_PATH,
                 {"slug": source_slug, "watermark_at": watermark_at},
                 headers={"Prefer": "resolution=merge-duplicates"},
             )
         except httpx.HTTPError:
             return False
+        if resp.status_code in (401, 403):
+            raise PermissionError(
+                f"_set_watermark {source_slug}: sin permiso (status {resp.status_code}); "
+                "verificar SUPABASE_INGEST_JWT y grants del rol scraper_ingest"
+            )
         return resp.status_code in (200, 201)
 
     def _post_with_retry(
@@ -350,16 +355,15 @@ class StagingExporter:
     def _advance_watermark(
         self, source_slug: str, source_fetched_ats: list[str], has_errors: bool
     ) -> str | None:
-        """Avanza el watermark si no hubo errores. Devuelve None o mensaje de error.
-
-        ``_set_watermark`` captura ``httpx.HTTPError`` internamente y devuelve
-        ``False``, asi que no hace falta try/except aca.
-        """
+        """Avanza el watermark si no hubo errores. Devuelve None o mensaje de error."""
         if has_errors or not source_fetched_ats:
             return None
         new_watermark = _apply_safety_margin(max(source_fetched_ats))
-        if not self._set_watermark(source_slug, new_watermark):
-            return "no se pudo actualizar el watermark"
+        try:
+            if not self._set_watermark(source_slug, new_watermark):
+                return "no se pudo actualizar el watermark"
+        except PermissionError as exc:
+            return str(exc)
         return None
 
     # -- export ---------------------------------------------------------------
@@ -430,6 +434,37 @@ class StagingExporter:
 
             if resp.status_code in (200, 201):
                 result.sent += len(chunk)
+            elif len(chunk) > 1:
+                # Batch rechazado — reintentar registro a registro para no perder
+                # los registros válidos si solo uno viola una constraint.
+                log.warning(
+                    "POST %s status=%s en batch de %d — reintentando individualmente",
+                    _APORTES_UPSERT_PATH, resp.status_code, len(chunk),
+                )
+                for single in chunk:
+                    try:
+                        r = self._post_with_retry(
+                            _APORTES_UPSERT_PATH, [single],
+                            timeout=_batch_timeout, headers=batch_headers,
+                        )
+                    except httpx.HTTPError as exc:
+                        result.errors.append(f"POST individual fallo: {exc}")
+                        continue
+                    except Exception as exc:
+                        result.errors.append(f"POST individual error inesperado: {exc}")
+                        continue
+                    if r.status_code in (200, 201):
+                        result.sent += 1
+                    else:
+                        log.warning(
+                            "POST %s status=%s external_id=%s body=%s",
+                            _APORTES_UPSERT_PATH, r.status_code,
+                            single.get("external_id"), r.text[:300],
+                        )
+                        result.errors.append(
+                            f"{_APORTES_UPSERT_PATH} status {r.status_code} "
+                            f"(external_id={single.get('external_id')})"
+                        )
             else:
                 log.warning(
                     "POST %s status=%s body=%s",
@@ -439,7 +474,7 @@ class StagingExporter:
                 )
                 result.errors.append(
                     f"{_APORTES_UPSERT_PATH} status {resp.status_code} "
-                    f"(lote de {len(chunk)} registros)"
+                    f"(external_id={chunk[0].get('external_id')})"
                 )
 
         watermark_err = self._advance_watermark(
