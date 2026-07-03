@@ -533,6 +533,19 @@ class TestBatchExport:
         assert res.errors == []
         assert len(t.batch_posts) == 3
 
+    def test_batch_exitoso_no_reintenta_individual(self) -> None:
+        records = [_person(f"P{i}", det=f"det{i}") for i in range(3)]
+        t = _RecordingTransport()  # aportes_status=201 por default
+        res = _exporter(t).export_source(
+            records,
+            source_slug="demo",
+            source_fetched_ats=["2026-06-24T15:00:00Z"],
+            batch_size=10,  # un solo chunk de 3
+        )
+        assert res.sent == 3
+        assert res.errors == []
+        assert len(t.batch_posts) == 1  # exactamente 1 request, no 1+3
+
     def test_avanza_watermark_si_todo_ok(self) -> None:
         t = _RecordingTransport()
         _exporter(t).export_source(
@@ -740,6 +753,31 @@ class TestDryRun:
                 assert StagingConfig.from_env() is None
         assert any("https" in r.getMessage() for r in caplog.records if r.levelname == "ERROR")
 
+# --- paralelismo ----------------------------------------------------------
+class TestConcurrentExport:
+    """max_concurrent_posts > 1 activa el ThreadPoolExecutor."""
+
+    def test_multiples_batches_paralelo_cuentan_todos(self) -> None:
+        records = [_person(f"P{i}", det=f"det{i}") for i in range(20)]
+        t = _RecordingTransport()
+        res = _exporter(t).export_source(
+            records, source_slug="demo",
+            source_fetched_ats=["2026-06-24T15:00:00Z"],
+            batch_size=5, max_concurrent_posts=4,
+        )
+        assert res.sent == 20
+        assert res.errors == []
+        assert len(t.batch_posts) == 4  # ceil(20/5)
+
+    def test_max_concurrent_posts_ausente_es_secuencial(self) -> None:
+        """Sin max_concurrent_posts (o =1), mismo comportamiento que antes."""
+        records = [_person(f"P{i}", det=f"det{i}") for i in range(5)]
+        t = _RecordingTransport()
+        res = _exporter(t).export_source(
+            records, source_slug="demo",
+            source_fetched_ats=["2026-06-24T15:00:00Z"], batch_size=5,
+        )
+        assert res.sent == 5
 
 # --- ciclo de vida ----------------------------------------------------------
 

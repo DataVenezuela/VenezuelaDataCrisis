@@ -430,9 +430,15 @@ class StagingExporter:
         _batch_timeout = httpx.Timeout(connect=10.0, read=120.0, write=120.0, pool=10.0)
         batch_headers = {"Prefer": "resolution=merge-duplicates,return=minimal"}
 
-        workers = max_concurrent_posts or 1
+        workers = max(1, max_concurrent_posts or 1)
 
         if workers <= 1:
+            log.warning(
+                "[%s] exportando %d batches secuencial (max_concurrent_posts=%s); "
+                "con volumen alto esto puede tardar mucho"
+                ">1 en el YAML para paralelizar el POST a Supabase.",
+                source_slug, len(chunks), max_concurrent_posts,
+            )
             for chunk in chunks:
                 _sent, _errors = self._post_chunk(chunk, _batch_timeout, batch_headers)
                 result.sent += _sent
@@ -473,64 +479,70 @@ class StagingExporter:
         -------
         Tuple de (sent, errors) para este chunk.
         """
+        sent = 0
         errors: list[str] = []
         try:
-            resp = self._post_with_retry(
-                _APORTES_UPSERT_PATH, chunk, timeout=timeout, headers=headers,
-            )
-        except httpx.HTTPError as exc:
-            errors.append(f"POST {_APORTES_UPSERT_PATH} batch fallo: {exc}")
-            return 0, errors
-        except Exception as exc:
-            errors.append(f"POST {_APORTES_UPSERT_PATH} batch error inesperado: {exc}")
-            return 0, errors
+            try:
+                resp = self._post_with_retry(
+                    _APORTES_UPSERT_PATH, chunk, timeout=timeout, headers=headers,
+                )
+            except httpx.HTTPError as exc:
+                errors.append(f"POST {_APORTES_UPSERT_PATH} batch fallo: {exc}")
+                return sent, errors
+            except Exception as exc:
+                errors.append(f"POST {_APORTES_UPSERT_PATH} batch error inesperado: {exc}")
+                return sent, errors
 
-        if resp.status_code in (200, 201):
-            return len(chunk), errors
+            if resp.status_code in (200, 201):
+                sent += len(chunk)
+                return sent, errors
 
-        if len(chunk) > 1:
+            if len(chunk) > 1:
+                log.warning(
+                    "POST %s status=%s en batch de %d — reintentando individualmente",
+                    _APORTES_UPSERT_PATH, resp.status_code, len(chunk),
+                )
+                for single in chunk:
+                    try:
+                        r = self._post_with_retry(
+                            _APORTES_UPSERT_PATH, [single],
+                            timeout=timeout, headers=headers,
+                        )
+                    except httpx.HTTPError as exc:
+                        errors.append(f"POST individual fallo: {exc}")
+                        continue
+                    except Exception as exc:
+                        errors.append(f"POST individual error inesperado: {exc}")
+                        continue
+                    if r.status_code in (200, 201):
+                        sent += 1
+                    else:
+                        log.warning(
+                            "POST %s status=%s external_id=%s body=%s",
+                            _APORTES_UPSERT_PATH, r.status_code,
+                            single.get("external_id"), r.text[:300],
+                        )
+                        errors.append(
+                            f"{_APORTES_UPSERT_PATH} status {r.status_code} "
+                            f"(external_id={single.get('external_id')})"
+                        )
+                return sent, errors
+
             log.warning(
-                "POST %s status=%s en batch de %d — reintentando individualmente",
-                _APORTES_UPSERT_PATH, resp.status_code, len(chunk),
+                "POST %s status=%s body=%s",
+                _APORTES_UPSERT_PATH,
+                resp.status_code,
+                resp.text[:300],
             )
-            sent = 0
-            for single in chunk:
-                try:
-                    r = self._post_with_retry(
-                        _APORTES_UPSERT_PATH, [single],
-                        timeout=timeout, headers=headers,
-                    )
-                except httpx.HTTPError as exc:
-                    errors.append(f"POST individual fallo: {exc}")
-                    continue
-                except Exception as exc:
-                    errors.append(f"POST individual error inesperado: {exc}")
-                    continue
-                if r.status_code in (200, 201):
-                    sent += 1
-                else:
-                    log.warning(
-                        "POST %s status=%s external_id=%s body=%s",
-                        _APORTES_UPSERT_PATH, r.status_code,
-                        single.get("external_id"), r.text[:300],
-                    )
-                    errors.append(
-                        f"{_APORTES_UPSERT_PATH} status {r.status_code} "
-                        f"(external_id={single.get('external_id')})"
-                    )
-            return sent, errors
+            errors.append(
+                f"{_APORTES_UPSERT_PATH} status {resp.status_code} "
+                f"(external_id={chunk[0].get('external_id')})"
+            )
+        except Exception as exc:
+            log.error("_post_chunk: error inesperado no capturado: %s", exc)
+            errors.append(f"POST {_APORTES_UPSERT_PATH} error inesperado: {exc}")
 
-        log.warning(
-            "POST %s status=%s body=%s",
-            _APORTES_UPSERT_PATH,
-            resp.status_code,
-            resp.text[:300],
-        )
-        errors.append(
-            f"{_APORTES_UPSERT_PATH} status {resp.status_code} "
-            f"(external_id={chunk[0].get('external_id')})"
-        )
-        return 0, errors
+        return sent, errors
 
     # -- ciclo de vida --------------------------------------------------------
 

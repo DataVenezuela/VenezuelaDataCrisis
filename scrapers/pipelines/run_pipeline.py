@@ -756,11 +756,6 @@ def _run_source(
     # source_errors se pasa para que el watermark NO avance si hubo errores
     # previos de la fuente (parse/PII/enriquecimiento/proteccion de menores).
     # max_concurrent_posts activa el envio concurrente de batches si > 1.
-    if source.max_concurrent_posts is not None and source.max_concurrent_posts > 1:
-        log.info(
-            "[%s] envio concurrente activado con max_concurrent_posts=%s (batch_size=%s)",
-            source.id, source.max_concurrent_posts, source.bulk_size or 100,
-        )
     result = exporter.export_source(
         records,
         source_slug=source.id,
@@ -829,8 +824,10 @@ def run_pipeline(
         Ruta al YAML de configuracion de fuentes.
     output_dir:
         Reservado para artefactos/logs. El export a JSONL desaparecio; el
-        destino ahora es la tabla aportes via /api/aportes. Se conserva en la
-        firma por compatibilidad con la CLI.
+        destino ahora es la tabla aportes via PostgREST directo
+        (/rest/v1/aportes, StagingExporter, no /api/aportes de Vercel,
+        deprecado para ingest desde #200/#203). Se conserva en la firma por
+        compatibilidad con la CLI.
     limit:
         Numero maximo de entidades por fuente (None = sin limite).
     max_workers:
@@ -916,8 +913,8 @@ def run_pipeline(
                     staging_errors += len(result.errors)
                     sources_processed += int(ok)
                     quarantine_batch.extend(thread_quarantine_batch)
-    
-     
+
+
     finally:
         if quarantine_batch:
             qres = quarantine_exporter.quarantine_many(quarantine_batch)
@@ -926,10 +923,14 @@ def run_pipeline(
             all_errors.extend(
                 f"cuarentena: {e}" for e in qres.errors
             )
+            # Agregado de TODAS las fuentes de esta corrida, no de una sola:
+            # `source` (variable de loop) no existe acá en la rama paralela
+            # (max_workers>1), donde viene de un list comprehension con su
+            # propio scope.
             log.info(
-                "%s: %d a cuarentena (%d duplicados, %d errores)",
-                source.id, qres.sent, qres.duplicates, len(qres.errors),
-            ) 
+                "cuarentena (todas las fuentes): %d enviados (%d duplicados, %d errores)",
+                qres.sent, qres.duplicates, len(qres.errors),
+            )
 
         exporter.close()
         quarantine_exporter.close()
