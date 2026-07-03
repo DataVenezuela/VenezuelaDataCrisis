@@ -624,30 +624,32 @@ El matching necesita texto uniforme. `"JOSE LUIS"` y `"José Luis"` deben ser el
 
 `scrapers/exporters/staging_exporter.py` lee las entidades procesadas (un dict
 por registro, post-PII, post-score, post-protección de menores) y hace un
-`POST /api/aportes` por registro a `dataVenezuela`.
+upsert directo a Supabase via PostgREST.
 
 Responsabilidades del exporter:
 - Construir el payload del aporte usando los contratos de
-  `scrapers/dedup/specs.py`: `runId`, `entityType`, `externalId`, `dedupHash`,
-  `dedupVersion`, `blockKeys`, `contentHash`, `sourceSlug` y `rawJson` (el
-  record de negocio sin claves internas con prefijo `_`). Keys en camelCase y
-  `rawJson` (no `data`) por contrato real de `dataVenezuela` — ver
-  `dataVenezuela/docs/api-dedup.md` (alineado en #129/#131).
+  `scrapers/dedup/specs.py`: `run_id`, `entity_type`, `external_id`,
+  `dedup_hash`, `dedup_version`, `block_keys`, `content_hash`, `source_slug`
+  y `raw_json` (el record de negocio sin claves internas con prefijo `_`).
+  Keys en snake_case, alineadas 1:1 con las columnas reales de `aportes`.
 - `external_id` es determinista (fingerprint v1 para Event/AcopioCenter,
-  `deterministic_id` para Person). El backend hace upsert por `external_id`,
-  así que re-correr la misma fuente no duplica (idempotencia).
-- Clasificar la respuesta: 200/201 → enviado, 409 → duplicado, cualquier otro
-  status o error de red → error acumulado (nunca relanza, resiliencia por
-  registro).
-- Avanzar el watermark de la fuente (`PUT /api/source-watermarks/{slug}`, body
-  `{"watermarkAt": "<ISO>"}`) a `max(fetched_at)` menos un margen de seguridad
-  (`_WATERMARK_SAFETY_MARGIN`, ver más abajo) solo cuando todos los POST de
-  esa fuente terminaron en 200/201. Si cualquiera falla, el watermark no
-  cambia.
+  `deterministic_id` para Person). PostgREST hace upsert por `external_id`
+  via `Prefer: resolution=merge-duplicates`, así que re-correr la misma
+  fuente no duplica (idempotencia).
+- Enviar en lotes (batch) de hasta 100 registros por request. Cada batch
+  exitoso (201) cuenta como enviado; un batch fallido se registra como error
+  y bloquea el avance del watermark.
+- Avanzar el watermark de la fuente (`POST /rest/v1/source_watermarks` con
+  `Prefer: resolution=merge-duplicates`, body `{"slug": "...", "watermark_at": "<ISO>"}`)
+  a `max(fetched_at)` menos un margen de seguridad (`_WATERMARK_SAFETY_MARGIN`,
+  ver más abajo) solo cuando todos los batches de esa fuente terminaron en
+  201. Si cualquiera falla, el watermark no cambia.
 
-Auth con `dataVenezuela`: header `x-api-key` (no `Authorization: Bearer`) —
-mismo header en `/api/aportes` y en `/api/source-watermarks/{slug}`, por
-contrato real documentado en `dataVenezuela/docs/api-dedup.md`.
+Auth con Supabase: header `apikey` con la publishable key del proyecto
+(`SUPABASE_PUBLISHABLE_KEY`) + `Authorization: Bearer` con un JWT firmado
+con el rol `scraper_ingest` (`SUPABASE_INGEST_JWT`). El JWT se genera una
+sola vez offline contra `SUPABASE_JWT_SECRET` del proyecto y PostgREST lo
+valida localmente, sin requests extra de auth.
 
 ### Fuente de verdad del contrato exporter -> DB
 
