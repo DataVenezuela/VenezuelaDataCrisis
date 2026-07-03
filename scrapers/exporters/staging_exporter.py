@@ -432,11 +432,9 @@ class StagingExporter:
 
         workers = max(1, max_concurrent_posts or 1)
 
-        if workers <= 1:
-            log.warning(
-                "[%s] exportando %d batches secuencial (max_concurrent_posts=%s); "
-                "con volumen alto esto puede tardar mucho"
-                ">1 en el YAML para paralelizar el POST a Supabase.",
+        if max_concurrent_posts is None or max_concurrent_posts <= 1:
+            log.info(
+                "[%s] exportando %d batches secuencial (max_concurrent_posts=%s); ",
                 source_slug, len(chunks), max_concurrent_posts,
             )
             for chunk in chunks:
@@ -450,10 +448,7 @@ class StagingExporter:
                 source_slug, len(chunks), workers,
             )
             with ThreadPoolExecutor(max_workers=workers) as pool:
-                futures = {
-                    pool.submit(self._post_chunk, chunk, _batch_timeout, batch_headers): chunk
-                    for chunk in chunks
-                }
+                futures = [pool.submit(self._post_chunk, chunk, _batch_timeout, batch_headers) for chunk in chunks]
                 for future in as_completed(futures):
                     _sent, _errors = future.result()
                     result.sent += _sent
