@@ -438,8 +438,8 @@ class StagingExporter:
                 # Batch rechazado — reintentar registro a registro para no perder
                 # los registros válidos si solo uno viola una constraint.
                 log.warning(
-                    "POST %s status=%s en batch de %d — reintentando individualmente",
-                    _APORTES_UPSERT_PATH, resp.status_code, len(chunk),
+                    "POST %s status=%s body=%s en batch de %d — reintentando individualmente",
+                    _APORTES_UPSERT_PATH, resp.status_code, resp.text[:500], len(chunk),
                 )
                 for single in chunk:
                     try:
