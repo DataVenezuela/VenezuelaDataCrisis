@@ -596,17 +596,13 @@ otro
 
 ---
 
-## 11. Consolidation / dedup SQL — Paso 1 (#90)
+## 11. Consolidation / dedup SQL
 
-El Paso 1 agrega soporte mínimo de consolidation sobre tablas existentes sin
-tocar todavía la ingesta a staging de #81.
-
-SQL versionado en el repo:
-
-```text
-tools/sql/issue_90_step1_consolidation.sql
-tools/sql/issue_90_step1_consolidation_rollback.sql
-```
+La fuente de verdad del schema es `DataVenezuela/dataVenezuela`, no los
+archivos históricos `tools/sql/issue_*.sql` de este repo. Los tests offline de
+contrato usan el fixture congelado
+`scrapers/tests/fixtures/backend_schema_contract.sql`, derivado de las
+migraciones reales `0001/0004/0008/0009`.
 
 ### Cambios implementados
 
@@ -626,43 +622,34 @@ los hashes aún no estén backfilleados.
 | Campo                    | Tipo SQL       | Nullable | Valores / Notas                                      |
 | ------------------------ | -------------- | -------: | ---------------------------------------------------- |
 | `candidate_id`           | `uuid`         |       no | PK, `DEFAULT gen_random_uuid()`                      |
-| `event_id`               | `VARCHAR(36)`  |       no | FK a `public.events(event_id)`                       |
-| `left_person_record_id`  | `VARCHAR(36)`  |       no | FK a `public.persons(person_record_id)`              |
-| `right_person_record_id` | `VARCHAR(36)`  |       no | FK a `public.persons(person_record_id)`              |
-| `blocking_key`           | `text`         |       sí | Clave emitida por `person_block_keys`                |
+| `event_id`               | `uuid`         |       no | FK a `public.events(event_id)`                       |
+| `left_person`            | `uuid`         |       no | FK a `public.persons(person_record_id)`              |
+| `right_person`           | `uuid`         |       no | FK a `public.persons(person_record_id)`              |
 | `score`                  | `numeric(4,3)` |       no | Score de similitud candidato, `CHECK 0..1`           |
 | `reasons`                | `jsonb`        |       sí | Señales explicables usadas para generar el candidato |
 | `priority`               | `text`         |       no | Prioridad operativa del candidato                    |
 | `decision`               | `text`         |       no | Default `pending`                                    |
 | `created_at`             | `timestamptz`  |       no | Default `now()`                                      |
 
-`blocking_key` queda nullable para no bloquear migraciones con candidatos
-históricos o backfills parciales. La salida esperada del pipeline debe
-popularla con una de las claves devueltas por
-`scrapers/dedup/specs.py::person_block_keys`, por ejemplo
-`ced:{event_id}:{cedula_hmac}` o `phon:{event_id}:{estado}:{phonetic_hash}`.
-
 Restricción:
 
 ```text
-CHECK (left_person_record_id <> right_person_record_id)
-UNIQUE INDEX dedup_candidates_pair_blocking_uniq
+CHECK (left_person <> right_person)
+UNIQUE INDEX dedup_candidates_pair_uniq
   ON (
-    LEAST(left_person_record_id, right_person_record_id),
-    GREATEST(left_person_record_id, right_person_record_id),
-    blocking_key
+    LEAST(left_person, right_person),
+    GREATEST(left_person, right_person)
   )
 ```
 
-El índice canónico evita insertar el mismo par invertido para la misma
-`blocking_key` como dos candidatos distintos (`A/B` y `B/A`). No bloquea que
-el mismo par aparezca por claves de bloqueo distintas, porque `person_block_keys`
-puede devolver más de una clave para la misma persona.
+El índice canónico evita insertar el mismo par invertido (`A/B` y `B/A`) como
+dos candidatos distintos.
 
 ### Pendiente
 
-Paso 2 queda pendiente hasta que #81 cree `aportes`. Esta PR no crea ni modifica
-`aportes`, no crea `dedup_decisions` y no implementa el job de consolidation.
+Si el backend agrega nuevas columnas o constraints, primero debe existir una
+migración real en `DataVenezuela/dataVenezuela`; después se actualiza el fixture
+de contrato siguiendo `docs/backend_schema_contract.md`.
 
 ### Rollback
 

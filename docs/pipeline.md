@@ -668,6 +668,10 @@ Si hace falta un fixture de contrato, debe indicar contra qué migración/doc de
 Esto evita que exporters y jobs pasen CI contra columnas o payloads que no
 existen en la BD real.
 
+El fixture canónico offline vive en
+`scrapers/tests/fixtures/backend_schema_contract.sql`; el flujo para
+regenerarlo está documentado en `docs/backend_schema_contract.md`.
+
 ### Semántica del watermark: `fetched_at` (wall-clock local) vs `updated_at` (servidor)
 
 El watermark persiste `max(fetched_at)`, donde `fetched_at` es el momento en
@@ -800,15 +804,14 @@ Ejemplo:
 {
   "candidate_id": "uuid-v4",
   "event_id": "uuid-v4",
-  "left_person_record_id": "uuid-v4",
-  "right_person_record_id": "uuid-v4",
+  "left_person": "uuid-v4",
+  "right_person": "uuid-v4",
   "score": 0.87,
-  "reasons": [
-    "similar_name",
-    "same_state",
-    "compatible_age_range"
-  ],
-  "blocking_key": "JLS-PE-LARA",
+  "reasons": {
+    "nombre": 0.35,
+    "ubicacion": 0.15,
+    "edad": 0.10
+  },
   "decision": "pending",
   "created_at": "2026-06-24T17:30:00Z"
 }

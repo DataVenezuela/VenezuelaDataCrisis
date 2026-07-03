@@ -270,9 +270,8 @@ class TestClustering:
         blocks = build_blocks([a, b])
         candidates = find_candidates(blocks, threshold=0.80)
         assert len(candidates) >= 1
-        assert candidates[0]["left_person_record_id"] != candidates[0]["right_person_record_id"]
+        assert candidates[0]["left_person"] != candidates[0]["right_person"]
         assert candidates[0]["event_id"] == _EVENT_ID
-        assert "blocking_key" in candidates[0]
         assert candidates[0]["score"] >= 0.80
 
     def test_pair_below_threshold_not_candidate(self) -> None:
@@ -334,9 +333,8 @@ class TestClustering:
         assert len(candidates) >= 1
         c = candidates[0]
         assert "event_id" in c
-        assert "left_person_record_id" in c
-        assert "right_person_record_id" in c
-        assert "blocking_key" in c
+        assert "left_person" in c
+        assert "right_person" in c
         assert "score" in c
         assert "reasons" in c
         assert "priority" in c

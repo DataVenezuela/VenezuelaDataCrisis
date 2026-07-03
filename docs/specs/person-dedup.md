@@ -107,9 +107,8 @@ def location_score(left_loc, right_loc):
 
 | Columna | Valor |
 |---------|-------|
-| `left_person_record_id` | FK a `persons.person_record_id` de la persona izquierda |
-| `right_person_record_id` | FK a `persons.person_record_id` de la persona derecha |
-| `blocking_key` | Clave que produjo el candidato |
+| `left_person` | FK a `persons.person_record_id` de la persona izquierda |
+| `right_person` | FK a `persons.person_record_id` de la persona derecha |
 | `score` | Score numérico (0.0 a 1.0) |
 | `reasons` | JSONB con desglose por campo: `{"nombre": 0.35, "cedula": 0.30, "ubicacion": 0.15, "edad": 0.10, "status": 0.05}` |
 | `priority` | `"high"` si score >= 0.95, `"medium"` si 0.85 <= score < 0.95 |
@@ -121,12 +120,11 @@ def location_score(left_loc, right_loc):
 
 ## 6. Idempotencia
 
-- `dedup_candidates_pair_blocking_uniq` en master usa:
-  `LEAST(left_person_record_id, right_person_record_id)`,
-  `GREATEST(left_person_record_id, right_person_record_id)`, `blocking_key`.
+- El schema real de `DataVenezuela/dataVenezuela` usa
+  `dedup_candidates_pair_uniq` sobre:
+  `LEAST(left_person, right_person)`, `GREATEST(left_person, right_person)`.
 - PostgREST no puede apuntar ese índice expresivo con `on_conflict` portable.
-  El job usa lookup batch `select-before-insert/update` por par canónico +
-  `blocking_key`.
+  El job usa lookup batch `select-before-insert/update` por par canónico.
 - Si el candidato ya existe → `UPDATE score, reasons, priority, decision`.
 - Si es nuevo → `INSERT` en bulk cuando PostgREST lo soporta.
 - Errores fatales (auth 401/403, schema mismatch estructural, respuesta global
@@ -182,7 +180,7 @@ python -m scrapers.jobs.consolidation_job --entity-type person --batch-size 500 
   - Error al marcar consolidado → CLI non-zero
   - Cursor con mismo `created_at` e `id` mayor → no se salta registros
   - Lookup batch de candidatos existentes → no un GET por candidato
-  - Candidato sin `event_id` o `blocking_key` → error controlado, no tumba todo
+  - Candidato sin `event_id` o `left_person` → error controlado, no tumba todo
   - Fallback sin `block_keys` → genera `ced:*` y `phon:*` esperados
   - Sin `block_keys` y sin `event_id` → no genera claves inválidas
   - Batch con 0 registros → el job termina sin error

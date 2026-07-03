@@ -36,7 +36,7 @@ log = logging.getLogger(__name__)
 _DEFAULT_WATERMARK = "1970-01-01T00:00:00Z"
 _APORTES_UPSERT_PATH = "/rest/v1/aportes?on_conflict=source_id,external_id"
 _WATERMARKS_PATH = "/rest/v1/source_watermarks"
-_WATERMARKS_UPSERT_PATH = "/rest/v1/source_watermarks?on_conflict=slug"
+_WATERMARKS_UPSERT_PATH = "/rest/v1/source_watermarks?on_conflict=source_slug"
 _SCRAPER_ID = "00000000-0000-0000-0000-000000000001"
 
 _WATERMARK_SAFETY_MARGIN = timedelta(minutes=5)
@@ -268,7 +268,7 @@ class StagingExporter:
         try:
             resp = self._client.get(
                 _WATERMARKS_PATH,
-                params={"slug": f"eq.{source_slug}", "select": "watermark_at"},
+                params={"source_slug": f"eq.{source_slug}", "select": "watermark_at"},
             )
             if resp.status_code in (401, 403):
                 raise PermissionError(
@@ -302,7 +302,7 @@ class StagingExporter:
         try:
             resp = self._post_with_retry(
                 _WATERMARKS_UPSERT_PATH,
-                {"slug": source_slug, "watermark_at": watermark_at},
+                {"source_slug": source_slug, "watermark_at": watermark_at},
                 headers={"Prefer": "resolution=merge-duplicates"},
             )
         except httpx.HTTPError:

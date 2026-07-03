@@ -17,17 +17,17 @@ def find_candidates(
 ) -> list[dict[str, Any]]:
     """Generate and score pairs within each block, returning candidates.
 
-    Returns list of candidate dicts with keys:
+    Returns list of candidate dicts matching the real backend
+    ``dedup_candidates`` contract:
         event_id: event UUID
-        left_person_record_id: left persons.person_record_id
-        right_person_record_id: right persons.person_record_id
-        blocking_key: block key that produced the candidate
+        left_person: left persons.person_record_id
+        right_person: right persons.person_record_id
         score: float
         reasons: dict[str, float]
         priority: str ("high"/"medium"/"low")
     """
     candidates: list[dict[str, Any]] = []
-    seen: set[tuple[str, str, str]] = set()
+    seen: set[tuple[str, str]] = set()
 
     for block_key, members in blocks.items():
         if len(members) < 2:
@@ -45,7 +45,7 @@ def find_candidates(
 
                 # Canonical ordering to avoid duplicates across blocks
                 first_id, second_id = sorted([left_id, right_id])
-                pair_key = (first_id, second_id, block_key)
+                pair_key = (first_id, second_id)
                 if pair_key in seen:
                     continue
                 seen.add(pair_key)
@@ -57,13 +57,12 @@ def find_candidates(
 
                 priority = "high" if score >= 0.95 else "medium"
 
-                left_person_record_id, right_person_record_id = sorted([left_id, right_id])
+                left_person, right_person = sorted([left_id, right_id])
 
                 candidates.append({
                     "event_id": str(left.get("event_id") or right.get("event_id") or ""),
-                    "left_person_record_id": left_person_record_id,
-                    "right_person_record_id": right_person_record_id,
-                    "blocking_key": block_key,
+                    "left_person": left_person,
+                    "right_person": right_person,
                     "source_record_ids": [
                         str(value)
                         for value in (left.get("id"), right.get("id"))

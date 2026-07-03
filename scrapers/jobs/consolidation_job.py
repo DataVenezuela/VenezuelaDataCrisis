@@ -297,11 +297,11 @@ class PersonCandidateWriteResult:
     fatal: bool = False
 
 
-def _candidate_key(row: dict[str, Any]) -> tuple[str, str, str]:
-    left = str(row["left_person_record_id"])
-    right = str(row["right_person_record_id"])
+def _candidate_key(row: dict[str, Any]) -> tuple[str, str]:
+    left = str(row["left_person"])
+    right = str(row["right_person"])
     first, second = sorted([left, right])
-    return (first, second, str(row["blocking_key"]))
+    return (first, second)
 
 
 def _source_record_ids(candidate: dict[str, Any]) -> set[str]:
@@ -314,9 +314,8 @@ def _source_record_ids(candidate: dict[str, Any]) -> set[str]:
 def _candidate_payload(candidate: dict[str, Any]) -> dict[str, Any]:
     required = (
         "event_id",
-        "left_person_record_id",
-        "right_person_record_id",
-        "blocking_key",
+        "left_person",
+        "right_person",
         "score",
         "reasons",
         "priority",
@@ -326,9 +325,8 @@ def _candidate_payload(candidate: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(f"candidate payload missing required fields: {missing}")
     return {
         "event_id": candidate["event_id"],
-        "left_person_record_id": candidate["left_person_record_id"],
-        "right_person_record_id": candidate["right_person_record_id"],
-        "blocking_key": candidate["blocking_key"],
+        "left_person": candidate["left_person"],
+        "right_person": candidate["right_person"],
         "score": candidate["score"],
         "reasons": candidate["reasons"],
         "priority": candidate["priority"],
@@ -386,29 +384,25 @@ class SupabasePersonDedupAdapter:
     def find_existing_candidates(
         self,
         payloads: list[dict[str, Any]],
-    ) -> dict[tuple[str, str, str], dict[str, Any]]:
+    ) -> dict[tuple[str, str], dict[str, Any]]:
         if not payloads:
             return {}
 
         clauses = []
         for payload in payloads:
-            left, right, blocking_key = _candidate_key(payload)
+            left, right = _candidate_key(payload)
             for left_id, right_id in ((left, right), (right, left)):
                 clauses.append(
                     "and("
-                    f"left_person_record_id.eq.{left_id},"
-                    f"right_person_record_id.eq.{right_id},"
-                    f"blocking_key.eq.{blocking_key}"
+                    f"left_person.eq.{left_id},"
+                    f"right_person.eq.{right_id}"
                     ")"
                 )
 
         response = self._client.get(
             "/rest/v1/dedup_candidates",
             params={
-                "select": (
-                    "candidate_id,left_person_record_id,"
-                    "right_person_record_id,blocking_key"
-                ),
+                "select": "candidate_id,left_person,right_person",
                 "or": f"({','.join(clauses)})",
             },
         )
