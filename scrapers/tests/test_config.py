@@ -449,3 +449,27 @@ def test_negative_rate_limit_is_rejected(tmp_path):
 def test_bool_rate_limit_is_rejected(tmp_path):
     with pytest.raises(ValueError, match="rate_limit_per_minute"):
         validate_sources_config(_config_with(tmp_path, "    rate_limit_per_minute: true\n"))
+
+
+# ---------------------------------------------------------------------------
+# full_scan (issue #216)
+# ---------------------------------------------------------------------------
+
+def test_full_scan_true_is_valid(tmp_path):
+    payload = validate_sources_config(_config_with(tmp_path, "    full_scan: true\n"))
+    assert payload["sources"][0]["full_scan"] is True
+
+
+def test_full_scan_false_is_valid(tmp_path):
+    payload = validate_sources_config(_config_with(tmp_path, "    full_scan: false\n"))
+    assert payload["sources"][0]["full_scan"] is False
+
+
+def test_full_scan_absent_is_valid(tmp_path):
+    payload = validate_sources_config(_config_with(tmp_path, ""))
+    assert "full_scan" not in payload["sources"][0]
+
+
+def test_full_scan_non_bool_is_rejected(tmp_path):
+    with pytest.raises(ValueError, match="full_scan"):
+        validate_sources_config(_config_with(tmp_path, "    full_scan: yes_please\n"))

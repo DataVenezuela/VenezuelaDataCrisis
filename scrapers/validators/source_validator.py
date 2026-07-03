@@ -157,6 +157,21 @@ def _validate_optional_fields(source: dict[str, Any], label: str) -> None:
                 f"0 o negativo produce chunks vacios y perdida silenciosa de datos."
             )
 
+    full_scan = source.get("full_scan")
+    if full_scan is not None and not isinstance(full_scan, bool):
+        raise ValueError(
+            f"{label} debe tener 'full_scan' como booleano (true/false); "
+            f"indica que la API upstream ignora updated_after."
+        )
+
+    cursor_field = source.get("cursor_field")
+    if cursor_field is not None:
+        if not isinstance(cursor_field, str) or not cursor_field.strip():
+            raise ValueError(
+                f"{label} debe tener 'cursor_field' como texto no vacío "
+                f"(nombre del campo ISO 8601 del API para early-stop incremental)."
+            )
+
 
 def validate_sources_config(config_path: Path) -> dict[str, Any]:
     payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))

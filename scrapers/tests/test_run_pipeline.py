@@ -558,6 +558,62 @@ sources:
         slugs = {p["slug"] for p in transport.watermark_posts}
         assert slugs == {"fuente_a", "fuente_b"}
 
+    def test_full_scan_omits_updated_after(self, tmp_path: Path) -> None:
+        """full_scan=True → updated_after no llega al adapter."""
+        cfg = _make_demo_config(tmp_path, """
+project:
+  event_id: 8f14e45f-ceea-467e-bd5d-0a4f2e0c1a3a
+  default_country: Venezuela
+sources:
+  - id: encuentralos_tecnosoft
+    name: Encuentralos full scan
+    type: api_json
+    enabled: true
+    trust_tier: C
+    url: "https://encuentralos.tecnosoft.dev/api/personas"
+    refresh_minutes: 30
+    parser_asignado: encuentralos
+    full_scan: true
+""")
+        transport = _StagingTransport()
+        adapter = _mock_adapter()
+        with patch.dict(os.environ, _SUPABASE_ENV, clear=False), _patch_exporter(transport), patch(
+            "scrapers.pipelines.run_pipeline._get_adapter", return_value=adapter
+        ), patch(
+            "scrapers.pipelines.run_pipeline._get_parser", return_value=_mock_parser()
+        ):
+            run_pipeline(config_path=cfg, output_dir=tmp_path / "out")
+        _, kwargs = adapter.fetch_all.call_args
+        assert "updated_after" not in kwargs.get("params", {})
+
+    def test_full_scan_false_still_passes_updated_after(self, tmp_path: Path) -> None:
+        """full_scan=False (explícito) → updated_after llega al adapter."""
+        cfg = _make_demo_config(tmp_path, """
+project:
+  event_id: 8f14e45f-ceea-467e-bd5d-0a4f2e0c1a3a
+  default_country: Venezuela
+sources:
+  - id: encuentralos_tecnosoft
+    name: Encuentralos incremental
+    type: api_json
+    enabled: true
+    trust_tier: C
+    url: "https://encuentralos.tecnosoft.dev/api/personas"
+    refresh_minutes: 30
+    parser_asignado: encuentralos
+    full_scan: false
+""")
+        transport = _StagingTransport()
+        adapter = _mock_adapter()
+        with patch.dict(os.environ, _SUPABASE_ENV, clear=False), _patch_exporter(transport), patch(
+            "scrapers.pipelines.run_pipeline._get_adapter", return_value=adapter
+        ), patch(
+            "scrapers.pipelines.run_pipeline._get_parser", return_value=_mock_parser()
+        ):
+            run_pipeline(config_path=cfg, output_dir=tmp_path / "out")
+        _, kwargs = adapter.fetch_all.call_args
+        assert "updated_after" in kwargs.get("params", {})
+
 
 # ---------------------------------------------------------------------------
 # Tests: paralelismo (max_workers)
@@ -1069,6 +1125,150 @@ class TestDomainAllowlist:
 
         # Comportamiento retrocompatible: pasa el gate como hoy.
         assert built == ["test_src"]
+
+
+# ---------------------------------------------------------------------------
+# Tests: cursor_field early-stop incremental
+# ---------------------------------------------------------------------------
+
+def _raw_page(items: list[dict], *, page_num: int, fetched_at: str = "2026-07-03T12:00:00Z") -> RawContent:
+    return RawContent(
+        source_key="encuentralos_tecnosoft",
+        source_url="https://encuentralos.tecnosoft.dev/api/personas",
+        fetched_at=fetched_at,
+        http_status=200,
+        content_type="application/json",
+        content_hash=f"sha256:page{page_num}",
+        raw_content={"items": items, "total": 100},
+        page=page_num,
+        total_pages=None,
+        offset=(page_num - 1) * len(items),
+        limit=len(items),
+        records_in_page=len(items),
+    )
+
+
+def _item(rec_id: str, creado: str) -> dict:
+    return {"id": rec_id, "nombre": f"Persona {rec_id}", "estado": "desaparecido", "creado": creado}
+
+
+class _WatermarkTransport(_StagingTransport):
+    """StagingTransport que devuelve un watermark inicial concreto en GET."""
+
+    def __init__(self, watermark_at: str) -> None:
+        super().__init__()
+        self._initial_watermark = watermark_at
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/rest/v1/source_watermarks" and request.method == "GET":
+            return httpx.Response(200, json=[{"watermark_at": self._initial_watermark}])
+        return super().handle_request(request)
+
+
+_CURSOR_CONFIG_YAML = """
+project:
+  event_id: 8f14e45f-ceea-467e-bd5d-0a4f2e0c1a3a
+  default_country: Venezuela
+sources:
+  - id: encuentralos_tecnosoft
+    name: Encuentralos cursor
+    type: api_json
+    enabled: true
+    trust_tier: C
+    url: "https://encuentralos.tecnosoft.dev/api/personas"
+    refresh_minutes: 30
+    parser_asignado: encuentralos
+    full_scan: true
+    cursor_field: "creado"
+"""
+
+
+class TestCursorFieldEarlyStop:
+    """cursor_field habilita early-stop client-side y avanza watermark con max(cursor_field)."""
+
+    def test_early_stop_halts_paging_when_page_is_stale(self, tmp_path: Path) -> None:
+        """Cuando min(creado de la página) ≤ watermark, no se consumen más páginas."""
+        watermark = "2026-07-03T10:00:00Z"
+        page1 = _raw_page([
+            _item("a", "2026-07-03T12:00:00Z"),  # nuevo
+            _item("b", "2026-07-03T09:00:00Z"),  # viejo — min(creado) ≤ watermark → stop
+        ], page_num=1)
+        page2 = _raw_page([_item("c", "2026-07-03T08:00:00Z")], page_num=2)
+
+        pages_yielded: list[int] = []
+
+        class _TrackingAdapter:
+            default_path = "/api/personas"
+            def fetch_all(self, *a, **kw):
+                for p in [page1, page2]:
+                    pages_yielded.append(p.get("page"))
+                    yield p
+            def close(self): pass
+
+        cfg = _make_demo_config(tmp_path, _CURSOR_CONFIG_YAML)
+        transport = _WatermarkTransport(watermark)
+        with patch.dict(os.environ, _SUPABASE_ENV, clear=False), _patch_exporter(transport), patch(
+            "scrapers.pipelines.run_pipeline._get_adapter", return_value=_TrackingAdapter()
+        ), patch(
+            "scrapers.pipelines.run_pipeline._get_parser", return_value=_mock_parser()
+        ):
+            run_pipeline(config_path=cfg, output_dir=tmp_path / "out")
+
+        assert pages_yielded == [1], f"esperado [1], obtenido {pages_yielded}"
+
+    def test_no_early_stop_when_watermark_is_epoch(self, tmp_path: Path) -> None:
+        """Con watermark=epoch (primer run), no hay early-stop: se consumen todas las páginas."""
+        pages_yielded: list[int] = []
+
+        class _TwoPagesAdapter:
+            default_path = "/api/personas"
+            def fetch_all(self, *a, **kw):
+                for p in [
+                    _raw_page([_item("a", "2026-07-03T12:00:00Z")], page_num=1),
+                    _raw_page([_item("b", "2026-07-03T11:00:00Z")], page_num=2),
+                ]:
+                    pages_yielded.append(p.get("page"))
+                    yield p
+            def close(self): pass
+
+        cfg = _make_demo_config(tmp_path, _CURSOR_CONFIG_YAML)
+        transport = _WatermarkTransport("1970-01-01T00:00:00Z")
+        with patch.dict(os.environ, _SUPABASE_ENV, clear=False), _patch_exporter(transport), patch(
+            "scrapers.pipelines.run_pipeline._get_adapter", return_value=_TwoPagesAdapter()
+        ), patch(
+            "scrapers.pipelines.run_pipeline._get_parser", return_value=_mock_parser()
+        ):
+            run_pipeline(config_path=cfg, output_dir=tmp_path / "out")
+
+        assert pages_yielded == [1, 2], f"esperado [1, 2], obtenido {pages_yielded}"
+
+    def test_cursor_watermark_is_max_creado_minus_safety_margin(self, tmp_path: Path) -> None:
+        """El watermark almacenado es max(creado) - 5min, no fetched_at."""
+        page = _raw_page(
+            [_item("x", "2026-07-03T12:00:00Z"), _item("y", "2026-07-03T11:00:00Z")],
+            page_num=1,
+            fetched_at="2026-07-03T15:00:00Z",  # fetched_at mucho más tarde
+        )
+
+        class _OnePageAdapter:
+            default_path = "/api/personas"
+            def fetch_all(self, *a, **kw): yield page
+            def close(self): pass
+
+        cfg = _make_demo_config(tmp_path, _CURSOR_CONFIG_YAML)
+        transport = _WatermarkTransport("1970-01-01T00:00:00Z")
+        with patch.dict(os.environ, _SUPABASE_ENV, clear=False), _patch_exporter(transport), patch(
+            "scrapers.pipelines.run_pipeline._get_adapter", return_value=_OnePageAdapter()
+        ), patch(
+            "scrapers.pipelines.run_pipeline._get_parser", return_value=_mock_parser()
+        ):
+            run_pipeline(config_path=cfg, output_dir=tmp_path / "out")
+
+        assert transport.watermark_posts, "watermark no avanzó"
+        new_wm = transport.watermark_posts[-1]["watermark_at"]
+        # max(creado) = "2026-07-03T12:00:00Z" → menos 5 min = "2026-07-03T11:55:00Z"
+        # NO "2026-07-03T14:55:00Z" (fetched_at - 5min)
+        assert new_wm == "2026-07-03T11:55:00Z", f"watermark incorrecto: {new_wm}"
 
 
 class TestExporterBatchingWiring:
