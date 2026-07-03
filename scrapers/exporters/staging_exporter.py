@@ -494,8 +494,8 @@ class StagingExporter:
 
             if len(chunk) > 1:
                 log.warning(
-                    "POST %s status=%s en batch de %d — reintentando individualmente",
-                    _APORTES_UPSERT_PATH, resp.status_code, len(chunk),
+                    "POST %s status=%s body=%s en batch de %d — reintentando individualmente",
+                    _APORTES_UPSERT_PATH, resp.status_code, resp.text[:500], len(chunk),
                 )
                 for single in chunk:
                     try:

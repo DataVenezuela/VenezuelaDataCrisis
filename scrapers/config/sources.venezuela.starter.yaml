@@ -68,7 +68,7 @@ sources:
     probe_limit: 1000
     max_concurrent_pages: 32
     max_concurrent_posts: 8
-    bulk_size: 500
+    bulk_size: 100
 
   - id: x_venezuela_crisis_recent
     name: "X/Twitter Venezuela Crisis Recent Search"
