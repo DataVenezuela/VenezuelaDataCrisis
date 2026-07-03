@@ -344,6 +344,23 @@ class _LocalFileAdapter:
 # Etapas del pipeline
 # ---------------------------------------------------------------------------
 
+def _strip_ms(ts: str) -> str:
+    """'2026-07-03T12:45:07.153Z' → '2026-07-03T12:45:07Z' (formato watermark sin ms)."""
+    dot = ts.find(".")
+    return ts[:dot] + "Z" if dot != -1 else ts
+
+
+def _max_cursor_from_pages(pages: list[RawContent], cursor_field: str) -> list[str]:
+    """Devuelve [max(cursor_field)] de todas las páginas raw para usarlo como watermark."""
+    values = [
+        _strip_ms(str(item[cursor_field]))
+        for page in pages
+        for item in ((page.get("raw_content") or {}).get("items") or [])
+        if item.get(cursor_field)
+    ]
+    return [max(values)] if values else []
+
+
 def _fetch_pages(adapter: Any, source: SourceConfig, updated_after: str, limit: int | None = None) -> list[RawContent]:
     """Llama a fetch_all del adapter y recopila todas las paginas.
 
@@ -351,20 +368,42 @@ def _fetch_pages(adapter: Any, source: SourceConfig, updated_after: str, limit: 
     param a todos los adapters (fetch_all acepta **kwargs en todos). Los que
     soportan filtrado server-side (ApiAdapter) lo incluyen en la request; el
     resto lo ignora silenciosamente.
+
+    Si ``source.full_scan`` es True, se omite ``updated_after`` — la API
+    upstream no lo soporta y devolvería el dataset completo de todas formas.
+    El dedup queda delegado al upsert por external_id en staging.
+
+    Si ``source.cursor_field`` está definido, hace early-stop en cuanto
+    ``min(cursor_field de la página)`` ≤ ``updated_after``: todos los registros
+    siguientes son anteriores al watermark y ya están en staging.
     """
     url = source.url
     pages: list[RawContent] = []
-    params = {"updated_after": updated_after}
+    if source.full_scan:
+        log.info("%s: full_scan=True — omitiendo updated_after en el fetch", source.id)
+        params: dict[str, str] = {}
+    else:
+        params = {"updated_after": updated_after}
     kwargs = {"limit": limit} if limit is not None else {}
 
-    # ApiAdapter expone default_path separado de base_url
-    if hasattr(adapter, "default_path") and adapter.default_path:
-        path = adapter.default_path
-        for page in adapter.fetch_all(path, params=params, **kwargs):
-            pages.append(page)
-    else:
-        for page in adapter.fetch_all(url, params=params, **kwargs):
-            pages.append(page)
+    path = adapter.default_path if (hasattr(adapter, "default_path") and adapter.default_path) else url
+    for page in adapter.fetch_all(path, params=params, **kwargs):
+        pages.append(page)
+
+        if source.cursor_field:
+            items = (page.get("raw_content") or {}).get("items") or []
+            if items:
+                cursors = [
+                    _strip_ms(str(item[source.cursor_field]))
+                    for item in items
+                    if item.get(source.cursor_field)
+                ]
+                if cursors and min(cursors) <= updated_after:
+                    log.info(
+                        "%s: early-stop cursor — min(%s)=%s ≤ watermark=%s (página %s)",
+                        source.id, source.cursor_field, min(cursors), updated_after, page.get("page"),
+                    )
+                    break
 
     return pages
 
@@ -727,6 +766,10 @@ def _run_source(
     log.info("%s: %d pagina(s) descargadas", source.id, len(pages))
 
     fetched_ats = [str(p.get("fetched_at")) for p in pages if p.get("fetched_at")]
+    if source.cursor_field:
+        cursor_ats = _max_cursor_from_pages(pages, source.cursor_field)
+        if cursor_ats:
+            fetched_ats = cursor_ats
 
     # 4. Parse
     entities, parse_errors = _parse_pages(parser, pages, limit, source, quarantine_batch)
@@ -753,8 +796,8 @@ def _run_source(
     records = _apply_minor_protection(records, source_errors, source, quarantine_batch)
 
     # 9. Staging export — upsert directo a Supabase via PostgREST
-    # source_errors se pasa para que el watermark NO avance si hubo errores
-    # previos de la fuente (parse/PII/enriquecimiento/proteccion de menores).
+    # source_errors bloquea el watermark si hubo errores pre-export
+    # (parse/PII/enriquecimiento). Errores de insert parciales no lo bloquean (#217).
     # max_concurrent_posts activa el envio concurrente de batches si > 1.
     result = exporter.export_source(
         records,

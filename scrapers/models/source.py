@@ -32,6 +32,15 @@ class SourceConfig:
     # No confundir con max_concurrent_posts: bulk_size controla el tamaño de
     # cada batch, max_concurrent_posts cuántos batches van en paralelo (#212).
     bulk_size: int | None = None
+    # Cuando es True, el pipeline omite el parámetro updated_after en el fetch
+    # porque la API upstream lo ignora o no lo soporta. El pipeline baja el
+    # dataset completo en cada run y delega el dedup al upsert por external_id.
+    full_scan: bool = False
+    # Campo del API (e.g. "creado") cuyo valor ISO 8601 se usa como cursor de
+    # paginación incremental. Cuando está seteado, _fetch_pages hace early-stop
+    # en cuanto min(cursor_field de la página) ≤ watermark_at, y avanza el
+    # watermark con max(cursor_field) en vez de fetched_at.
+    cursor_field: str | None = None
 
     @property
     def parser(self) -> str:
