@@ -359,10 +359,10 @@ class StagingExporter:
         raise last_exc
 
     def _advance_watermark(
-        self, source_slug: str, source_fetched_ats: list[str], has_errors: bool
+        self, source_slug: str, source_fetched_ats: list[str], source_errors: bool, sent: int
     ) -> str | None:
-        """Avanza el watermark si no hubo errores. Devuelve None o mensaje de error."""
-        if has_errors or not source_fetched_ats:
+        """Avanza el watermark si se envió al menos un registro sin errores pre-export."""
+        if source_errors or not source_fetched_ats or sent == 0:
             return None
         new_watermark = _apply_safety_margin(max(source_fetched_ats))
         try:
@@ -455,7 +455,7 @@ class StagingExporter:
                     result.errors.extend(_errors)
 
         watermark_err = self._advance_watermark(
-            source_slug, source_fetched_ats, bool(source_errors) or bool(result.errors)
+            source_slug, source_fetched_ats, bool(source_errors), result.sent
         )
         if watermark_err is not None:
             result.errors.append(watermark_err)
