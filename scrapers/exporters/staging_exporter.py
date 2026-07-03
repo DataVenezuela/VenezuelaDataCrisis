@@ -234,7 +234,12 @@ class StagingExporter:
             external_id = fingerprint
             dedup_hash = fingerprint
         else:
-            external_id = compute_external_id(rec, entity_type)
+            src_rec_id = _opt_str(rec.get("_source_record_id"))
+            if src_rec_id:
+                seed = f"person|{source_slug}|{src_rec_id}"
+                external_id = hashlib.sha256(seed.encode("utf-8")).hexdigest()
+            else:
+                external_id = compute_external_id(rec, entity_type)
             dedup_hash = specs.dedup_key(rec, entity_type)
 
         source_id = self._resolve_source_id(source_slug)

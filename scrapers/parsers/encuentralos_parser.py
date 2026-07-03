@@ -243,7 +243,9 @@ class EncuentralosParser:
         No lanza excepción — cualquier fallo de validación Pydantic se
         captura y loguea.
         """
-        rec_id = rec.get("id", "?")
+        raw_id = rec.get("id")
+        rec_id = str(raw_id) if raw_id is not None else "?"
+        source_record_id: str | None = str(raw_id) if raw_id is not None else None
 
         # ── full_name ─────────────────────────────────────────────────
         raw_nombre = rec.get("nombre") or ""
@@ -310,6 +312,7 @@ class EncuentralosParser:
                 confidence_score=0.0,
                 nota=nota,
                 foto=foto,
+                source_record_id=source_record_id,
                 fuente=FUENTE_LABEL,
             )
         except Exception as exc:

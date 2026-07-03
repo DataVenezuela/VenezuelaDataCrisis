@@ -478,6 +478,10 @@ def _apply_pii(
                 d = _strip_raw_pii(d)
             # Preservar el tipo para el router de export
             d["_entity_type"] = type(entity).__name__
+            # _source_record_id (prefijo _) es el meta-campo que _build_payload
+            # lee para basar external_id en el UUID nativo; clean lo excluye de raw_json.
+            if d.get("source_record_id"):
+                d["_source_record_id"] = d["source_record_id"]
             result.append(d)
         except Exception as exc:
             msg = f"Error en etapa PII para {type(entity).__name__}: {exc}"
