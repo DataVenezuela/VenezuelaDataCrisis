@@ -64,11 +64,13 @@ sources:
     refresh_minutes: 30
     parser_asignado: encuentralos
     required_keywords: []
-    notes: "API paginada (limit/offset, ~108k registros). probe_limit=1000 detecta el máximo que soporta el API antes de paginar."
+    notes: "API paginada (limit/offset, ~108k registros). probe_limit=1000. API ignora updated_after (verificado 2026-07-03). cursor_field=creado habilita early-stop client-side: solo se pagina hasta que min(creado de la página) ≤ watermark. Para full-scan manual (captura actualizaciones de estado), borrar el watermark en source_watermarks."
     probe_limit: 1000
     max_concurrent_pages: 32
     max_concurrent_posts: 8
-    bulk_size: 500
+    bulk_size: 100
+    full_scan: true
+    cursor_field: "creado"
 
   - id: x_venezuela_crisis_recent
     name: "X/Twitter Venezuela Crisis Recent Search"

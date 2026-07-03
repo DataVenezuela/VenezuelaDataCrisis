@@ -102,7 +102,9 @@ jobs:
       matrix: ${{ fromJson(needs.discover.outputs.matrix) }}
     concurrency:
       group: ingest-${{ matrix.source_id }}
-      cancel-in-progress: false   # no superponer la misma fuente
+      # false: no interrumpir un insert en curso; con el watermark parcial (#217)
+      # la siguiente run pendiente arranca desde el watermark avanzado y es rápida.
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
 
@@ -130,6 +132,7 @@ jobs:
             ${{ steps.spacy-cache-path.outputs.site_packages }}/es_core_news_sm
             ${{ steps.spacy-cache-path.outputs.site_packages }}/es_core_news_sm-3.8.0.dist-info
           key: spacy-model-${{ hashFiles('scrapers/requirements.txt') }}
+          restore-keys: spacy-model-
 
       - name: Install dependencies
         run: pip install -r scrapers/requirements.txt
