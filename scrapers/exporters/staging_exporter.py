@@ -372,31 +372,41 @@ class StagingExporter:
             return str(exc)
         return None
 
+    def advance_watermark(
+        self, source_slug: str, source_fetched_ats: list[str], source_errors: bool, sent: int
+    ) -> str | None:
+        """Avanza el watermark si se envió ≥1 registro sin errores pre-export.
+
+        A diferencia de ``_advance_watermark``, no bloquea en errores de insert:
+        solo bloquea si ``source_errors`` (parse/PII/enriquecimiento) están presentes
+        o si ``sent == 0``. Usado por el loop de streaming en ``_run_source``.
+        """
+        if source_errors or not source_fetched_ats or sent == 0:
+            return None
+        new_watermark = _apply_safety_margin(max(source_fetched_ats))
+        try:
+            if not self._set_watermark(source_slug, new_watermark):
+                return "no se pudo actualizar el watermark"
+        except PermissionError as exc:
+            return str(exc)
+        return None
+
     # -- export ---------------------------------------------------------------
 
-    def export_source(
+    def export_batch(
         self,
         records: list[dict[str, object]],
         *,
         source_slug: str,
-        source_fetched_ats: list[str],
-        source_errors: list[str] | None = None,
         batch_size: int | None = None,
         max_concurrent_posts: int | None = None,
     ) -> ExportResult:
-        """Exporta los records de ``source_slug``; avanza su watermark si todo OK.
+        """Exporta un lote de records a Supabase sin avanzar el watermark.
 
-        Envia los registros en lotes via POST a PostgREST con
-        ``Prefer: resolution=merge-duplicates``. La idempotencia por
-        external_id absorbe re-envios sin duplicar.
-
-        ``source_errors`` son errores previos de la fuente (parse, PII,
-        enriquecimiento y el fail-closed de proteccion de menores) que se
-        inyectan despues en run_pipeline. Si no estan vacios, el watermark NO
-        avanza.
-
-        ``batch_size`` controla el tamano del lote (default: _DEFAULT_BATCH_SIZE).
-        ``max_concurrent_posts`` controla cuantos batches enviar en paralelo
+        Llamado por el loop de streaming en ``_run_source`` (una página a la vez).
+        El caller acumula los resultados y llama ``advance_watermark`` al final.
+        ``batch_size`` controla el tamaño del lote (default: _DEFAULT_BATCH_SIZE).
+        ``max_concurrent_posts`` controla cuántos batches enviar en paralelo
         (default 1 = secuencial). Usa ``ThreadPoolExecutor`` internamente.
         """
         result = ExportResult()
@@ -426,7 +436,6 @@ class StagingExporter:
             return result
 
         chunks = [payloads[i : i + size] for i in range(0, len(payloads), size)]
-
         _batch_timeout = httpx.Timeout(connect=10.0, read=120.0, write=120.0, pool=10.0)
         batch_headers = {"Prefer": "resolution=merge-duplicates,return=minimal"}
 
@@ -453,12 +462,6 @@ class StagingExporter:
                     _sent, _errors = future.result()
                     result.sent += _sent
                     result.errors.extend(_errors)
-
-        watermark_err = self._advance_watermark(
-            source_slug, source_fetched_ats, bool(source_errors), result.sent
-        )
-        if watermark_err is not None:
-            result.errors.append(watermark_err)
 
         return result
 
@@ -538,6 +541,38 @@ class StagingExporter:
             errors.append(f"POST {_APORTES_UPSERT_PATH} error inesperado: {exc}")
 
         return sent, errors
+
+    def export_source(
+        self,
+        records: list[dict[str, object]],
+        *,
+        source_slug: str,
+        source_fetched_ats: list[str],
+        source_errors: list[str] | None = None,
+        batch_size: int | None = None,
+        max_concurrent_posts: int | None = None,
+    ) -> ExportResult:
+        """Exporta los records de ``source_slug``; avanza su watermark si todo OK.
+
+        ``source_errors`` son errores previos de la fuente (parse, PII,
+        enriquecimiento y el fail-closed de proteccion de menores). Si no estan
+        vacios, o si hubo errores de insert, el watermark NO avanza.
+        ``max_concurrent_posts`` controla cuántos batches enviar en paralelo.
+        """
+        result = self.export_batch(
+            records,
+            source_slug=source_slug,
+            batch_size=batch_size,
+            max_concurrent_posts=max_concurrent_posts,
+        )
+        if not self.enabled:
+            return result
+        watermark_err = self._advance_watermark(
+            source_slug, source_fetched_ats, bool(source_errors), result.sent
+        )
+        if watermark_err is not None:
+            result.errors.append(watermark_err)
+        return result
 
     # -- ciclo de vida --------------------------------------------------------
 

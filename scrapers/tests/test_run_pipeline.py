@@ -1281,7 +1281,8 @@ class TestExporterBatchingWiring:
         parser = _mock_parser()
         exporter = MagicMock()
         exporter.get_watermark.return_value = "1970-01-01T00:00:00Z"
-        exporter.export_source.return_value = rp.ExportResult(sent=2)
+        exporter.export_batch.return_value = rp.ExportResult(sent=2)
+        exporter.advance_watermark.return_value = None
 
         monkeypatch.setattr(rp, "_get_adapter", lambda s: adapter)
         monkeypatch.setattr(rp, "_get_parser", lambda s, event_id: parser)
@@ -1289,5 +1290,5 @@ class TestExporterBatchingWiring:
         result = rp._run_source(source, None, [], _EVENT_ID, exporter, [])
 
         assert result.sent == 2
-        exporter.export_source.assert_called_once()
-        assert exporter.export_source.call_args.kwargs["batch_size"] == 32
+        exporter.export_batch.assert_called_once()
+        assert exporter.export_batch.call_args.kwargs["batch_size"] == 32
