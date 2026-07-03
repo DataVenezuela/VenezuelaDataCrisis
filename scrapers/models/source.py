@@ -27,10 +27,20 @@ class SourceConfig:
     # Tope de requests por ventana de 60s. Solo lo aplica ApiAdapter (paginacion);
     # None/ausente = sin limite. Ver scrapers/adapters/_shared.RateLimiter.
     rate_limit_per_minute: int | None = None
-    # Cuántos aportes enviar por request a /api/aportes/bulk. Si está seteado,
-    # export_source_bulk() reemplaza el loop individual de export_source().
-    # None/ausente = comportamiento original (un POST por registro).
+    # Cuántos aportes por batch en el POST a /rest/v1/aportes (PostgREST).
+    # None/ausente = _DEFAULT_BATCH_SIZE (100) en StagingExporter.export_source().
+    # No confundir con max_concurrent_posts: bulk_size controla el tamaño de
+    # cada batch, max_concurrent_posts cuántos batches van en paralelo (#212).
     bulk_size: int | None = None
+    # Cuando es True, el pipeline omite el parámetro updated_after en el fetch
+    # porque la API upstream lo ignora o no lo soporta. El pipeline baja el
+    # dataset completo en cada run y delega el dedup al upsert por external_id.
+    full_scan: bool = False
+    # Campo del API (e.g. "creado") cuyo valor ISO 8601 se usa como cursor de
+    # paginación incremental. Cuando está seteado, _fetch_pages hace early-stop
+    # en cuanto min(cursor_field de la página) ≤ watermark_at, y avanza el
+    # watermark con max(cursor_field) en vez de fetched_at.
+    cursor_field: str | None = None
 
     @property
     def parser(self) -> str:
