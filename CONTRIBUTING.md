@@ -80,6 +80,28 @@ Checklist mental:
 - [ ] Si agrego un parser nuevo, los registros sin parser van a cuarentena, no al basura.
 ```
 
+### PRs que tocan contrato exporter -> DB
+
+Si un PR cambia payloads, queries, watermarks, exporters, jobs de
+consolidación, o cualquier contrato entre este repo y la BD/API de
+`DataVenezuela/dataVenezuela`, no inventes ni copies un schema de referencia
+en este repo. La fuente de verdad es el repo `DataVenezuela/dataVenezuela`,
+especialmente:
+
+- `supabase/migrations/*.sql`
+- `docs/api-dedup.md`
+- los schemas Zod/rutas que validan el endpoint tocado
+
+Checklist adicional:
+
+```md
+- [ ] Leí las migraciones reales de `DataVenezuela/dataVenezuela` antes de tocar el contrato.
+- [ ] Cité en el PR la migración/doc/ruta que respalda cada columna o payload nuevo.
+- [ ] No agregué archivos `tools/sql/issue_*.sql` como "schema real" paralelo.
+- [ ] Los tests no validan contra una copia inventada del schema, sino contra el contrato documentado.
+- [ ] Si el contrato real es ambiguo, dejé el PR pequeño en docs/proceso o pedí decisión de mantenedor antes de codear.
+```
+
 Requiere al menos una aprobación antes de mergear. Branch protection activo: la rama debe estar al día con `master` antes de mergear.
 
 ---
