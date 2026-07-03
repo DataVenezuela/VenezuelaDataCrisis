@@ -755,11 +755,10 @@ def _run_source(
     # 9. Staging export — upsert directo a Supabase via PostgREST
     # source_errors se pasa para que el watermark NO avance si hubo errores
     # previos de la fuente (parse/PII/enriquecimiento/proteccion de menores).
-    if source.max_concurrent_posts is not None:
-        log.warning(
-            "[%s] max_concurrent_posts=%s ya no se usa: el export usa batch "
-            "con PostgREST (batch_size=%s). Configurar bulk_size en el YAML "
-            "para controlar el tamano del lote.",
+    # max_concurrent_posts activa el envio concurrente de batches si > 1.
+    if source.max_concurrent_posts is not None and source.max_concurrent_posts > 1:
+        log.info(
+            "[%s] envio concurrente activado con max_concurrent_posts=%s (batch_size=%s)",
             source.id, source.max_concurrent_posts, source.bulk_size or 100,
         )
     result = exporter.export_source(
@@ -768,6 +767,7 @@ def _run_source(
         source_fetched_ats=fetched_ats,
         source_errors=source_errors,
         batch_size=source.bulk_size,
+        max_concurrent_posts=source.max_concurrent_posts,
     )
     # Arrastrar los errores previos de la fuente al frente del resultado.
     result.errors[0:0] = source_errors
