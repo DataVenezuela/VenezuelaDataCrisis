@@ -129,7 +129,8 @@ jobs:
           path: |
             ${{ steps.spacy-cache-path.outputs.site_packages }}/es_core_news_sm
             ${{ steps.spacy-cache-path.outputs.site_packages }}/es_core_news_sm-3.8.0.dist-info
-          key: spacy-model-es_core_news_sm-3.8.0
+          key: spacy-model-${{ hashFiles('scrapers/requirements.txt') }}
+          restore-keys: spacy-model-
 
       - name: Install dependencies
         run: pip install -r scrapers/requirements.txt
