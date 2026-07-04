@@ -17,9 +17,13 @@ Ejecucion:
   python -m scrapers.jobs.consolidation_job \
       --entity-type Event --batch-size 500 [--dry-run]
 
-El acceso a datos real (adapter concreto) queda pendiente de la decision de
-arquitectura del backend; ver scrapers/jobs/ports.py. Esta CLI, tal cual, opera
-sobre un adapter vacio y esta pensada para cablearse a ese adapter cuando exista.
+El acceso a datos real es `SupabaseConsolidationAdapter` (PostgREST directo,
+decision del equipo #82), que se cablea via `_build_port()` desde las env vars
+SUPABASE_URL + SUPABASE_PUBLISHABLE_KEY + SUPABASE_CONSOLIDATION_JWT (patron de
+auth acordado en #200: rol dedicado consolidation_job, sin service_role); si
+faltan, cae a un `FakeInMemoryAdapter` vacio (dry-run seguro, sin red). Ver
+scrapers/jobs/supabase_adapter.py. El camino Person (#92) usa el mismo par de
+credenciales via `PersonConsolidationConfig`.
 """
 
 from __future__ import annotations
@@ -42,6 +46,10 @@ from scrapers.dedup.clustering import find_candidates
 from scrapers.dedup import specs
 from scrapers.dedup.fingerprint import FINGERPRINT_VERSION
 from scrapers.jobs.ports import ConsolidationDataPort, FakeInMemoryAdapter, Record
+from scrapers.jobs.supabase_adapter import (
+    SupabaseConsolidationAdapter,
+    SupabaseConsolidationConfig,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -56,26 +64,28 @@ AUTOMERGE_ENTITY_TYPES: tuple[str, ...] = tuple(
     name for name, spec in specs.SPECS.items() if spec.allow_automerge
 )
 
-# Mapeo de tier -> rango numerico (mayor gana). Reusa la escala del dedup legacy
-# (scrapers/dedup/deduplicator._TIER_RANK): los modelos Python usan letras
-# A/B/C/D. El backend usa enteros 1/2/3 y su read-path aun no expone trust_tier;
-# el ORIGEN y MAPEO REAL de tier queda PENDIENTE de definicion del equipo. Por
-# eso el rango es inyectable (ver pick_winner) y este dict es solo el default.
-DEFAULT_TIER_RANK: dict[str, int] = {"A": 4, "B": 3, "C": 2, "D": 1}
+# Mapeo de tier -> rango numerico. Decision del equipo (#82): trust_tier es una
+# columna de aportes con letras A/B/C/D mapeadas a 1/2/3/4, y GANA EL MENOR numero
+# (A=1 es la fuente mas confiable). Ver docstring de `pick_winner` para el criterio
+# completo y para la nota de schema (aportes.trust_tier depende de una migracion
+# de backend aun pendiente). El rango es inyectable para tests.
+DEFAULT_TIER_RANK: dict[str, int] = {"A": 1, "B": 2, "C": 3, "D": 4}
 
-# Rango por defecto para un tier desconocido/ausente: el mas bajo.
-_UNKNOWN_TIER_RANK = 0
+# Rango por defecto para un tier desconocido/ausente. Como GANA EL MENOR, un tier
+# desconocido debe PERDER frente a cualquier tier conocido: se le asigna el peor
+# rango posible (mayor que cualquier valor de DEFAULT_TIER_RANK).
+_UNKNOWN_TIER_RANK = max(DEFAULT_TIER_RANK.values()) + 1
 
 
 TierRankFn = Callable[[str], int]
 
 
 def default_tier_rank(tier: str) -> int:
-    """Rango numerico por defecto de un tier (mayor gana).
+    """Rango numerico por defecto de un tier; MENOR gana (A=1 es el mejor).
 
-    Normaliza a mayusculas y cae a `_UNKNOWN_TIER_RANK` si el tier no esta en
-    `DEFAULT_TIER_RANK`. El mapeo real (letras vs enteros 1/2/3 del backend)
-    queda pendiente de la definicion del equipo; ver docstring de `pick_winner`.
+    Decision del equipo (#82): A=1, B=2, C=3, D=4. Normaliza a mayusculas y cae a
+    `_UNKNOWN_TIER_RANK` (el peor) si el tier no esta en `DEFAULT_TIER_RANK`, para
+    que un tier desconocido/ausente nunca le gane a uno conocido.
     """
     return DEFAULT_TIER_RANK.get((tier or "").strip().upper(), _UNKNOWN_TIER_RANK)
 
@@ -100,32 +110,68 @@ def group_by_dedup_hash(records: Iterable[Record]) -> dict[str, list[Record]]:
     return groups
 
 
+def _neg_confidence_score(rec: Record) -> float:
+    """-confidence_score del record (mayor confidence primero); 0.0 si falta/invalido."""
+    raw = rec.get("confidence_score")
+    if isinstance(raw, bool) or not isinstance(raw, (int, float, str)):
+        return 0.0
+    try:
+        return -float(raw)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _fetched_at_epoch(rec: Record) -> float:
+    """Epoch (segundos) de ``fetched_at`` ISO-8601; -inf si falta/invalido.
+
+    Se usa para ordenar por fetched_at DESCENDENTE con ``min()``: la clave de
+    orden lo niega, asi que un fetched_at mas reciente (epoch mayor) produce una
+    clave menor y gana. Un fetched_at ausente/invalido queda como el mas antiguo
+    posible (nunca gana el desempate por recencia).
+    """
+    raw = rec.get("fetched_at")
+    if not isinstance(raw, str) or not raw:
+        return float("-inf")
+    try:
+        text = raw.replace("Z", "+00:00")
+        return datetime.fromisoformat(text).timestamp()
+    except ValueError:
+        return float("-inf")
+
+
 def pick_winner(group: list[Record], tier_rank: TierRankFn = default_tier_rank) -> Record:
     """Elige el aporte ganador de un grupo de duplicados exactos. Funcion pura.
 
-    Criterio (determinista):
-      1. Mayor rango de tier segun ``tier_rank`` (inyectable).
-      2. Desempate ESTABLE cuando dos duplicados empatan en tier: gana el de
-         ``created_at`` mas antiguo (el que se vio primero) y, si tambien empata,
-         el de ``source_id`` menor lexicografico. Ambos claves siempre presentes
-         => resultado independiente del orden de entrada.
+    Criterio (decision del equipo #82, determinista):
+      1. MENOR rango de tier segun ``tier_rank`` (inyectable; default A=1..D=4,
+         gana el menor => la fuente mas confiable).
+      2. Desempate: ``fetched_at`` mas reciente (descendente).
+      3. Desempate: mayor ``confidence_score`` (descendente).
+      4. Desempate ESTABLE final: ``created_at`` mas antiguo y luego ``source_id``
+         menor lexicografico. Ambas claves siempre presentes => resultado
+         independiente del orden de entrada.
 
-    Nota sobre tier: los modelos Python usan letras A/B/C/D; el backend usa
-    enteros 1/2/3 y hoy su read-path NO expone trust_tier. Por eso ``tier_rank``
-    se INYECTA (default `default_tier_rank`) y el origen/mapeo real de tier queda
-    PENDIENTE de la definicion del equipo. El desempate no depende del tier, asi
-    que sigue siendo determinista aun con un mapeo provisional.
+    Nota sobre tier: los modelos Python usan letras A/B/C/D. La decision del
+    equipo las mapea a 1/2/3/4 y hace ganar al MENOR. IMPORTANTE: la columna
+    ``aportes.trust_tier`` NO existe todavia en el schema real del backend
+    (supabase/migrations 0001/0008); el mapeo de la decision DEPENDE de una
+    migracion pendiente. El adapter degrada de forma segura si la columna falta
+    (tier vacio => rango peor), y los desempates por fetched_at/confidence_score
+    mantienen el determinismo aun sin tier.
     """
     if not group:
         raise ValueError("pick_winner requiere un grupo no vacio")
 
-    def sort_key(rec: Record) -> tuple[int, str, str]:
+    def sort_key(rec: Record) -> tuple[int, float, float, str, str]:
         rank = tier_rank(str(rec.get("trust_tier") or ""))
+        neg_fetched_at = -_fetched_at_epoch(rec)
+        neg_conf = _neg_confidence_score(rec)
         created_at = str(rec.get("created_at") or "")
         source_id = str(rec.get("source_id") or "")
-        # -rank: mayor tier primero. created_at/source_id ascendentes para un
-        # desempate estable e independiente del orden de entrada.
-        return (-rank, created_at, source_id)
+        # rank ascendente (menor tier gana); neg_fetched_at y neg_conf ya negados
+        # para que min() elija el mas reciente / mayor confidence; created_at y
+        # source_id ascendentes para un desempate final estable.
+        return (rank, neg_fetched_at, neg_conf, created_at, source_id)
 
     return min(group, key=sort_key)
 
@@ -169,7 +215,14 @@ def consolidate_entity_type(
             f"permitidos: {list(AUTOMERGE_ENTITY_TYPES)}"
         )
 
-    summary = {"groups": 0, "aportes": 0, "upserts": 0, "marked": 0, "batches": 0}
+    summary = {
+        "groups": 0,
+        "aportes": 0,
+        "upserts": 0,
+        "marked": 0,
+        "batches": 0,
+        "errors": 0,
+    }
 
     while True:
         batch = port.fetch_unconsolidated(entity_type, batch_size)
@@ -217,12 +270,30 @@ def consolidate_entity_type(
             if dry_run:
                 continue
 
-            canonical = canonical_from_winner(winner)
-            port.upsert_canonical(entity_type, canonical)
-            summary["upserts"] += 1
-            port.mark_consolidated(aporte_ids)
-            summary["marked"] += len(aporte_ids)
-            batch_progress = True
+            # Fallo parcial de batch: si upsert/mark de ESTE grupo revienta, se
+            # loguea, se cuenta y se sigue con los demas grupos (regla del
+            # staging_exporter: el batch avanza pese a errores parciales). No
+            # marcar el grupo fallido => se re-lee en la ronda siguiente y se
+            # reintenta de forma idempotente (upsert por on_conflict, mark por id).
+            try:
+                canonical = canonical_from_winner(winner)
+                port.upsert_canonical(entity_type, canonical)
+                summary["upserts"] += 1
+                port.mark_consolidated(aporte_ids)
+                summary["marked"] += len(aporte_ids)
+                batch_progress = True
+            except Exception as exc:  # noqa: BLE001 - aislar el grupo, no el job
+                summary["errors"] += 1
+                active_logger.error(
+                    "consolidation group FAILED entity_type=%s dedup_hash=%s "
+                    "winner_id=%s aporte_ids=%s: %s",
+                    entity_type,
+                    dedup_hash,
+                    winner.get("id"),
+                    aporte_ids,
+                    exc,
+                )
+                continue
 
         # En dry_run no se marca nada, asi que el siguiente fetch devolveria el
         # mismo batch: cortar tras el primer pase para no ciclar.
@@ -231,13 +302,14 @@ def consolidate_entity_type(
 
     active_logger.info(
         "consolidation done entity_type=%s groups=%d aportes=%d upserts=%d "
-        "marked=%d batches=%d dry_run=%s",
+        "marked=%d batches=%d errors=%d dry_run=%s",
         entity_type,
         summary["groups"],
         summary["aportes"],
         summary["upserts"],
         summary["marked"],
         summary["batches"],
+        summary["errors"],
         dry_run,
     )
     return summary
@@ -245,24 +317,69 @@ def consolidate_entity_type(
 
 @dataclass
 class PersonConsolidationConfig:
-    """Configuracion para Person dedup candidates via Supabase REST."""
+    """Configuracion para Person dedup candidates via Supabase REST.
+
+    Auth segun el patron acordado en #200 (mismo que el adapter Event/Acopio):
+    ``publishable_key`` en el header ``apikey`` y ``consolidation_jwt`` en
+    ``Authorization: Bearer`` (rol dedicado ``consolidation_job``, sin
+    service_role). El JWT solo se LEE del entorno; el adapter NO lo firma.
+    Depende de la migracion de backend del rol consolidation_job (grants +
+    policies) y de la credencial ``SUPABASE_CONSOLIDATION_JWT`` (aun inexistentes) para
+    correr contra Supabase real; no cambia trust_tier ni el schema.
+    """
 
     supabase_url: str
-    supabase_service_key: str
+    publishable_key: str
+    consolidation_jwt: str
     entity_type: str = _PERSON_ENTITY_TYPE
     batch_size: int = _PERSON_DEFAULT_BATCH_SIZE
     threshold: float = _PERSON_DEFAULT_THRESHOLD
 
     @classmethod
     def from_env(cls, **overrides: Any) -> "PersonConsolidationConfig | None":
-        url = os.getenv("SUPABASE_URL")
-        key = os.getenv("SUPABASE_SERVICE_KEY")
-        if not url or not key:
-            _LOGGER.error("SUPABASE_URL and SUPABASE_SERVICE_KEY are required")
+        """Construye la config desde el entorno; None si falta.
+
+        Espeja ``SupabaseConsolidationConfig.from_env`` (Event/Acopio): distingue
+        el dry-run intencional (NINGUNA env seteada, dev local) de una config
+        parcial en prod (alguna seteada, otra no). La primera loguea a INFO, la
+        segunda a ERROR listando las faltantes. En ambos casos devuelve None
+        (gatilla dry-run) sin abortar. NUNCA loguea el valor de la key ni del JWT.
+        """
+        values = {
+            "SUPABASE_URL": os.getenv("SUPABASE_URL"),
+            "SUPABASE_PUBLISHABLE_KEY": os.getenv("SUPABASE_PUBLISHABLE_KEY"),
+            "SUPABASE_CONSOLIDATION_JWT": os.getenv("SUPABASE_CONSOLIDATION_JWT"),
+        }
+        present = [k for k, v in values.items() if v]
+        if not present:
+            _LOGGER.info(
+                "person consolidation deshabilitado: ninguna SUPABASE_* seteada "
+                "(dry-run intencional)"
+            )
+            return None
+        if len(present) < len(values):
+            missing = [k for k, v in values.items() if not v]
+            _LOGGER.error(
+                "person consolidation mal configurado: faltan %s; entrando en dry-run",
+                missing,
+            )
+            return None
+        base_url = str(values["SUPABASE_URL"]).rstrip("/")
+        # La key/JWT y (potencialmente) PII viajan en cada request. Sobre HTTP
+        # plano serian interceptables (MITM); exigir HTTPS. Config errada =>
+        # dry-run, nunca enviar a un endpoint inseguro (igual que el adapter
+        # Event/Acopio, SupabaseConsolidationConfig.from_env).
+        if not base_url.lower().startswith("https://"):
+            _LOGGER.error(
+                "person consolidation: SUPABASE_URL debe ser https:// (recibido %r); "
+                "entrando en dry-run para no enviar credenciales/PII en claro",
+                base_url,
+            )
             return None
         return cls(
-            supabase_url=str(url).rstrip("/"),
-            supabase_service_key=str(key),
+            supabase_url=base_url,
+            publishable_key=str(values["SUPABASE_PUBLISHABLE_KEY"]),
+            consolidation_jwt=str(values["SUPABASE_CONSOLIDATION_JWT"]),
             entity_type=str(overrides.get("entity_type", _PERSON_ENTITY_TYPE)),
             batch_size=int(overrides.get("batch_size", _PERSON_DEFAULT_BATCH_SIZE)),
             threshold=float(overrides.get("threshold", _PERSON_DEFAULT_THRESHOLD)),
@@ -348,8 +465,10 @@ class SupabasePersonDedupAdapter:
         client = httpx.Client(
             base_url=config.supabase_url,
             headers={
-                "apikey": config.supabase_service_key,
-                "Authorization": f"Bearer {config.supabase_service_key}",
+                # Patron #200: apikey = publishable key; Bearer = JWT del rol
+                # dedicado consolidation_job. NO service_role.
+                "apikey": config.publishable_key,
+                "Authorization": f"Bearer {config.consolidation_jwt}",
                 "Content-Type": "application/json",
             },
             timeout=httpx.Timeout(60.0),
@@ -441,6 +560,15 @@ class SupabasePersonDedupAdapter:
             headers={"Prefer": "return=minimal"},
         )
         response.raise_for_status()
+
+    def close(self) -> None:
+        self._client.close()
+
+    def __enter__(self) -> "SupabasePersonDedupAdapter":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
 
     def mark_consolidated(self, record_ids: list[str]) -> tuple[int, int, list[str]]:
         if not record_ids:
@@ -548,9 +676,15 @@ def run_person_consolidation(
     config: PersonConsolidationConfig,
     client: httpx.Client | None = None,
 ) -> PersonConsolidationResult:
-    """Run Person dedup candidate generation end-to-end."""
+    """Run Person dedup candidate generation end-to-end.
+
+    Si el caller inyecta un ``client`` (tests), el caller es dueno de cerrarlo.
+    Si no, este runner arma el adapter via ``from_config`` (abre un httpx.Client
+    propio) y lo cierra en un ``finally`` para no dejar el client sin cerrar.
+    """
     start_time = time.monotonic()
     result = PersonConsolidationResult(run_id=str(uuid.uuid4()), entity_type=config.entity_type)
+    caller_owns_client = client is not None
     adapter = (
         SupabasePersonDedupAdapter(client)
         if client is not None
@@ -558,53 +692,58 @@ def run_person_consolidation(
     )
     cursor = _INITIAL_CURSOR
 
-    while True:
-        try:
-            rows = adapter.fetch_batch(config, cursor)
-        except Exception as exc:
-            result.errors.append(f"fetch_error: {exc}")
-            break
+    try:
+        while True:
+            try:
+                rows = adapter.fetch_batch(config, cursor)
+            except Exception as exc:
+                result.errors.append(f"fetch_error: {exc}")
+                break
 
-        if not rows:
-            break
+            if not rows:
+                break
 
-        result.batches += 1
-        result.records_read += len(rows)
+            result.batches += 1
+            result.records_read += len(rows)
 
-        blocks = build_blocks(rows)
-        result.blocks += len(blocks)
-        for members in blocks.values():
-            n = len(members)
-            if n >= 2:
-                result.pairs_compared += n * (n - 1) // 2
+            blocks = build_blocks(rows)
+            result.blocks += len(blocks)
+            for members in blocks.values():
+                n = len(members)
+                if n >= 2:
+                    result.pairs_compared += n * (n - 1) // 2
 
-        candidates = find_candidates(blocks, config.threshold)
-        write_result = _write_person_candidates(adapter, candidates)
-        result.candidates_inserted_or_updated += write_result.written
-        result.duplicates_skipped += write_result.idempotent
-        result.upsert_errors += write_result.errors
-        result.errors.extend(write_result.messages)
-        if write_result.fatal:
-            break
+            candidates = find_candidates(blocks, config.threshold)
+            write_result = _write_person_candidates(adapter, candidates)
+            result.candidates_inserted_or_updated += write_result.written
+            result.duplicates_skipped += write_result.idempotent
+            result.upsert_errors += write_result.errors
+            result.errors.extend(write_result.messages)
+            if write_result.fatal:
+                break
 
-        ids = [
-            str(row["id"])
-            for row in rows
-            if row.get("id") and str(row["id"]) not in write_result.mark_blocked_record_ids
-        ]
-        _, mark_errors, mark_messages = adapter.mark_consolidated(ids)
-        result.mark_errors += mark_errors
-        result.errors.extend(mark_messages)
-        if mark_errors:
-            break
+            ids = [
+                str(row["id"])
+                for row in rows
+                if row.get("id") and str(row["id"]) not in write_result.mark_blocked_record_ids
+            ]
+            _, mark_errors, mark_messages = adapter.mark_consolidated(ids)
+            result.mark_errors += mark_errors
+            result.errors.extend(mark_messages)
+            if mark_errors:
+                break
 
-        last_row = rows[-1]
-        cursor = (
-            str(last_row.get("created_at", _INITIAL_CURSOR[0])),
-            str(last_row.get("id", _INITIAL_CURSOR[1])),
-        )
-        if len(rows) < config.batch_size:
-            break
+            last_row = rows[-1]
+            cursor = (
+                str(last_row.get("created_at", _INITIAL_CURSOR[0])),
+                str(last_row.get("id", _INITIAL_CURSOR[1])),
+            )
+            if len(rows) < config.batch_size:
+                break
+    finally:
+        # Solo cerramos el client que abrimos nosotros; el inyectado es del caller.
+        if not caller_owns_client:
+            adapter.close()
 
     result.execution_time_ms = int((time.monotonic() - start_time) * 1000)
     print(json.dumps(asdict(result)))
@@ -656,13 +795,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def _build_port() -> ConsolidationDataPort:
-    """Construye el PORT de datos a usar por la CLI.
+    """Construye el PORT de datos a usar por la CLI para Event/AcopioCenter.
 
-    Hoy devuelve un `FakeInMemoryAdapter` vacio porque el adapter concreto de
-    produccion (PostgREST directo vs Vercel) sigue PENDIENTE de la decision del
-    equipo. Este es el unico punto a cambiar cuando esa decision se tome.
+    Decision del equipo (#82): acceso DIRECTO a Supabase PostgREST desde GitHub
+    Actions. Si `SUPABASE_URL` + `SUPABASE_PUBLISHABLE_KEY` +
+    `SUPABASE_CONSOLIDATION_JWT` estan seteadas y la URL es valida (https),
+    construye el adapter real (auth por rol dedicado, patron #200); si faltan,
+    cae a un `FakeInMemoryAdapter` vacio (dry-run seguro, sin red), igual que el
+    patron de dry-run del staging_exporter. Asi `--dry-run` sin env corre sin
+    tocar la red.
     """
-    return FakeInMemoryAdapter()
+    config = SupabaseConsolidationConfig.from_env()
+    if config is None:
+        return FakeInMemoryAdapter()
+    return SupabaseConsolidationAdapter.from_config(config)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -701,12 +847,18 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     port = _build_port()
-    summary = consolidate_entity_type(
-        port=port,
-        entity_type=args.entity_type,
-        batch_size=args.batch_size,
-        dry_run=args.dry_run,
-    )
+    # El port real mantiene un httpx.Client abierto; cerrarlo siempre al terminar
+    # (en el fake close() es no-op). Para un CLI que termina solo no es un crash,
+    # pero deja el patron listo si el job pasa a correr long-running.
+    try:
+        summary = consolidate_entity_type(
+            port=port,
+            entity_type=args.entity_type,
+            batch_size=args.batch_size,
+            dry_run=args.dry_run,
+        )
+    finally:
+        port.close()
     _LOGGER.info("resumen: %s", summary)
     return 0
 
