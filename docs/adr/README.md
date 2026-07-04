@@ -14,3 +14,4 @@ ADR que reemplaza a la anterior.
 |-----|--------|--------|
 | [0001](./0001-arquitectura-serving-publico.md) | Arquitectura del plano de serving público | Aceptada |
 | [0002](./0002-endurecimiento-seguridad-cloudflare.md) | Endurecimiento de seguridad del plano público con Cloudflare | Propuesta |
+| [0005](./0005-gobernabilidad.md) | Gobernabilidad del repositorio y quórum de mantenedores | Propuesta |
