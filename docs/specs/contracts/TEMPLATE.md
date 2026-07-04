@@ -10,6 +10,9 @@
 >   versionarlo vive en `docs/adr/0004-versionado-de-contrato.md`.
 > - `CONTRACT_VERSION` sigue semver (breaking -> major); ver ADR 0004. Subir la
 >   versión en el mismo PR que cambia la forma del contrato.
+> - **Honestidad de estado:** `CONTRACT_VERSION` describe lo que existe hoy en el
+>   código. Lo que aún no está construido va en la sección "Modelo objetivo",
+>   marcado "no implementado", nunca mezclado con lo real.
 
 > **Estado:** Propuesta
 > **CONTRACT_VERSION:** 0.0.0
@@ -82,7 +85,26 @@ Límites explícitos: accesos que no da, schema que no cubre, garantías que no 
 
 ---
 
-## 10. Referencias
+## 10. Modelo objetivo (no implementado)
+
+Forma a la que apunta el contrato pero que **aún no existe en el código**. Cada
+punto se marca "no implementado" y, si aplica, "construir pronto". Esta sección no
+altera `CONTRACT_VERSION` (que describe lo real): una idea aquí se vuelve parte de
+la versión solo cuando se implementa y se sube la versión. Omitir la sección si el
+contrato no tiene brecha entre lo real y lo objetivo.
+
+---
+
+## 11. Conformidad (fixtures)
+
+Cómo un contribuidor valida localmente que su productor cumple el contrato, sin
+desplegar. Convención: fixtures `contract-v<major.minor>/valid/*.json` y
+`contract-v<major.minor>/invalid/*.json`, ejecutables con `pytest`. Los fixtures
+inválidos documentan el contrato de rechazo/cuarentena.
+
+---
+
+## 12. Referencias
 
 - Módulos y tests que implementan el contrato.
 - ADR y specs relacionadas (incluida ADR 0004 para el versionado).

@@ -15,3 +15,4 @@ ADR que reemplaza a la anterior.
 | [0001](./0001-arquitectura-serving-publico.md) | Arquitectura del plano de serving público | Aceptada |
 | [0002](./0002-endurecimiento-seguridad-cloudflare.md) | Endurecimiento de seguridad del plano público con Cloudflare | Propuesta |
 | [0004](./0004-versionado-de-contrato.md) | Versionado del contrato DB/scrapers | Propuesta |
+| [0006](./0006-proteccion-pii-ingesta.md) | Protección de PII en la ingesta | Propuesta |
