@@ -5,9 +5,17 @@
 | Estado | Propuesta |
 | Fecha | 2026-07-04 |
 | Decisores | Infraestructura, DB/API, Scrapers/Cleaners |
-| Reemplaza a | - |
+| Reemplaza a | (ninguno) |
 | Complementa | `docs/adr/0001-arquitectura-serving-publico.md`, `docs/adr/0002-endurecimiento-seguridad-cloudflare.md` |
-| Relacionado con | `CONTRIBUTING.md`, `docs/base-standards.md §2`, issue #224 |
+| Relacionado con | `CONTRIBUTING.md`, `docs/base-standards.md §2`, `docs/specs/db-scraper-contract.md`, issues #224 y #231 |
+
+> **Estado / implementación:** `Propuesta`. Los repos privados `vzla-deployment`
+> y `vzla-web` todavía no existen y nada cambia en producción hasta crearlos;
+> mientras tanto no se renombra ni se elimina ninguna referencia a
+> `dataVenezuela`. El contrato que acopla los repos está en progreso: la spec
+> entidad->DB vive en PR #232 (issue #231) y su versionado formal
+> (`CONTRACT_VERSION`, tag `contract-v1.0`) lo definirá la ADR 0004, aún
+> pendiente.
 
 ---
 
@@ -75,19 +83,22 @@ masking, contratos, documentación técnica y ADRs. Contribuciones abiertas,
 código auditable. Se muestran esquemas generales de fuentes y parsers, no la
 configuración específica de producción.
 
-### 3.2 Repo privado de deployment
+### 3.2 Repo privado de deployment: `vzla-deployment`
 
 * Maneja los Workers de Cloudflare (deploy real, con credenciales).
 * Se conecta a la base de datos de producción.
 * Corre el ingest real (cron).
 * Contiene los parsers y fuentes de producción, los que sí tocan datos reales.
-* **Quórum obligatorio:** cambios requieren mayoría de votos de contribuidores
-  en el PR para aprobarse, no un solo check o aprobador.
+* **Importa `VZLA_DEDUP` como dependencia** y fija el tag de contrato
+  `contract-v1.0`: consume el pipeline público a través de su contrato
+  versionado, no copiando su código (ver §8 y ADR 0004).
+* **Gobernado por quórum de mantenedores** (ver ADR 0005, pendiente): los
+  cambios se aprueban por quórum, no por un solo check o aprobador.
 * Incluye los scripts de creación de Worker que sean seguros de auditar
   públicamente; el `wrangler deploy` con credenciales reales corre solo desde
   aquí.
 
-### 3.3 Repo privado de página web (verificación humana)
+### 3.3 Repo privado de página web: `vzla-web` (verificación humana)
 
 * Frontend con **login + MFA**, conectado a la BD vía public key + JWT token.
 * Cada petición de merge lleva el **id del usuario** que la hizo.
@@ -114,13 +125,13 @@ flowchart TD
         PIPE["Pipeline: adapters, parsers,\ncontratos, docs, ADRs"]
     end
 
-    subgraph deploy["Repo privado - deployment (quorum)"]
+    subgraph deploy["Repo privado - vzla-deployment (quorum)"]
         WK["Cloudflare Workers: deploy real"]
         ING["Ingest cron: parsers/fuentes de produccion"]
         BUILD["Build job: Supabase a D1"]
     end
 
-    subgraph web["Repo privado - web de verificacion"]
+    subgraph web["Repo privado - vzla-web (verificacion)"]
         UI["Frontend: login + MFA"]
         MW["Worker de merge (separado de D1)"]
     end
@@ -178,15 +189,24 @@ acceso directo al dashboard de producción a todos los contribuidores.
 
 ---
 
-## 8. El problema no resuelto (fuera de alcance de esta ADR)
+## 8. El contrato DB/scrapers (resuelto por seguimiento)
 
-Cómo dar a los scrapers un schema público contra el cual validar su
-implementación, sin exponer el schema de producción, queda sin resolver aquí.
-La propuesta preliminar (issue #224) es definir un contrato explícito de
-precondiciones y postcondiciones, y la interfaz a usar; cuando se necesite algo
-nuevo, un scraper deja un PR contra ese contrato. Este contrato es el cuarto
-punto del checklist de la issue #224 y merece su propia ADR o documento de
-especificación, no se resuelve dentro de esta ADR.
+Cómo dar a los scrapers un contrato público contra el cual validar su
+implementación, sin exponer el schema de producción, es lo que acopla el repo
+público con `vzla-deployment` (§3.2). No queda abierto: se aborda por dos piezas
+de seguimiento, ambas en curso.
+
+* **El mecanismo del contrato** (precondiciones/postcondiciones entidad->DB) se
+  documenta en `docs/specs/db-scraper-contract.md` (issue #224 punto 4, issue
+  #231, PR #232, aún sin fusionar).
+* **Su versionado** (`CONTRACT_VERSION`, semver, y el tag `contract-v1.0` que
+  `vzla-deployment` fija) lo decidirá la **ADR 0004** (versionado de contrato),
+  todavía pendiente.
+
+Cuando un scraper necesite algo nuevo, deja un PR contra ese contrato. La
+existencia del contrato es un prerequisito de **implementación** para abrir el
+repo privado (§12), no una precondición de esta **decisión** de separar repos
+(§2): son dos planos distintos, uno arquitectónico y otro de gestión.
 
 ---
 
@@ -245,8 +265,8 @@ esquema general.
 * Dos repos privados adicionales que mantener, con su propio ciclo de PRs y
   quórum, más fricción que un solo repo.
 * Los contribuidores externos de scrapers ya no pueden ver ni probar contra
-  fuentes/parsers reales de producción; dependen del contrato aún sin definir
-  (§8).
+  fuentes/parsers reales de producción; dependen del contrato público, hoy en
+  progreso (spec en PR #232, versionado en ADR 0004 pendiente) (§8).
 * `docs/base-standards.md §2` y la sección de `CONTRIBUTING.md` sobre el
   contrato exporter → DB citan `DataVenezuela/dataVenezuela` como fuente de
   verdad actual; quedan desactualizadas en cuanto esta ADR se implemente (ver
@@ -257,29 +277,33 @@ esquema general.
 * *Los repos privados nuevos aún no existen.* Hasta que se creen, esta ADR
   documenta la decisión pero no cambia nada en producción. No renombrar ni
   eliminar referencias a `dataVenezuela` antes de que el reemplazo exista.
-* *El contrato DB/scrapers sin resolver (§8)* podría bloquear contribuciones
-  externas de scrapers si tarda demasiado. Priorizarlo como siguiente paso
-  inmediato tras esta ADR.
+* *El contrato DB/scrapers todavía sin finalizar (§8)* podría bloquear
+  contribuciones externas de scrapers si tarda demasiado: la spec sigue en PR
+  #232 y su versionado (ADR 0004) aún no se decide. Cerrar ambos es el siguiente
+  paso inmediato tras esta ADR.
 
 ---
 
 ## 12. Plan de implementación (pendientes)
 
+El contrato debe existir antes de abrir `vzla-deployment` (lo importa y fija su
+tag), asi que encabeza el orden:
+
 ```text
-[ ] Crear el repo privado de deployment (Workers, ingest cron, DB connection,
-    parsers/fuentes de produccion)
-[ ] Configurar regla de quorum (mayoria de aprobaciones) en el repo de
-    deployment
-[ ] Crear el repo privado de web de verificacion (login + MFA, Worker de
-    merge separado)
+[ ] Finalizar el contrato DB/scrapers: fusionar la spec (PR #232, issue #231) y
+    decidir su versionado en ADR 0004; etiquetar contract-v1.0. Prerequisito
+    para abrir vzla-deployment, que fija ese tag
+[ ] Crear el repo privado vzla-deployment (Workers, ingest cron, DB connection,
+    parsers/fuentes de produccion); importa VZLA_DEDUP y fija contract-v1.0
+[ ] Configurar la gobernanza del repo de deployment (quorum de mantenedores)
+    segun ADR 0005
+[ ] Crear el repo privado vzla-web (login + MFA, Worker de merge separado)
 [ ] Migrar credenciales/secrets desde cualquier superficie publica hacia los
     repos privados correspondientes
 [ ] Confirmar que ningun DDL vive en ningun repo (proceso manual documentado)
 [ ] Actualizar docs/base-standards.md §2 para reflejar el nuevo split de repos
 [ ] Actualizar CONTRIBUTING.md ("PRs que tocan contrato exporter -> DB") con
     la nueva fuente de verdad
-[ ] Escribir el contrato DB/scrapers (precondiciones/postcondiciones,
-    interfaz publica), issue #224 punto 4, como trabajo de seguimiento
 [ ] Cambiar el historial de commits a usar alias; enforzar alias de GitHub
 [ ] Eliminar emails del publico; escribir a los owners de forks existentes
 ```
