@@ -2,7 +2,7 @@
 
 > **Estado:** Propuesta
 > **CONTRACT_VERSION:** 1.0
-> **Issue:** #231 (documenta el contrato existente), companion del rediseño (pendiente)
+> **Issue:** #231 (documenta el contrato existente), #235 (rediseño parser a entidad)
 > **Origen:** issue #224 (punto 4), ADR 0004 (versionado), ADR 0006 (identidad/PII objetivo)
 > **Fecha:** 2026-07-04
 
@@ -271,4 +271,4 @@ Referencias).
 - `docs/specs/db-scraper-contract.md` (contrato entidad a staging).
 - `docs/adr/0004-versionado-de-contrato.md`, `docs/adr/0006-proteccion-pii-ingesta.md`.
 - `docs/specs/person-dedup.md`, `docs/source_config.md`.
-- issue #224 (punto 4), issue #231.
+- issue #224 (punto 4), issue #231, issue #235.

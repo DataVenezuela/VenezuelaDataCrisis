@@ -1,8 +1,9 @@
 # Spec: Contrato público DB/Scrapers (#231)
 
 > **Estado:** Propuesta
+> **CONTRACT_VERSION:** 1.0
 > **Issue:** #231
-> **Origen:** issue #224 (punto 4), ADR 0003 §8
+> **Origen:** issue #224 (punto 4), ADR 0003 §8, ADR 0004 (versionado)
 > **Fecha:** 2026-07-04
 
 ---
@@ -119,6 +120,14 @@ omitidas cuando no aplican (nunca enviadas como `null`):
 
 `source_slug` (string) **nunca** viaja en el payload: la DB espera
 `source_id` (uuid), no el slug legible del YAML.
+
+**Cableado muerto (hoy):** `_source_url`, `_parser_version` y
+`_normalizer_version` se leen aquí, pero el pipeline nunca los asigna, así que las
+columnas `source_url`/`parser_version`/`normalizer_version` **siempre** se omiten
+(viajan como ausentes, nunca con valor). Es un bug de trazabilidad, no del
+contrato: ver el issue de seguimiento (#236). Solo `_entity_type` y
+`_source_record_id` se pueblan de verdad. La columna `contract_version` por fila
+(ADR 0004) tampoco existe aún: se añade al implementar `contract-v1.0`.
 
 ---
 
