@@ -215,7 +215,14 @@ def consolidate_entity_type(
             f"permitidos: {list(AUTOMERGE_ENTITY_TYPES)}"
         )
 
-    summary = {"groups": 0, "aportes": 0, "upserts": 0, "marked": 0, "batches": 0}
+    summary = {
+        "groups": 0,
+        "aportes": 0,
+        "upserts": 0,
+        "marked": 0,
+        "batches": 0,
+        "errors": 0,
+    }
 
     while True:
         batch = port.fetch_unconsolidated(entity_type, batch_size)
@@ -263,12 +270,30 @@ def consolidate_entity_type(
             if dry_run:
                 continue
 
-            canonical = canonical_from_winner(winner)
-            port.upsert_canonical(entity_type, canonical)
-            summary["upserts"] += 1
-            port.mark_consolidated(aporte_ids)
-            summary["marked"] += len(aporte_ids)
-            batch_progress = True
+            # Fallo parcial de batch: si upsert/mark de ESTE grupo revienta, se
+            # loguea, se cuenta y se sigue con los demas grupos (regla del
+            # staging_exporter: el batch avanza pese a errores parciales). No
+            # marcar el grupo fallido => se re-lee en la ronda siguiente y se
+            # reintenta de forma idempotente (upsert por on_conflict, mark por id).
+            try:
+                canonical = canonical_from_winner(winner)
+                port.upsert_canonical(entity_type, canonical)
+                summary["upserts"] += 1
+                port.mark_consolidated(aporte_ids)
+                summary["marked"] += len(aporte_ids)
+                batch_progress = True
+            except Exception as exc:  # noqa: BLE001 - aislar el grupo, no el job
+                summary["errors"] += 1
+                active_logger.error(
+                    "consolidation group FAILED entity_type=%s dedup_hash=%s "
+                    "winner_id=%s aporte_ids=%s: %s",
+                    entity_type,
+                    dedup_hash,
+                    winner.get("id"),
+                    aporte_ids,
+                    exc,
+                )
+                continue
 
         # En dry_run no se marca nada, asi que el siguiente fetch devolveria el
         # mismo batch: cortar tras el primer pase para no ciclar.
@@ -277,13 +302,14 @@ def consolidate_entity_type(
 
     active_logger.info(
         "consolidation done entity_type=%s groups=%d aportes=%d upserts=%d "
-        "marked=%d batches=%d dry_run=%s",
+        "marked=%d batches=%d errors=%d dry_run=%s",
         entity_type,
         summary["groups"],
         summary["aportes"],
         summary["upserts"],
         summary["marked"],
         summary["batches"],
+        summary["errors"],
         dry_run,
     )
     return summary
@@ -338,8 +364,20 @@ class PersonConsolidationConfig:
                 missing,
             )
             return None
+        base_url = str(values["SUPABASE_URL"]).rstrip("/")
+        # La key/JWT y (potencialmente) PII viajan en cada request. Sobre HTTP
+        # plano serian interceptables (MITM); exigir HTTPS. Config errada =>
+        # dry-run, nunca enviar a un endpoint inseguro (igual que el adapter
+        # Event/Acopio, SupabaseConsolidationConfig.from_env).
+        if not base_url.lower().startswith("https://"):
+            _LOGGER.error(
+                "person consolidation: SUPABASE_URL debe ser https:// (recibido %r); "
+                "entrando en dry-run para no enviar credenciales/PII en claro",
+                base_url,
+            )
+            return None
         return cls(
-            supabase_url=str(values["SUPABASE_URL"]).rstrip("/"),
+            supabase_url=base_url,
             publishable_key=str(values["SUPABASE_PUBLISHABLE_KEY"]),
             consolidation_jwt=str(values["SUPABASE_CONSOLIDATION_JWT"]),
             entity_type=str(overrides.get("entity_type", _PERSON_ENTITY_TYPE)),
