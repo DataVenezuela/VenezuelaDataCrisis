@@ -213,6 +213,63 @@ def test_acopio_center_tambien_consolida() -> None:
     assert canonical["winner_aporte_id"] == "c1"  # tier A gana
 
 
+class _FailingUpsertAdapter(FakeInMemoryAdapter):
+    """Fake que falla el upsert de un dedup_hash puntual (resto OK).
+
+    Simula un fallo parcial de batch (p.ej. un 409/500 de PostgREST en un grupo)
+    para verificar que el job NO aborta los grupos siguientes.
+    """
+
+    def __init__(self, aportes: list[Record], fail_hash: str) -> None:
+        super().__init__(aportes)
+        self._fail_hash = fail_hash
+
+    def upsert_canonical(self, entity_type: str, record: Record) -> None:
+        if record.get("dedup_hash") == self._fail_hash:
+            raise httpx.HTTPError(f"boom en upsert de {self._fail_hash}")
+        super().upsert_canonical(entity_type, record)
+
+
+def test_fallo_de_grupo_no_aborta_los_sanos(caplog: pytest.LogCaptureFixture) -> None:
+    # Bloqueante #1: si el upsert de un grupo falla, los demas grupos del batch
+    # deben consolidarse igual (analogo a la regla del staging_exporter: el batch
+    # avanza pese a fallos parciales). La excepcion NO se propaga.
+    aportes = [
+        _event_aporte("a1", dedup_hash="ha"),
+        _event_aporte("b1", dedup_hash="hb"),
+        _event_aporte("c1", dedup_hash="hc"),
+    ]
+    adapter = _FailingUpsertAdapter(aportes, fail_hash="ha")
+
+    caplog.set_level(logging.ERROR, logger="scrapers.jobs.consolidation_job")
+    summary = consolidate_entity_type(adapter, "Event", batch_size=10)
+
+    # Los grupos sanos se consolidan; el que falla NO.
+    assert adapter.consolidated_ids == {"b1", "c1"}
+    assert ("Event", "ha") not in adapter.canonical
+    assert ("Event", "hb") in adapter.canonical
+    assert ("Event", "hc") in adapter.canonical
+    assert summary["upserts"] == 2
+    # El fallo se cuenta y se loguea (al menos una vez; el grupo fallido se
+    # re-lee en la ronda siguiente y se reintenta, ver known follow-up del PR).
+    assert summary["errors"] >= 1
+    assert "ha" in caplog.text
+
+
+def test_fallo_de_unico_grupo_cuenta_error_sin_propagar() -> None:
+    # Un solo grupo que falla: no propaga, no consolida nada, cuenta el error.
+    aportes = [_event_aporte("solo", dedup_hash="ha")]
+    adapter = _FailingUpsertAdapter(aportes, fail_hash="ha")
+
+    summary = consolidate_entity_type(adapter, "Event", batch_size=10)
+
+    assert summary["errors"] == 1
+    assert summary["upserts"] == 0
+    assert summary["marked"] == 0
+    assert adapter.consolidated_ids == set()
+    assert adapter.canonical == {}
+
+
 def test_person_no_admite_automerge() -> None:
     adapter = FakeInMemoryAdapter()
     try:
@@ -658,6 +715,27 @@ def test_person_from_env_ok_con_todas_las_vars(monkeypatch: pytest.MonkeyPatch) 
     assert config.supabase_url == _PERSON_URL  # trailing slash removido
     assert config.publishable_key == _PERSON_PUBLISHABLE_KEY
     assert config.consolidation_jwt == _PERSON_CONSOLIDATION_JWT
+
+
+def test_person_from_env_rechaza_http_plano(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Media #2: con todas las vars pero URL http:// (no https), la config Person
+    # debe entrar en dry-run (None) para NO mandar apikey/JWT/PII en claro,
+    # igual que SupabaseConsolidationConfig.from_env del adapter Event/Acopio.
+    _clear_person_env(monkeypatch)
+    monkeypatch.setenv("SUPABASE_URL", "http://proj.supabase.co")
+    monkeypatch.setenv("SUPABASE_PUBLISHABLE_KEY", _PERSON_PUBLISHABLE_KEY)
+    monkeypatch.setenv("SUPABASE_CONSOLIDATION_JWT", _PERSON_CONSOLIDATION_JWT)
+    caplog.set_level(logging.DEBUG, logger="scrapers.jobs.consolidation_job")
+    assert PersonConsolidationConfig.from_env() is None
+    errors = [
+        r for r in caplog.records
+        if r.name == "scrapers.jobs.consolidation_job" and r.levelno == logging.ERROR
+    ]
+    assert errors
+    assert any("https" in r.getMessage().lower() for r in errors)
 
 
 def test_person_from_config_headers_apikey_publishable_bearer_jwt() -> None:

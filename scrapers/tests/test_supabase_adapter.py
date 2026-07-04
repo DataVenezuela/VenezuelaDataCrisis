@@ -25,6 +25,7 @@ import pytest
 from scrapers.jobs.consolidation_job import default_tier_rank, pick_winner
 from scrapers.jobs.ports import Record
 from scrapers.jobs.supabase_adapter import (
+    _MAX_RETRIES,
     SupabaseConsolidationAdapter,
     SupabaseConsolidationConfig,
 )
@@ -325,6 +326,85 @@ def test_mark_consolidated_chunkea() -> None:
     assert len(calls) == 3
     first_ids = parse_qs(urlparse(calls[0]).query)["id"][0]
     assert first_ids.count(",") == 99  # 100 ids => 99 comas
+
+
+# --- errores HTTP y reintentos (media #3) -----------------------------------
+
+def _no_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Neutraliza el backoff para que los tests de retry sean rapidos y
+    # deterministas (no dormimos entre intentos).
+    monkeypatch.setattr("scrapers.jobs.supabase_adapter.time.sleep", lambda _n: None)
+
+
+def test_status_transitorio_reintenta_y_luego_exito(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 503 en los primeros dos intentos, 200 en el tercero: el adapter reintenta
+    # y termina devolviendo el resultado sin error.
+    _no_sleep(monkeypatch)
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] < 3:
+            return httpx.Response(503, json={"message": "unavailable"})
+        return httpx.Response(200, json=[])
+
+    adapter = _adapter(handler)
+    assert adapter.fetch_unconsolidated("Event", batch_size=10) == []
+    assert calls["n"] == 3
+
+
+def test_retry_exhaustion_lanza_http_status_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 503 persistente: agota _MAX_RETRIES intentos y raise_for_status propaga.
+    _no_sleep(monkeypatch)
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(503, json={"message": "down"})
+
+    adapter = _adapter(handler)
+    with pytest.raises(httpx.HTTPStatusError):
+        adapter.fetch_unconsolidated("Event", batch_size=10)
+    assert calls["n"] == _MAX_RETRIES
+
+
+@pytest.mark.parametrize("status", [401, 403, 422])
+def test_status_no_retryable_no_reintenta(
+    monkeypatch: pytest.MonkeyPatch, status: int
+) -> None:
+    # 4xx no transitorio: NO reintenta (un solo intento) y raise_for_status
+    # propaga de inmediato.
+    _no_sleep(monkeypatch)
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(status, json={"message": "no"})
+
+    adapter = _adapter(handler)
+    with pytest.raises(httpx.HTTPStatusError):
+        adapter.fetch_unconsolidated("Event", batch_size=10)
+    assert calls["n"] == 1
+
+
+def test_error_de_red_reintenta_y_relanza(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Error de transporte (NetworkError): reintenta _MAX_RETRIES veces y, si no
+    # hay response, relanza la ultima excepcion.
+    _no_sleep(monkeypatch)
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        raise httpx.ConnectError("conexion rechazada")
+
+    adapter = _adapter(handler)
+    with pytest.raises(httpx.ConnectError):
+        adapter.fetch_unconsolidated("Event", batch_size=10)
+    assert calls["n"] == _MAX_RETRIES
 
 
 # --- winner-selection final (decision del equipo #82) -----------------------
