@@ -102,7 +102,9 @@ jobs:
       matrix: ${{ fromJson(needs.discover.outputs.matrix) }}
     concurrency:
       group: ingest-${{ matrix.source_id }}
-      cancel-in-progress: false   # no superponer la misma fuente
+      # false: no interrumpir un insert en curso; con el watermark parcial (#217)
+      # la siguiente run pendiente arranca desde el watermark avanzado y es rápida.
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
 
@@ -130,6 +132,7 @@ jobs:
             ${{ steps.spacy-cache-path.outputs.site_packages }}/es_core_news_sm
             ${{ steps.spacy-cache-path.outputs.site_packages }}/es_core_news_sm-3.8.0.dist-info
           key: spacy-model-${{ hashFiles('scrapers/requirements.txt') }}
+          restore-keys: spacy-model-
 
       - name: Install dependencies
         run: pip install -r scrapers/requirements.txt
@@ -138,8 +141,9 @@ jobs:
         env:
           PII_SALT: ${{ secrets.PII_HMAC_SECRET }}
           PII_HMAC_SECRET: ${{ secrets.PII_HMAC_SECRET }}
-          STAGING_API_KEY: ${{ secrets.STAGING_API_KEY }}
-          STAGING_BASE_URL: ${{ vars.STAGING_BASE_URL }}
+          SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+          SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
+          SUPABASE_INGEST_JWT: ${{ secrets.SUPABASE_INGEST_JWT }}
           PYTHONUNBUFFERED: "1"
           # Las expresiones ${{ }} se inyectan en variables de entorno (NO en el
           # cuerpo del script) para evitar shell injection: un valor malicioso en

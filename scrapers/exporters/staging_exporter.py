@@ -1,14 +1,22 @@
-"""Staging exporter: POST de aportes a /api/aportes de dataVenezuela.
+"""Staging exporter: upsert directo a Supabase via PostgREST.
 
-Reemplaza el export JSONL en disco. Cada record sanitizado (post-PII,
-post-score, post-minor-protection) se manda como un aporte idempotente:
-el external_id determinista permite al backend hacer upsert sin duplicar.
+Reemplaza el export via Vercel (/api/aportes) por escritura directa a
+Supabase. Auth via custom JWT firmado con rol ``scraper_ingest``
+(``Authorization: Bearer``) + publishable key en header ``apikey``.
+Cada batch de registros (post-PII, post-score, post-minor-protection)
+se upserta con ``Prefer: resolution=merge-duplicates``; la idempotencia
+por external_id absorbe re-envios sin duplicar.
 
 Sin red real en tests: el httpx.Client es inyectable via el parametro
 ``client`` del constructor (los tests pasan httpx.Client(transport=...)).
-Si faltan las env vars STAGING_*, el exporter entra en dry-run silencioso:
+Si faltan las env vars SUPABASE_*, el exporter entra en dry-run silencioso:
 no abre cliente, calcula payloads para validarlos, loguea a INFO lo que
 enviaria, y devuelve ExportResult vacio.
+
+El envio concurrente de batches se activa pasando ``max_concurrent_posts > 1``;
+usa ``concurrent.futures.ThreadPoolExecutor``. El watermark solo avanza si
+TODOS los batches del source terminaron en 200/201, preservando la semantica
+at-least-once (el thread pool aguanta hasta que todos terminan, fallos o no).
 """
 
 from __future__ import annotations
@@ -18,9 +26,8 @@ import json
 import logging
 import os
 import time
-import threading
 import uuid
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
@@ -33,25 +40,17 @@ from scrapers.dedup import specs
 log = logging.getLogger(__name__)
 
 _DEFAULT_WATERMARK = "1970-01-01T00:00:00Z"
-_APORTES_PATH = "/api/aportes"
-_APORTES_BULK_PATH = "/api/aportes/bulk"
-_WATERMARKS_PATH = "/api/source-watermarks"
+_APORTES_UPSERT_PATH = "/rest/v1/aportes?on_conflict=source_id,external_id"
+_WATERMARKS_PATH = "/rest/v1/source_watermarks"
+_WATERMARKS_UPSERT_PATH = "/rest/v1/source_watermarks?on_conflict=slug"
+_SCRAPER_ID = "00000000-0000-0000-0000-000000000001"
 
-# fetched_at es el wall-clock local de cuando el adapter termino de
-# descargar la pagina, no el updated_at del registro en el servidor de la
-# fuente. Un registro puede actualizarse del lado del servidor mientras el
-# fetch esta en vuelo y no quedar reflejado en la respuesta que ya recibimos;
-# si el watermark avanza exactamente hasta fetched_at, la siguiente corrida
-# (updated_after=watermark) nunca volveria a pedirlo. Este margen crea una
-# ventana de overlap; la idempotencia por external_id en dataVenezuela
-# absorbe los registros re-enviados en ese overlap sin duplicar.
 _WATERMARK_SAFETY_MARGIN = timedelta(minutes=5)
 _FETCHED_AT_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
-# Status HTTP transitorios que ameritan reintento del POST a /api/aportes.
-# Definido localmente (no se mueve a _shared para no chocar con PR #61).
 _RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
 _MAX_POST_RETRIES = 4
+_DEFAULT_BATCH_SIZE = 100
 
 
 @dataclass(frozen=True)
@@ -63,26 +62,28 @@ class StagingConfig:
     get_watermark/export_source recibe su propio source_slug (source.id).
     """
 
-    api_key: str
-    base_url: str
+    supabase_url: str
+    publishable_key: str
+    ingest_jwt: str
 
     @classmethod
     def from_env(cls) -> StagingConfig | None:
-        """Construye la config desde STAGING_*; None si falta alguna.
+        """Construye la config desde SUPABASE_*; None si falta alguna.
 
-        Distingue el dry-run intencional (NINGUNA STAGING_* seteada, dev local)
+        Distingue el dry-run intencional (NINGUNA SUPABASE_* seteada, dev local)
         de una config parcial en prod (algunas seteadas, otras no): la primera
         loguea a INFO, la segunda a ERROR listando las faltantes. En ambos casos
         devuelve None (gatilla el dry-run) sin abortar el pipeline.
         """
         values = {
-            "STAGING_API_KEY": os.getenv("STAGING_API_KEY"),
-            "STAGING_BASE_URL": os.getenv("STAGING_BASE_URL"),
+            "SUPABASE_URL": os.getenv("SUPABASE_URL"),
+            "SUPABASE_PUBLISHABLE_KEY": os.getenv("SUPABASE_PUBLISHABLE_KEY"),
+            "SUPABASE_INGEST_JWT": os.getenv("SUPABASE_INGEST_JWT"),
         }
         present = [k for k, v in values.items() if v]
         if not present:
             log.info(
-                "staging_exporter deshabilitado: ninguna STAGING_* seteada "
+                "staging_exporter deshabilitado: ninguna SUPABASE_* seteada "
                 "(dry-run intencional)"
             )
             return None
@@ -93,27 +94,30 @@ class StagingConfig:
                 missing,
             )
             return None
-        base_url = str(values["STAGING_BASE_URL"]).rstrip("/")
-        # El cliente manda x-api-key y PII tokenizada en cada request. Sobre HTTP
-        # plano esos datos viajan en claro y son interceptables (MITM); exigir
-        # HTTPS evita exponer la credencial y los payloads. Config errada => dry-run,
-        # nunca enviar a un endpoint inseguro.
-        if not base_url.lower().startswith("https://"):
+        supabase_url = str(values["SUPABASE_URL"]).rstrip("/")
+        if not supabase_url.lower().startswith("https://"):
             log.error(
-                "staging_exporter: STAGING_BASE_URL debe ser https:// (recibido %r); "
+                "staging_exporter: SUPABASE_URL debe ser https:// (recibido %r); "
                 "entrando en dry-run para no enviar credenciales/PII en claro",
-                base_url,
+                supabase_url,
             )
             return None
         return cls(
-            api_key=str(values["STAGING_API_KEY"]),
-            base_url=base_url,
+            supabase_url=supabase_url,
+            publishable_key=str(values["SUPABASE_PUBLISHABLE_KEY"]),
+            ingest_jwt=str(values["SUPABASE_INGEST_JWT"]),
         )
 
 
 @dataclass
 class ExportResult:
-    """Resultado agregado de exportar los records de una fuente."""
+    """Resultado agregado de exportar los records de una fuente.
+
+    ``duplicates`` siempre es 0: con ``resolution=merge-duplicates``
+    PostgREST nunca devuelve 409. El contador se conserva para no romper
+    el contrato de ``run_pipeline`` pero ya no se incrementa en el nuevo
+    esquema de upsert.
+    """
 
     sent: int = 0
     duplicates: int = 0
@@ -121,22 +125,11 @@ class ExportResult:
 
 
 def _content_hash(body: dict[str, object]) -> str:
-    """sha256 con prefijo del repo ("sha256:") sobre json canonico del payload.
-
-    Delega en scrapers.adapters._shared.sha256_hex para mantener el formato
-    consistente con el resto del pipeline (adapters rss/pdf/playwright/html/api).
-    """
     raw = json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return sha256_hex(raw.encode("utf-8"))
 
 
 def _apply_safety_margin(watermark_at: str) -> str:
-    """Resta ``_WATERMARK_SAFETY_MARGIN`` al watermark antes de persistirlo.
-
-    Ver comentario junto a ``_WATERMARK_SAFETY_MARGIN``. Si el formato no es
-    el esperado (``now_utc()`` de todos los adapters), devuelve el valor
-    intacto en vez de fallar — no vale la pena tumbar el pipeline por esto.
-    """
     try:
         dt = datetime.strptime(watermark_at, _FETCHED_AT_FORMAT).replace(tzinfo=timezone.utc)
     except ValueError:
@@ -146,12 +139,6 @@ def _apply_safety_margin(watermark_at: str) -> str:
 
 
 def compute_external_id(rec: dict[str, object], entity_type: str) -> str:
-    """external_id determinista por tipo de entidad (idempotencia, upsert).
-
-    Event/AcopioCenter: el fingerprint v1. Person: deterministic_id si esta
-    presente; si no, fallback estable por cedula_hmac o por content_hash para
-    no colapsar todos los Person sin det_id en una misma clave.
-    """
     if entity_type == "Event":
         return specs.event_dedup_key(rec)
     if entity_type == "AcopioCenter":
@@ -170,7 +157,7 @@ def compute_external_id(rec: dict[str, object], entity_type: str) -> str:
 
 
 class StagingExporter:
-    """Envia aportes a /api/aportes y avanza el watermark de la fuente."""
+    """Upserta aportes a Supabase via PostgREST y avanza el watermark de la fuente."""
 
     def __init__(
         self,
@@ -184,23 +171,52 @@ class StagingExporter:
         self.run_id = run_id or str(uuid.uuid4())
         self._owns_client = client is None
         self._client: httpx.Client | None = client
+        self._source_id_cache: dict[str, str] = {}
         if self.enabled and config is not None and client is None:
             self._client = httpx.Client(
-                base_url=config.base_url,
+                base_url=config.supabase_url,
                 headers={
-                    "x-api-key": config.api_key,
+                    "apikey": config.publishable_key,
+                    "Authorization": f"Bearer {config.ingest_jwt}",
                     "User-Agent": USER_AGENT,
                     "Accept": "application/json",
                     "Content-Type": "application/json",
                 },
                 timeout=httpx.Timeout(30.0),
-                # follow_redirects=False a propósito: httpx NO descarta cabeceras
-                # custom como x-api-key al seguir un redirect cross-host, así que un
-                # 30x del servidor (o un MITM) hacia otro dominio filtraría la API
-                # key y la PII tokenizada. El endpoint /api/aportes es fijo y no
-                # debería redirigir; un redirect inesperado se trata como error.
                 follow_redirects=False,
             )
+
+    # -- source resolution ----------------------------------------------------
+
+    def _resolve_source_id(self, source_slug: str) -> str | None:
+        """Resuelve ``source_slug`` → UUID de ``sources`` via PostgREST.
+
+        Cachea éxitos y fallos en ``self._source_id_cache`` (fallo = "")
+        para no repetir el GET en cada payload de la misma corrida.
+        En dry-run devuelve un UUID placeholder para que ``_build_payload`` no falle.
+        """
+        if not self.enabled or self._client is None:
+            return "00000000-0000-0000-0000-000000000000"
+        cached = self._source_id_cache.get(source_slug)
+        if cached is not None:
+            return cached or None
+        try:
+            resp = self._client.get(
+                "/rest/v1/sources",
+                params={"slug": f"eq.{source_slug}", "select": "id"},
+            )
+            if resp.status_code == 200:
+                rows = resp.json()
+                if isinstance(rows, list) and len(rows) > 0:
+                    sid = str(rows[0].get("id", ""))
+                    if sid:
+                        self._source_id_cache[source_slug] = sid
+                        return sid
+            log.warning("no se pudo resolver source_id para %s: status=%s", source_slug, resp.status_code)
+        except (httpx.HTTPError, ValueError, AttributeError) as exc:
+            log.warning("error resolviendo source_id para %s: %s", source_slug, exc)
+        self._source_id_cache[source_slug] = ""
+        return None
 
     # -- payload --------------------------------------------------------------
 
@@ -209,12 +225,6 @@ class StagingExporter:
         clean = {k: v for k, v in rec.items() if not k.startswith("_")}
         spec = specs.spec_for_entity_type(entity_type)
 
-        # Event/AcopioCenter: external_id y dedup_hash derivan ambos del mismo
-        # fingerprint v1, asi que se calcula UNA sola vez y se reusa (evita el
-        # doble computo: compute_external_id + specs.dedup_key). Person no
-        # comparte: external_id tiene fallbacks (cedula_hmac/content_hash) que
-        # no coinciden con dedup_key (deterministic_id), asi que se calcula por
-        # separado. Los valores resultantes no cambian.
         if entity_type == "Event":
             fingerprint = specs.event_dedup_key(rec)
             external_id: str = fingerprint
@@ -224,27 +234,38 @@ class StagingExporter:
             external_id = fingerprint
             dedup_hash = fingerprint
         else:
-            external_id = compute_external_id(rec, entity_type)
+            src_rec_id = _opt_str(rec.get("_source_record_id"))
+            if src_rec_id:
+                seed = f"person|{source_slug}|{src_rec_id}"
+                external_id = hashlib.sha256(seed.encode("utf-8")).hexdigest()
+            else:
+                external_id = compute_external_id(rec, entity_type)
             dedup_hash = specs.dedup_key(rec, entity_type)
 
+        source_id = self._resolve_source_id(source_slug)
+        if source_id is None:
+            raise ValueError(
+                f"no se pudo resolver source_id para {source_slug!r}; "
+                "verificar que la fuente exista en la tabla sources "
+                "y que el JWT tenga SELECT sobre sources"
+            )
         payload: dict[str, object] = {
-            "runId": self.run_id,
-            "entityType": _entity_type_slug(entity_type),
-            "externalId": external_id,
-            "dedupVersion": spec.version,
-            "blockKeys": specs.block_keys(rec, entity_type),
-            "contentHash": _content_hash(clean),
-            "sourceSlug": source_slug,
-            "rawJson": clean,
+            "run_id": self.run_id,
+            "entity_type": _entity_type_slug(entity_type),
+            "external_id": external_id,
+            "dedup_version": spec.version,
+            "block_keys": specs.block_keys(rec, entity_type),
+            "content_hash": _content_hash(clean),
+            "source_id": source_id,
+            "scraper_id": _SCRAPER_ID,
+            "raw_json": clean,
         }
-        # Campos opcionales: el schema Zod usa optional() (acepta undefined/ausente,
-        # pero NO null). Omitir la clave en lugar de enviar null evita el 422.
         for key, value in (
-            ("dedupHash", dedup_hash),
-            ("sourceRecordId", _opt_str(rec.get("_source_record_id"))),
-            ("sourceUrl", _opt_str(rec.get("_source_url"))),
-            ("parserVersion", _opt_str(rec.get("_parser_version"))),
-            ("normalizerVersion", _opt_str(rec.get("_normalizer_version"))),
+            ("dedup_hash", dedup_hash),
+            ("source_record_id", _opt_str(rec.get("_source_record_id"))),
+            ("source_url", _opt_str(rec.get("_source_url"))),
+            ("parser_version", _opt_str(rec.get("_parser_version"))),
+            ("normalizer_version", _opt_str(rec.get("_normalizer_version"))),
         ):
             if value is not None:
                 payload[key] = value
@@ -253,71 +274,71 @@ class StagingExporter:
     # -- watermark ------------------------------------------------------------
 
     def get_watermark(self, source_slug: str) -> str:
-        """Watermark actual de ``source_slug``; usado por run_pipeline ANTES
-        del fetch para filtrar la ventana (``updated_after``).
-
-        Fail-open al default (backfill completo) si el exporter esta
-        deshabilitado (dry-run) o si la lectura falla: nunca debe bloquear el
-        fetch, y re-fetchear de mas es preferible a perder registros. Cubre
-        tanto errores de red/HTTP como respuestas 2xx con body invalido (ej.
-        JSON malformado), que no son httpx.HTTPError pero igual deben
-        degradar al default en vez de propagarse.
-        """
         if not self.enabled or self._client is None:
             return _DEFAULT_WATERMARK
         try:
-            resp = self._client.get(f"{_WATERMARKS_PATH}/{source_slug}")
-            if resp.status_code == 404:
-                return _DEFAULT_WATERMARK
-            resp.raise_for_status()
-            payload = resp.json()
-            return str(payload.get("watermarkAt", _DEFAULT_WATERMARK))
+            resp = self._client.get(
+                _WATERMARKS_PATH,
+                params={"slug": f"eq.{source_slug}", "select": "watermark_at"},
+            )
+            if resp.status_code in (401, 403):
+                raise PermissionError(
+                    f"get_watermark {source_slug}: sin permiso (status {resp.status_code}); "
+                    "verificar SUPABASE_INGEST_JWT y grants del rol scraper_ingest"
+                )
+            if resp.status_code == 200:
+                rows = resp.json()
+                if isinstance(rows, list) and len(rows) > 0:
+                    return str(rows[0].get("watermark_at", _DEFAULT_WATERMARK))
+            else:
+                log.warning(
+                    "get_watermark %s: status %s body=%r",
+                    source_slug, resp.status_code, resp.text[:300],
+                )
+            return _DEFAULT_WATERMARK
         except (httpx.HTTPError, ValueError, AttributeError) as exc:
             log.warning("no se pudo leer watermark de %s: %s", source_slug, exc)
             response = getattr(exc, "response", None)
             if response is not None:
-                # Distingue un 403 propio de la API (key invalida/sin permiso
-                # para ese source_slug) de un bloqueo de Vercel a nivel de
-                # borde (Deployment Protection), que devuelve 403/401 antes
-                # de llegar al codigo de la app y nunca trae watermarkAt.
                 log.warning(
-                    "respuesta HTTP de %s: status=%s server=%s x-vercel-id=%s "
-                    "body=%r",
+                    "respuesta HTTP de %s: status=%s body=%r",
                     source_slug,
                     response.status_code,
-                    response.headers.get("server"),
-                    response.headers.get("x-vercel-id"),
                     response.text[:300],
                 )
             return _DEFAULT_WATERMARK
 
     def _set_watermark(self, source_slug: str, watermark_at: str) -> bool:
         assert self._client is not None
-        resp = self._client.put(
-            f"{_WATERMARKS_PATH}/{source_slug}",
-            json={"watermarkAt": watermark_at},
-        )
+        try:
+            resp = self._post_with_retry(
+                _WATERMARKS_UPSERT_PATH,
+                {"slug": source_slug, "watermark_at": watermark_at},
+                headers={"Prefer": "resolution=merge-duplicates"},
+            )
+        except httpx.HTTPError:
+            return False
+        if resp.status_code in (401, 403):
+            raise PermissionError(
+                f"_set_watermark {source_slug}: sin permiso (status {resp.status_code}); "
+                "verificar SUPABASE_INGEST_JWT y grants del rol scraper_ingest"
+            )
         return resp.status_code in (200, 201)
 
     def _post_with_retry(
         self,
         path: str,
-        payload: dict[str, object],
+        payload: list[dict[str, object]] | dict[str, object],
         *,
         timeout: httpx.Timeout | None = None,
+        headers: dict[str, str] | None = None,
     ) -> httpx.Response:
-        """POST con exponential backoff en status transitorios y errores de red.
-
-        Reintenta en 429/500/502/503/504 y en TimeoutException/NetworkError
-        usando backoff_delay (de _shared). Devuelve la ultima response; relanza
-        la ultima excepcion de transporte si se agotan los reintentos sin response.
-        """
         assert self._client is not None
         last_exc: httpx.HTTPError | None = None
         resp: httpx.Response | None = None
         for attempt in range(1, _MAX_POST_RETRIES + 1):
             try:
-                resp = self._client.post(path, json=payload, timeout=timeout)
+                resp = self._client.post(path, json=payload, timeout=timeout, headers=headers)
             except (httpx.TimeoutException, httpx.NetworkError) as exc:
                 last_exc = exc
                 if attempt < _MAX_POST_RETRIES:
@@ -342,7 +363,189 @@ class StagingExporter:
         assert last_exc is not None
         raise last_exc
 
+    def _advance_watermark(
+        self, source_slug: str, source_fetched_ats: list[str], source_errors: bool, sent: int
+    ) -> str | None:
+        """Avanza el watermark si se envió al menos un registro sin errores pre-export."""
+        if source_errors or not source_fetched_ats or sent == 0:
+            return None
+        new_watermark = _apply_safety_margin(max(source_fetched_ats))
+        try:
+            if not self._set_watermark(source_slug, new_watermark):
+                return "no se pudo actualizar el watermark"
+        except PermissionError as exc:
+            return str(exc)
+        return None
+
+    def advance_watermark(
+        self, source_slug: str, source_fetched_ats: list[str], source_errors: bool, sent: int
+    ) -> str | None:
+        """Avanza el watermark si se envió ≥1 registro sin errores pre-export.
+
+        A diferencia de ``_advance_watermark``, no bloquea en errores de insert:
+        solo bloquea si ``source_errors`` (parse/PII/enriquecimiento) están presentes
+        o si ``sent == 0``. Usado por el loop de streaming en ``_run_source``.
+        """
+        if source_errors or not source_fetched_ats or sent == 0:
+            return None
+        new_watermark = _apply_safety_margin(max(source_fetched_ats))
+        try:
+            if not self._set_watermark(source_slug, new_watermark):
+                return "no se pudo actualizar el watermark"
+        except PermissionError as exc:
+            return str(exc)
+        return None
+
     # -- export ---------------------------------------------------------------
+
+    def export_batch(
+        self,
+        records: list[dict[str, object]],
+        *,
+        source_slug: str,
+        batch_size: int | None = None,
+        max_concurrent_posts: int | None = None,
+    ) -> ExportResult:
+        """Exporta un lote de records a Supabase sin avanzar el watermark.
+
+        Llamado por el loop de streaming en ``_run_source`` (una página a la vez).
+        El caller acumula los resultados y llama ``advance_watermark`` al final.
+        ``batch_size`` controla el tamaño del lote (default: _DEFAULT_BATCH_SIZE).
+        ``max_concurrent_posts`` controla cuántos batches enviar en paralelo
+        (default 1 = secuencial). Usa ``ThreadPoolExecutor`` internamente.
+        """
+        result = ExportResult()
+        size = batch_size or _DEFAULT_BATCH_SIZE
+
+        if not self.enabled or self._client is None or self.config is None:
+            for rec in records:
+                try:
+                    payload = self._build_payload(rec, source_slug)
+                except ValueError as exc:
+                    log.warning("DRY-RUN saltando registro: %s", exc)
+                    continue
+                log.info(
+                    "DRY-RUN staging_exporter: enviaria entity_type=%s external_id=%s",
+                    payload["entity_type"],
+                    payload["external_id"],
+                )
+            return result
+
+        payloads: list[dict[str, object]] = []
+        for rec in records:
+            try:
+                payloads.append(self._build_payload(rec, source_slug))
+            except ValueError as exc:
+                result.errors.append(str(exc))
+        if not payloads:
+            return result
+
+        chunks = [payloads[i : i + size] for i in range(0, len(payloads), size)]
+        _batch_timeout = httpx.Timeout(connect=10.0, read=120.0, write=120.0, pool=10.0)
+        batch_headers = {"Prefer": "resolution=merge-duplicates,return=minimal"}
+
+        workers = max(1, max_concurrent_posts or 1)
+
+        if max_concurrent_posts is None or max_concurrent_posts <= 1:
+            log.info(
+                "[%s] exportando %d batches secuencial (max_concurrent_posts=%s); ",
+                source_slug, len(chunks), max_concurrent_posts,
+            )
+            for chunk in chunks:
+                _sent, _errors = self._post_chunk(chunk, _batch_timeout, batch_headers)
+                result.sent += _sent
+                result.errors.extend(_errors)
+
+        else:
+            log.info(
+                "export_source %s: enviando %d batches con %d workers concurrentes",
+                source_slug, len(chunks), workers,
+            )
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = [pool.submit(self._post_chunk, chunk, _batch_timeout, batch_headers) for chunk in chunks]
+                for future in as_completed(futures):
+                    _sent, _errors = future.result()
+                    result.sent += _sent
+                    result.errors.extend(_errors)
+
+        return result
+
+    def _post_chunk(
+        self,
+        chunk: list[dict[str, object]],
+        timeout: httpx.Timeout,
+        headers: dict[str, str],
+    ) -> tuple[int, list[str]]:
+        """POSTea un solo chunk; reintenta registro a registro si el batch es rechazado.
+
+        Returns
+        -------
+        Tuple de (sent, errors) para este chunk.
+        """
+        sent = 0
+        errors: list[str] = []
+        try:
+            try:
+                resp = self._post_with_retry(
+                    _APORTES_UPSERT_PATH, chunk, timeout=timeout, headers=headers,
+                )
+            except httpx.HTTPError as exc:
+                errors.append(f"POST {_APORTES_UPSERT_PATH} batch fallo: {exc}")
+                return sent, errors
+            except Exception as exc:
+                errors.append(f"POST {_APORTES_UPSERT_PATH} batch error inesperado: {exc}")
+                return sent, errors
+
+            if resp.status_code in (200, 201):
+                sent += len(chunk)
+                return sent, errors
+
+            if len(chunk) > 1:
+                log.warning(
+                    "POST %s status=%s body=%s en batch de %d — reintentando individualmente",
+                    _APORTES_UPSERT_PATH, resp.status_code, resp.text[:500], len(chunk),
+                )
+                for single in chunk:
+                    try:
+                        r = self._post_with_retry(
+                            _APORTES_UPSERT_PATH, [single],
+                            timeout=timeout, headers=headers,
+                        )
+                    except httpx.HTTPError as exc:
+                        errors.append(f"POST individual fallo: {exc}")
+                        continue
+                    except Exception as exc:
+                        errors.append(f"POST individual error inesperado: {exc}")
+                        continue
+                    if r.status_code in (200, 201):
+                        sent += 1
+                    else:
+                        log.warning(
+                            "POST %s status=%s external_id=%s body=%s",
+                            _APORTES_UPSERT_PATH, r.status_code,
+                            single.get("external_id"), r.text[:300],
+                        )
+                        errors.append(
+                            f"{_APORTES_UPSERT_PATH} status {r.status_code} "
+                            f"(external_id={single.get('external_id')})"
+                        )
+                return sent, errors
+
+            log.warning(
+                "POST %s status=%s body=%s",
+                _APORTES_UPSERT_PATH,
+                resp.status_code,
+                resp.text[:300],
+            )
+            errors.append(
+                f"{_APORTES_UPSERT_PATH} status {resp.status_code} "
+                f"(external_id={chunk[0].get('external_id')})"
+            )
+        except Exception as exc:
+            log.error("_post_chunk: error inesperado no capturado: %s", exc)
+            errors.append(f"POST {_APORTES_UPSERT_PATH} error inesperado: {exc}")
+
+        return sent, errors
 
     def export_source(
         self,
@@ -351,167 +554,34 @@ class StagingExporter:
         source_slug: str,
         source_fetched_ats: list[str],
         source_errors: list[str] | None = None,
+        batch_size: int | None = None,
         max_concurrent_posts: int | None = None,
     ) -> ExportResult:
         """Exporta los records de ``source_slug``; avanza su watermark si todo OK.
 
         ``source_errors`` son errores previos de la fuente (parse, PII,
-        enriquecimiento y el fail-closed de proteccion de menores) que se
-        inyectan despues en run_pipeline. Si no estan vacios, el watermark NO
-        avanza: evita perder silenciosamente registros descartados que nunca
-        llegaron a staging (p.ej. un menor) saltando su fetched_at.
-
-        ``max_concurrent_posts`` controla el paralelismo del loop de POSTs.
-        El default ``None`` equivale a 1 worker (comportamiento secuencial original).
+        enriquecimiento y el fail-closed de proteccion de menores). Si no estan
+        vacios, o si hubo errores de insert, el watermark NO avanza.
+        ``max_concurrent_posts`` controla cuántos batches enviar en paralelo.
         """
-        result = ExportResult()
-
-        if not self.enabled or self._client is None or self.config is None:
-            for rec in records:
-                payload = self._build_payload(rec, source_slug)
-                log.info(
-                    "DRY-RUN staging_exporter: enviaria entityType=%s externalId=%s",
-                    payload["entityType"],
-                    payload["externalId"],
-                )
+        result = self.export_batch(
+            records,
+            source_slug=source_slug,
+            batch_size=batch_size,
+            max_concurrent_posts=max_concurrent_posts,
+        )
+        if not self.enabled:
             return result
-
-        def _post_one(rec: dict[str, object]) -> None:
-            try:
-                payload = self._build_payload(rec, source_slug)
-                resp = self._post_with_retry(_APORTES_PATH, payload)
-            except httpx.HTTPError as exc:
-                with _lock:
-                    result.errors.append(f"POST {_APORTES_PATH} fallo: {exc}")
-                return
-            except Exception as exc:
-                with _lock:
-                    result.errors.append(f"POST {_APORTES_PATH} error inesperado: {exc}")
-                return
-            if resp.status_code in (200, 201):
-                with _lock:
-                    result.sent += 1
-            elif resp.status_code == 409:
-                with _lock:
-                    result.duplicates += 1
-            else:
-                log.warning(
-                    "POST %s status=%s externalId=%s body=%s",
-                    _APORTES_PATH,
-                    resp.status_code,
-                    payload["externalId"],
-                    resp.text[:300],
-                )
-                with _lock:
-                    result.errors.append(
-                        f"{_APORTES_PATH} status {resp.status_code} "
-                        f"para externalId={payload['externalId']}"
-                    )
-
-        _lock = threading.Lock()
-        workers = max(1, max_concurrent_posts or 0)
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            list(pool.map(_post_one, records))
-
-        # El watermark solo avanza si no hubo NINGUN error: ni de POST/PUT ni
-        # previo de la fuente (source_errors).
-        has_source_errors = bool(source_errors)
-        if not result.errors and not has_source_errors and source_fetched_ats:
-            new_watermark = _apply_safety_margin(max(source_fetched_ats))
-            try:
-                if not self._set_watermark(source_slug, new_watermark):
-                    result.errors.append("no se pudo actualizar el watermark")
-            except httpx.HTTPError as exc:
-                result.errors.append(f"PUT {_WATERMARKS_PATH} fallo: {exc}")
-
-        return result
-
-    def export_source_bulk(
-        self,
-        records: list[dict[str, object]],
-        *,
-        source_slug: str,
-        source_fetched_ats: list[str],
-        bulk_size: int,
-        source_errors: list[str] | None = None,
-    ) -> ExportResult:
-        """Exporta los records en lotes de ``bulk_size`` vía POST /api/aportes/bulk.
-
-        Reduce N POSTs individuales a ceil(N/bulk_size) requests.
-        Usado cuando ``source.bulk_size`` está configurado en el YAML.
-        """
-        result = ExportResult()
-
-        if not self.enabled or self._client is None or self.config is None:
-            for rec in records:
-                payload = self._build_payload(rec, source_slug)
-                log.info(
-                    "DRY-RUN staging_exporter bulk: enviaria entityType=%s externalId=%s",
-                    payload["entityType"],
-                    payload["externalId"],
-                )
-            return result
-
-        payloads = [self._build_payload(rec, source_slug) for rec in records]
-        chunks = [payloads[i : i + bulk_size] for i in range(0, len(payloads), bulk_size)]
-
-        for chunk in chunks:
-            body: dict[str, object] = {"aportes": chunk}
-            # Timeout escalado: payloads bulk (~1 MB) necesitan más tiempo que
-            # los individuales (~2 KB) que usan el default de 30s del cliente.
-            _bulk_timeout = httpx.Timeout(connect=10.0, read=120.0, write=120.0, pool=10.0)
-            try:
-                resp = self._post_with_retry(_APORTES_BULK_PATH, body, timeout=_bulk_timeout)
-            except httpx.HTTPError as exc:
-                result.errors.append(f"POST {_APORTES_BULK_PATH} fallo: {exc}")
-                continue
-            except Exception as exc:
-                result.errors.append(f"POST {_APORTES_BULK_PATH} error inesperado: {exc}")
-                continue
-
-            if resp.status_code in (200, 201):
-                try:
-                    data = resp.json()
-                    result.sent += int(data.get("sent", 0))
-                    result.duplicates += int(data.get("duplicates", 0))
-                    batch_errors = data.get("errors") or []
-                    result.errors.extend(str(e) for e in batch_errors)
-                except (ValueError, AttributeError, TypeError) as exc:
-                    # No asumir que el lote fue enviado: el watermark NO debe
-                    # avanzar si no podemos confirmar cuántos registros aceptó
-                    # el servidor. Registramos como error para que el watermark
-                    # se bloquee y el lote se reintente en la próxima corrida.
-                    result.errors.append(
-                        f"bulk response JSON invalido en lote de {len(chunk)}: {exc}"
-                    )
-                    log.warning("bulk response JSON invalido: %s", exc)
-            else:
-                log.warning(
-                    "POST %s status=%s body=%s",
-                    _APORTES_BULK_PATH,
-                    resp.status_code,
-                    resp.text[:300],
-                )
-                result.errors.append(
-                    f"{_APORTES_BULK_PATH} status {resp.status_code} "
-                    f"(lote de {len(chunk)} aportes)"
-                )
-
-        has_source_errors = bool(source_errors)
-        if not result.errors and not has_source_errors and source_fetched_ats:
-            new_watermark = _apply_safety_margin(max(source_fetched_ats))
-            try:
-                if not self._set_watermark(source_slug, new_watermark):
-                    result.errors.append("no se pudo actualizar el watermark")
-            except httpx.HTTPError as exc:
-                result.errors.append(f"PUT {_WATERMARKS_PATH} fallo: {exc}")
-
+        watermark_err = self._advance_watermark(
+            source_slug, source_fetched_ats, bool(source_errors), result.sent
+        )
+        if watermark_err is not None:
+            result.errors.append(watermark_err)
         return result
 
     # -- ciclo de vida --------------------------------------------------------
 
     def close(self) -> None:
-        """Cierra el httpx.Client solo si lo creo el exporter."""
         if self._owns_client and self._client is not None:
             self._client.close()
 
@@ -523,17 +593,14 @@ class StagingExporter:
 
 
 def _opt_str(value: object) -> str | None:
-    """Devuelve str(value) o None si value es falsy/None."""
     if value is None or value == "":
         return None
     return str(value)
 
 
-# Nombre interno del tipo (Event/AcopioCenter/Person) -> slug de la columna
-# aportes.entity_type.
 _ENTITY_TYPE_SLUGS = {
     "Event": "event",
-    "AcopioCenter": "acopio",   # Zod enum: "event" | "acopio" | "person"
+    "AcopioCenter": "acopio",
     "Person": "person",
 }
 

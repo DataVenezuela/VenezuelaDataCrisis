@@ -3,8 +3,8 @@
 La documentación en `docs/` describe el diseño; este archivo describe **lo que
 es verdad hoy**, incluyendo brechas entre el diseño y el código.
 
-Última actualización: 30 de junio de 2026, tras el primer dump real a
-producción.
+Última actualización: 3 de julio de 2026, tras el fix de max_concurrent_posts
+(#212).
 
 ---
 
@@ -91,7 +91,7 @@ Tests 100% offline, sin red real:
   `test_run_pipeline.py:_StagingTransport`).
 - Adapters/parsers se mockean con `unittest.mock.patch` sobre
   `_get_adapter`/`_get_parser`.
-- `patch.dict(os.environ, {"STAGING_API_KEY": "...", ...})` para
+- `patch.dict(os.environ, {"SUPABASE_URL": "...", "SUPABASE_PUBLISHABLE_KEY": "..."})` para
   credenciales.
 - Fixtures sintéticos en `scrapers/tests/fixtures/`. Nunca datos reales.
 - Sin `PII_SALT`/`PII_HMAC_SECRET` en CI: `cedula_hmac` queda `None`,
@@ -130,26 +130,36 @@ tiene `timeout-minutes: 15` — insuficiente para ese volumen.
 **Si te piden resolver esto:** el fix son dos cosas separadas, no confundirlas:
 1. Agregar `page_size` a `SourceConfig` y pasarlo en `_get_adapter` (reduce
    el número de fetches HTTP).
-2. El cuello de botella más grande es el **POST**, no el fetch — el exporter
-   manda un POST individual por registro a `/api/aportes`. Subir `page_size`
-   no resuelve eso. Cualquier solución de paralelismo en el exporter necesita
-   revisión cuidadosa porque toca el watermark: `export_source` solo avanza
-   el watermark si *todos* los POST de la fuente terminaron en 200/201 —
-   paralelizar sin preservar esa garantía rompe la semántica de "at-least-once"
-   delivery.
+2. El cuello de botella más grande solía ser el **POST**, pero desde #212 el
+   exporter envía batches concurrentemente si `max_concurrent_posts > 1`
+   en el YAML de la fuente. Usa `ThreadPoolExecutor` internamente y preserva
+   la semántica at-least-once (el watermark solo avanza si todos los batches
+   terminaron en 200/201). Subir `page_size` ya no es prioritario.
 
 ### Variables de entorno reales — no confiar en README.md
 
 El README raíz puede tener referencias desactualizadas a
-`DATAVZLA_API_KEY`/`DATAVZLA_BASE_URL`. **Las variables reales que lee
-`StagingConfig.from_env()` son:**
-- `STAGING_API_KEY` — secret de GitHub Actions
-- `STAGING_BASE_URL` — variable de GitHub Actions (URL pública, no secret)
+`DATAVZLA_API_KEY`/`DATAVZLA_BASE_URL`/`STAGING_API_KEY`/`STAGING_BASE_URL`.
+**Las variables reales que lee `StagingConfig.from_env()` son:**
+- `SUPABASE_URL` — variable de GitHub Actions (URL pública, no secret)
+- `SUPABASE_PUBLISHABLE_KEY` — secret de GitHub Actions (pública por diseño, para header `apikey`)
+- `SUPABASE_INGEST_JWT` — secret de GitHub Actions (JWT firmado con rol `scraper_ingest`)
 
 `STAGING_SOURCE_SLUG` **no existe como variable consumida por el código.**
 El `source_slug` siempre sale de `source.id` en `run_pipeline.py`, nunca de
 una env var. Si ves esa variable referenciada en algún workflow o doc viejo,
 es dead code — no la recrees.
+
+La migración desde `STAGING_*` a `SUPABASE_*` se hizo en el PR del issue #200.
+Si alguna env var antigua aparece en docs o workflows, actualizarla a la nueva.
+
+Auth via custom JWT firmado con `role: scraper_ingest` (`SUPABASE_INGEST_JWT`)
++ publishable key en header `apikey` (`SUPABASE_PUBLISHABLE_KEY`).
+
+El rol `scraper_ingest` se crea con `NOLOGIN NOINHERIT NOBYPASSRLS` y se
+concede a `authenticator` para que PostgREST pueda hacer SET ROLE.
+Además necesita RLS policies en `aportes` y `source_watermarks` del lado
+de dataVenezuela (issue cross-repo).
 
 `PII_SALT` y `PII_HMAC_SECRET` se cargan del **mismo único secret** de
 GitHub Actions (`secrets.PII_HMAC_SECRET`, ver `ingest.yml:82-83`). No existe
@@ -163,32 +173,14 @@ esperado, el pipeline no falla.
 No leerlo buscando configuración. La config de staging vive en
 `StagingConfig.from_env()` en `scrapers/exporters/staging_exporter.py`.
 
-### Infraestructura: Supabase y Vercel son proyectos separados
+### Infraestructura: Supabase es el destino directo (Issue #200)
 
-`dataVenezuela` corre en Vercel; la BD vive en Supabase. **Son
-independientes** — mover el proyecto de Supabase a otra organización no
-actualiza automáticamente las env vars de Vercel. Si algo que debería
-funcionar (según lo que ves en Supabase) sigue fallando con 403 o datos que
-no aparecen, sospechá primero de un mismatch entre lo que Vercel tiene
-configurado (`SUPABASE_URL`, `PARTNER_API_SALT`) y el proyecto de Supabase
-actual.
+El scraper escribe directo a Supabase via PostgREST, sin pasar por Vercel.
+`dataVenezuela` (Vercel) solo sirve el API público de lectura/búsqueda.
 
-`PARTNER_API_SALT` vive solo en las env vars de Vercel — no está en ningún
-repo ni en Supabase. El hash de las API keys de scraper
-(`partner_api_keys.key_hash`) se calcula como
-`sha256(api_key + PARTNER_API_SALT)` (ver `dataVenezuela/src/lib/api-keys.ts`).
-Si necesitás rotar o generar una key nueva, necesitás ese salt — no se puede
-calcular sin acceso a Vercel.
-
-### `owner_id` en `sources` de dataVenezuela
-
-La tabla `sources` tiene `owner_id` → FK a `profiles.id`. Si una fuente se
-crea por SQL directo sin setear `owner_id`, **tanto
-`GET /api/source-watermarks/{slug}` como `POST /api/aportes` devuelven 403**
-para esa fuente, sin importar que la `STAGING_API_KEY` sea válida. Esto no
-está documentado en ningún lado de `dataVenezuela` — confírmalo con un
-query directo a `sources` y `partner_api_keys` antes de asumir que el
-problema es del lado del pipeline.
+`PARTNER_API_SALT` y `sources.owner_id` ya no afectan el path de ingest
+porque el scraper usa un JWT firmado con `role: scraper_ingest`, no las
+API keys de `partner_api_keys`.
 
 ### `ruff check .` exige ruff==0.15.20 (pin en ci.yml)
 

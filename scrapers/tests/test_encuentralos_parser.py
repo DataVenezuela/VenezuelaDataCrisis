@@ -202,6 +202,22 @@ class TestFieldMapping:
         p = self._first()
         assert not hasattr(p, "ultima_vez")
 
+    def test_source_record_id_set_from_api_id(self) -> None:
+        """source_record_id debe ser el UUID nativo de la API."""
+        fixture = _load_fixture()
+        raw = _make_raw(fixture)
+        persons = _parser().parse(raw)
+        assert persons[0].source_record_id == _FIXTURE_ID_0
+        assert persons[1].source_record_id == _FIXTURE_ID_1
+
+    def test_source_record_id_none_when_no_id(self) -> None:
+        """source_record_id debe ser None si el registro no tiene id."""
+        records = [_new_schema_record()]
+        del records[0]["id"]
+        raw = _make_raw({"items": records, "total": 1})
+        p = _parser().parse(raw)[0]
+        assert p.source_record_id is None
+
 
 # ---------------------------------------------------------------------------
 # Tests: Status enum

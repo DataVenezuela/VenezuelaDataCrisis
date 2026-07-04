@@ -179,7 +179,7 @@ gh pr create --title "<título claro>" --body "$(cat <<'EOF'
 ...
 
 ## Por qué era necesario
-Resuelve #<n>.
+Closes #<n>.
 
 ## Cómo se prueba
 ...

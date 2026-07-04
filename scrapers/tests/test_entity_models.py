@@ -212,6 +212,7 @@ def test_serialization_round_trip():
         "nota",
         "foto",
         "deterministic_id",
+        "source_record_id",
         "fuente",
     }
     assert Person.model_validate(p.model_dump()) == p

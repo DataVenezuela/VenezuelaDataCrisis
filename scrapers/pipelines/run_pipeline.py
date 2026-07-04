@@ -14,7 +14,7 @@ Flujo por fuente habilitada
 5. **Score**     — ``confidence_score`` sobre cada entidad
 6. **Minor protection** — ``protect_minor_fields`` reduce campos identificables
                    cuando is_minor=True (foto, cedula_masked, ubicacion exacta)
-7. **Staging**   — ``StagingExporter`` hace POST a /api/aportes de dataVenezuela
+7. **Staging**   — ``StagingExporter`` hace upsert directo a Supabase (PostgREST)
 
 Cuarentena (Issue #88)
 ----------------------
@@ -344,29 +344,54 @@ class _LocalFileAdapter:
 # Etapas del pipeline
 # ---------------------------------------------------------------------------
 
-def _fetch_pages(adapter: Any, source: SourceConfig, updated_after: str, limit: int | None = None) -> list[RawContent]:
-    """Llama a fetch_all del adapter y recopila todas las paginas.
+def _strip_ms(ts: str) -> str:
+    """'2026-07-03T12:45:07.153Z' → '2026-07-03T12:45:07Z' (formato watermark sin ms)."""
+    dot = ts.find(".")
+    return ts[:dot] + "Z" if dot != -1 else ts
+
+
+
+def _fetch_pages(adapter: Any, source: SourceConfig, updated_after: str):
+    """Genera las páginas del adapter una a una (streaming).
 
     ``updated_after`` es el watermark actual de la fuente; se pasa como query
     param a todos los adapters (fetch_all acepta **kwargs en todos). Los que
     soportan filtrado server-side (ApiAdapter) lo incluyen en la request; el
     resto lo ignora silenciosamente.
+
+    Si ``source.full_scan`` es True, se omite ``updated_after`` — la API
+    upstream no lo soporta y devolvería el dataset completo de todas formas.
+    El dedup queda delegado al upsert por external_id en staging.
+
+    Si ``source.cursor_field`` está definido, hace early-stop en cuanto
+    ``min(cursor_field de la página)`` ≤ ``updated_after``: todos los registros
+    siguientes son anteriores al watermark y ya están en staging.
     """
     url = source.url
-    pages: list[RawContent] = []
-    params = {"updated_after": updated_after}
-    kwargs = {"limit": limit} if limit is not None else {}
-
-    # ApiAdapter expone default_path separado de base_url
-    if hasattr(adapter, "default_path") and adapter.default_path:
-        path = adapter.default_path
-        for page in adapter.fetch_all(path, params=params, **kwargs):
-            pages.append(page)
+    if source.full_scan:
+        log.info("%s: full_scan=True — omitiendo updated_after en el fetch", source.id)
+        params: dict[str, str] = {}
     else:
-        for page in adapter.fetch_all(url, params=params, **kwargs):
-            pages.append(page)
+        params = {"updated_after": updated_after}
 
-    return pages
+    path = adapter.default_path if (hasattr(adapter, "default_path") and adapter.default_path) else url
+    for page in adapter.fetch_all(path, params=params):
+        yield page
+
+        if source.cursor_field:
+            items = (page.get("raw_content") or {}).get("items") or []
+            if items:
+                cursors = [
+                    _strip_ms(str(item[source.cursor_field]))
+                    for item in items
+                    if item.get(source.cursor_field)
+                ]
+                if cursors and min(cursors) <= updated_after:
+                    log.info(
+                        "%s: early-stop cursor — min(%s)=%s ≤ watermark=%s (página %s)",
+                        source.id, source.cursor_field, min(cursors), updated_after, page.get("page"),
+                    )
+                    break
 
 
 def _parse_pages(
@@ -453,6 +478,10 @@ def _apply_pii(
                 d = _strip_raw_pii(d)
             # Preservar el tipo para el router de export
             d["_entity_type"] = type(entity).__name__
+            # _source_record_id (prefijo _) es el meta-campo que _build_payload
+            # lee para basar external_id en el UUID nativo; clean lo excluye de raw_json.
+            if d.get("source_record_id"):
+                d["_source_record_id"] = d["source_record_id"]
             result.append(d)
         except Exception as exc:
             msg = f"Error en etapa PII para {type(entity).__name__}: {exc}"
@@ -682,106 +711,108 @@ def _run_source(
         all_errors.append(f"[{source.id}] {msg}")
         try:
             watermark_at = exporter.get_watermark(source.id)
-            pages = _fetch_pages(adapter, source, watermark_at)
+            for raw in _fetch_pages(adapter, source, watermark_at):
+                quarantine_batch.append(
+                    _quarantine_from_text(
+                        source=source,
+                        text=_to_text(raw.get("raw_content")),
+                        reason_code="parser_unavailable",
+                        risk_level="medium",
+                        detail=msg,
+                        source_url=raw.get("source_url"),
+                    )
+                )
         except Exception as exc:
             all_errors.append(
                 f"[{source.id}] fetch fallo al intentar cuarentenar sin parser: {exc}"
             )
-            pages = []
         finally:
             if hasattr(adapter, "close"):
                 try:
                     adapter.close()
-                except Exception:
-                    pass
-        for raw in pages:
-            quarantine_batch.append(
-                _quarantine_from_text(
-                    source=source,
-                    text=_to_text(raw.get("raw_content")),
-                    reason_code="parser_unavailable",
-                    risk_level="medium",
-                    detail=msg,
-                    source_url=raw.get("source_url"),
-                )
-            )
+                except Exception as exc:
+                    log.warning("adapter.close() fallo: %s", exc)
         return ExportResult(errors=[msg])
 
-    # 3. Fetch
-    # El watermark se lee ANTES del fetch para acotar la ventana
-    # (updated_after); en la primera corrida de la fuente (sin watermark
-    # previo) vale "1970-01-01T00:00:00Z" y provoca backfill completo.
-    # get_watermark() va DENTRO del try/finally: aunque hace fail-open en
-    # httpx.HTTPError, un fallo no contemplado (ej. JSON malformado) no debe
-    # dejar el adapter sin cerrar (browser, conexiones) ni saltarse el close().
+    # 3-9. Fetch → parse → PII → enriquecimiento → score → menores → export por página
+    # (streaming: el adapter genera páginas una a una; cada página se exporta
+    # inmediatamente en lugar de acumular todo en memoria antes del primer POST)
+
+    combined = ExportResult()
+    source_fetched_ats: list[str] = []
+    pages_seen = 0
+    entities_seen = 0
+
     try:
         watermark_at = exporter.get_watermark(source.id)
-        pages = _fetch_pages(adapter, source, watermark_at)
+        for page in _fetch_pages(adapter, source, watermark_at):
+            pages_seen += 1
+            if source.cursor_field:
+                page_cursors = [
+                    _strip_ms(str(item[source.cursor_field]))
+                    for item in ((page.get("raw_content") or {}).get("items") or [])
+                    if item.get(source.cursor_field)
+                ]
+                if page_cursors:
+                    source_fetched_ats.append(max(page_cursors))
+            elif page.get("fetched_at"):
+                source_fetched_ats.append(str(page.get("fetched_at")))
+
+            page_entities, page_errors = _parse_pages(parser, [page], None, source, quarantine_batch)
+            source_errors.extend(page_errors)
+
+            if limit is not None:
+                page_entities = page_entities[: limit - entities_seen]
+
+            entities_seen += len(page_entities)
+
+            if page_entities:
+                records = _apply_pii(page_entities, source_errors, source, quarantine_batch)
+                records = _enrich_records(records, source_errors)
+                records = _apply_confidence(records, source_errors)
+                records = _apply_minor_protection(records, source_errors, source, quarantine_batch)
+
+                batch_result = exporter.export_batch(
+                    records, source_slug=source.id, batch_size=source.bulk_size,
+                    max_concurrent_posts=source.max_concurrent_posts,
+                )
+                combined.sent += batch_result.sent
+                combined.errors.extend(batch_result.errors)
+
+            if limit is not None and entities_seen >= limit:
+                break
+
     finally:
         if hasattr(adapter, "close"):
             try:
                 adapter.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                log.warning("adapter.close() fallo en %s: %s", source.id, exc)
 
-    log.info("%s: %d pagina(s) descargadas", source.id, len(pages))
+    log.info("%s: %d página(s), %d entidades", source.id, pages_seen, entities_seen)
+    if entities_seen == 0 and pages_seen > 0:
+        log.warning("%s: no se parsearon entidades de %d página(s)", source.id, pages_seen)
 
-    fetched_ats = [str(p.get("fetched_at")) for p in pages if p.get("fetched_at")]
-
-    # 4. Parse
-    entities, parse_errors = _parse_pages(parser, pages, limit, source, quarantine_batch)
-    source_errors.extend(parse_errors)
-    log.info("%s: %d entidades parseadas", source.id, len(entities))
-    
-    if len(entities) ==  0 and len(pages) > 0: 
-        log.warning("%s: No se parsearon entidades de %d paginas descargadas", source.id, len(pages))
-
-    if not entities:
+    if entities_seen == 0:
         all_errors.extend([f"[{source.id}] {e}" for e in source_errors])
         return ExportResult(errors=list(source_errors))
 
-    # 5. PII
-    records = _apply_pii(entities, source_errors, source, quarantine_batch)
+    # Watermark una sola vez al final: avanza si sent>0 y sin errores pre-export
+    wm_err = exporter.advance_watermark(
+        source.id, source_fetched_ats, bool(source_errors), combined.sent
+    )
+    if wm_err is not None:
+        combined.errors.append(wm_err)
 
-    # 6. Enriquecimiento (deterministic_id + normalizacion)
-    records = _enrich_records(records, source_errors)
-
-    # 7. Confidence score
-    records = _apply_confidence(records, source_errors)
-
-    # 8. Proteccion de menores (is_minor=True reduce campos identificables)
-    records = _apply_minor_protection(records, source_errors, source, quarantine_batch)
-
-    # 9. Staging export
-    # source_errors se pasa para que el watermark NO avance si hubo errores
-    # previos de la fuente (parse/PII/enriquecimiento/proteccion de menores).
-    if source.bulk_size is not None:
-        result = exporter.export_source_bulk(
-            records,
-            source_slug=source.id,
-            source_fetched_ats=fetched_ats,
-            source_errors=source_errors,
-            bulk_size=source.bulk_size,
-        )
-    else:
-        result = exporter.export_source(
-            records,
-            source_slug=source.id,
-            source_fetched_ats=fetched_ats,
-            source_errors=source_errors,
-            max_concurrent_posts=source.max_concurrent_posts,
-        )
-    # Arrastrar los errores previos de la fuente al frente del resultado.
-    result.errors[0:0] = source_errors
-
-    all_errors.extend([f"[{source.id}] {e}" for e in result.errors])
+    combined.errors[0:0] = source_errors
+    all_errors.extend([f"[{source.id}] {e}" for e in combined.errors])
     log.info(
         "%s: %d enviados, %d duplicados, %d errores",
-        source.id, result.sent, result.duplicates, len(result.errors),
+        source.id, combined.sent, combined.duplicates, len(combined.errors),
     )
-    for err in result.errors:
+    for err in combined.errors:
         log.warning("[%s] %s", source.id, err)
-    return result
+    return combined
 
 
 def _process_source_safe(
@@ -831,8 +862,10 @@ def run_pipeline(
         Ruta al YAML de configuracion de fuentes.
     output_dir:
         Reservado para artefactos/logs. El export a JSONL desaparecio; el
-        destino ahora es la tabla aportes via /api/aportes. Se conserva en la
-        firma por compatibilidad con la CLI.
+        destino ahora es la tabla aportes via PostgREST directo
+        (/rest/v1/aportes, StagingExporter, no /api/aportes de Vercel,
+        deprecado para ingest desde #200/#203). Se conserva en la firma por
+        compatibilidad con la CLI.
     limit:
         Numero maximo de entidades por fuente (None = sin limite).
     max_workers:
@@ -918,8 +951,8 @@ def run_pipeline(
                     staging_errors += len(result.errors)
                     sources_processed += int(ok)
                     quarantine_batch.extend(thread_quarantine_batch)
-    
-     
+
+
     finally:
         if quarantine_batch:
             qres = quarantine_exporter.quarantine_many(quarantine_batch)
@@ -928,10 +961,14 @@ def run_pipeline(
             all_errors.extend(
                 f"cuarentena: {e}" for e in qres.errors
             )
+            # Agregado de TODAS las fuentes de esta corrida, no de una sola:
+            # `source` (variable de loop) no existe acá en la rama paralela
+            # (max_workers>1), donde viene de un list comprehension con su
+            # propio scope.
             log.info(
-                "%s: %d a cuarentena (%d duplicados, %d errores)",
-                source.id, qres.sent, qres.duplicates, len(qres.errors),
-            ) 
+                "cuarentena (todas las fuentes): %d enviados (%d duplicados, %d errores)",
+                qres.sent, qres.duplicates, len(qres.errors),
+            )
 
         exporter.close()
         quarantine_exporter.close()
