@@ -394,6 +394,97 @@ class TestStagingSend:
 
 
 # ---------------------------------------------------------------------------
+# Tests: trazabilidad (issue #236)
+# ---------------------------------------------------------------------------
+
+class TestTrazabilidadMetaFields:
+    """El pipeline debe poblar source_url/parser_version/normalizer_version.
+
+    Antes de #236 el exporter leia estos meta-campos pero el pipeline nunca los
+    asignaba (cableado muerto): las columnas siempre viajaban ausentes.
+    """
+
+    _PAGE_URL = "https://encuentralos.tecnosoft.dev/api/personas?limit=20&offset=0"
+
+    def _run(self, tmp_path: Path, demo_config: Path) -> _StagingTransport:
+        transport = _StagingTransport()
+        with patch.dict(os.environ, _SUPABASE_ENV, clear=False), _patch_exporter(transport), patch(
+            "scrapers.pipelines.run_pipeline._get_adapter", return_value=_mock_adapter()
+        ), patch(
+            "scrapers.pipelines.run_pipeline._get_parser", return_value=_mock_parser()
+        ):
+            run_pipeline(config_path=demo_config, output_dir=tmp_path / "out")
+        return transport
+
+    def test_source_url_is_page_url(self, tmp_path: Path, demo_config: Path) -> None:
+        transport = self._run(tmp_path, demo_config)
+        posts = [p for batch in transport.batch_posts for p in batch]
+        assert posts
+        for post in posts:
+            assert post["source_url"] == self._PAGE_URL
+
+    def test_parser_and_normalizer_versions_are_release(
+        self, tmp_path: Path, demo_config: Path
+    ) -> None:
+        transport = self._run(tmp_path, demo_config)
+        posts = [p for batch in transport.batch_posts for p in batch]
+        assert posts
+        for post in posts:
+            assert post["parser_version"] == rp._PIPELINE_VERSION
+            assert post["normalizer_version"] == rp._PIPELINE_VERSION
+
+    def test_meta_fields_not_leaked_into_raw_json(
+        self, tmp_path: Path, demo_config: Path
+    ) -> None:
+        transport = self._run(tmp_path, demo_config)
+        for batch in transport.batch_posts:
+            for post in batch:
+                for key in ("_source_url", "_parser_version", "_normalizer_version"):
+                    assert key not in post["raw_json"]
+
+
+class TestApplyPiiSourceUrl:
+    """Unit: _apply_pii propaga source_url (o lo omite si es None)."""
+
+    def _person(self) -> Person:
+        return Person(
+            full_name="JUAN DEMO",
+            event_id=_EVENT_ID,
+            status="missing",
+            fuente="demo",
+        )
+
+    def _source(self) -> SourceConfig:
+        return SourceConfig(
+            id="demo_src",
+            name="Demo",
+            type="api_json",
+            enabled=True,
+            trust_tier="C",
+            refresh_minutes=30,
+            url="https://demo.example/api",
+            parser_asignado="encuentralos",
+        )
+
+    def test_source_url_set_when_provided(self) -> None:
+        recs = rp._apply_pii(
+            [self._person()], [], self._source(), [], source_url="https://p/1"
+        )
+        assert recs[0]["_source_url"] == "https://p/1"
+        assert recs[0]["_parser_version"] == rp._PIPELINE_VERSION
+
+    def test_source_url_omitted_when_none(self) -> None:
+        recs = rp._apply_pii([self._person()], [], self._source(), [])
+        assert "_source_url" not in recs[0]
+        assert recs[0]["_parser_version"] == rp._PIPELINE_VERSION
+
+    def test_enrich_sets_normalizer_version(self) -> None:
+        recs = rp._apply_pii([self._person()], [], self._source(), [])
+        enriched = rp._enrich_records(recs, [])
+        assert enriched[0]["_normalizer_version"] == rp._PIPELINE_VERSION
+
+
+# ---------------------------------------------------------------------------
 # Tests: idempotencia
 # ---------------------------------------------------------------------------
 

@@ -57,6 +57,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from scrapers import __version__ as _PIPELINE_VERSION
 from scrapers.adapters._shared import now_utc, sha256_hex
 from scrapers.adapters.base import RawContent
 from scrapers.exporters.quarantine_exporter import (
@@ -451,9 +452,15 @@ def _apply_pii(
     errors: list[str],
     source: SourceConfig,
     quarantine_batch: list[QuarantineRecord],
+    source_url: str | None = None,
 ) -> list[dict]:
     """
     Convierte entidades tipadas a dicts y aplica tokenize_pii_fields.
+
+    ``source_url`` es la URL real de la pagina de la que salieron estas
+    entidades (el streaming procesa una pagina por llamada, asi que todas las
+    entidades comparten la misma). Se propaga como meta-campo ``_source_url``
+    para la trazabilidad del exporter (issue #236).
 
     Los campos cedula_hmac/cedula_masked ya vienen del parser concreto
     (p. ej. EncuentralosParser).  tokenize_pii_fields actua como segunda
@@ -478,6 +485,11 @@ def _apply_pii(
                 d = _strip_raw_pii(d)
             # Preservar el tipo para el router de export
             d["_entity_type"] = type(entity).__name__
+            # Trazabilidad (issue #236): el exporter lee estos meta-campos para
+            # poblar source_url/parser_version en aportes.
+            if source_url:
+                d["_source_url"] = source_url
+            d["_parser_version"] = _PIPELINE_VERSION
             # _source_record_id (prefijo _) es el meta-campo que _build_payload
             # lee para basar external_id en el UUID nativo; clean lo excluye de raw_json.
             if d.get("source_record_id"):
@@ -491,6 +503,9 @@ def _apply_pii(
             try:
                 d = _strip_raw_pii(entity.model_dump())
                 d["_entity_type"] = type(entity).__name__
+                if source_url:
+                    d["_source_url"] = source_url
+                d["_parser_version"] = _PIPELINE_VERSION
                 result.append(d)
             except Exception as rescue_exc:
                 # No se pudo ni rescatar sin PII: a cuarentena (PII no tratable),
@@ -542,6 +557,9 @@ def _enrich_records(records: list[dict], errors: list[str]) -> list[dict]:
                     rec["last_known_location"] = f"{municipio}, {estado}"
                 elif estado:
                     rec["last_known_location"] = estado
+
+            # Trazabilidad (issue #236): version del normalizador que corrio.
+            rec["_normalizer_version"] = _PIPELINE_VERSION
 
             # Computar deterministic_id (external_id de Person)
             name_norm = _norm_name(rec.get("full_name") or "")
@@ -767,7 +785,10 @@ def _run_source(
             entities_seen += len(page_entities)
 
             if page_entities:
-                records = _apply_pii(page_entities, source_errors, source, quarantine_batch)
+                records = _apply_pii(
+                    page_entities, source_errors, source, quarantine_batch,
+                    source_url=page.get("source_url"),
+                )
                 records = _enrich_records(records, source_errors)
                 records = _apply_confidence(records, source_errors)
                 records = _apply_minor_protection(records, source_errors, source, quarantine_batch)
