@@ -961,13 +961,15 @@ def run_pipeline(
             all_errors.extend(
                 f"cuarentena: {e}" for e in qres.errors
             )
-            # Agregado de TODAS las fuentes de esta corrida, no de una sola:
-            # `source` (variable de loop) no existe acá en la rama paralela
-            # (max_workers>1), donde viene de un list comprehension con su
-            # propio scope.
+            # Slugs reales del batch — no usar `source` del loop (queda en la
+            # ultima fuente iterada; en max_workers>1 ni existe en este scope).
+            source_slugs = sorted({r.source_slug for r in quarantine_batch})
             log.info(
-                "cuarentena (todas las fuentes): %d enviados (%d duplicados, %d errores)",
-                qres.sent, qres.duplicates, len(qres.errors),
+                "cuarentena [%s]: %d enviados (%d duplicados, %d errores)",
+                ", ".join(source_slugs),
+                qres.sent,
+                qres.duplicates,
+                len(qres.errors),
             )
 
         exporter.close()

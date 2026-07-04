@@ -1292,3 +1292,77 @@ class TestExporterBatchingWiring:
         assert result.sent == 2
         exporter.export_batch.assert_called_once()
         assert exporter.export_batch.call_args.kwargs["batch_size"] == 32
+
+
+# ---------------------------------------------------------------------------
+# Tests: log de cuarentena en finally (#228)
+# ---------------------------------------------------------------------------
+
+
+class TestSourceIdInFinallyBlock:
+    """El log del finally debe usar source_slug del batch, no la ultima fuente del loop."""
+
+    def test_finally_log_uses_quarantine_source_slug_not_last_loop_source(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        cfg = _make_demo_config(
+            tmp_path,
+            f"""project:
+  event_id: {_EVENT_ID}
+  default_country: Venezuela
+sources:
+  - id: src_a
+    name: Source A
+    type: api_json
+    enabled: true
+    trust_tier: C
+    url: "https://example.org/a"
+    refresh_minutes: 30
+    parser_asignado: encuentralos
+  - id: src_b
+    name: Source B
+    type: api_json
+    enabled: true
+    trust_tier: C
+    url: "https://example.org/b"
+    refresh_minutes: 30
+    parser_asignado: encuentralos
+""",
+        )
+        qrec = QuarantineRecord(
+            source_slug="src_a",
+            reason_code="invalid_schema",
+            risk_level="medium",
+        )
+
+        def mock_process(
+            source: SourceConfig,
+            limit: int | None,
+            all_errors: list[str],
+            event_id: str,
+            exporter: StagingExporter,
+        ) -> tuple[rp.ExportResult, list[QuarantineRecord], bool]:
+            if source.id == "src_a":
+                return rp.ExportResult(), [qrec], True
+            return rp.ExportResult(), [], True
+
+        transport = _StagingTransport()
+        qtransport = _QuarantineTransport()
+        with patch.dict(
+            os.environ, {**_SUPABASE_ENV, **_QUARANTINE_ENV}, clear=False
+        ), _patch_exporter(transport), _patch_quarantine_exporter(qtransport), patch.object(
+            rp, "_process_source_safe", side_effect=mock_process
+        ):
+            with caplog.at_level("INFO", logger="scrapers.pipelines.run_pipeline"):
+                run_pipeline(config_path=cfg, output_dir=tmp_path / "out")
+
+        quarantine_logs = [
+            r.getMessage()
+            for r in caplog.records
+            if "cuarentena" in r.getMessage().lower()
+        ]
+        assert any("src_a" in msg for msg in quarantine_logs)
+        assert not any(
+            "src_b" in msg and "cuarentena" in msg.lower()
+            for msg in quarantine_logs
+        )
