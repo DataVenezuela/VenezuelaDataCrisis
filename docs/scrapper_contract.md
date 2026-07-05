@@ -208,7 +208,7 @@ parser.
 
 ---
 
-## 10. Modelo objetivo (no implementado)
+## 10. Modelo objetivo (no implementado — seguimiento: issue #242)
 
 Forma a la que apunta el contrato pero que **aún no existe en el código**. No
 altera `CONTRACT_VERSION` (que describe lo real); una idea aquí se vuelve parte de
