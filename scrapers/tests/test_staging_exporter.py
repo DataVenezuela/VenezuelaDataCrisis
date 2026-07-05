@@ -477,6 +477,55 @@ class TestPostRetry:
         assert t.watermark_posts == []
 
 
+# --- retry del POST de watermark --------------------------------------------
+
+class _FlakyWatermarkTransport(httpx.BaseTransport):
+    """Devuelve los status de ``watermark_sequence`` en orden para el POST del watermark."""
+
+    def __init__(self, watermark_sequence: list[int]) -> None:
+        self.watermark_sequence = watermark_sequence
+        self.watermark_attempts = 0
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/rest/v1/aportes":
+            return httpx.Response(201, json={})
+        if path == "/rest/v1/source_watermarks":
+            if request.method == "GET":
+                return httpx.Response(200, json=[])
+            idx = min(self.watermark_attempts, len(self.watermark_sequence) - 1)
+            status = self.watermark_sequence[idx]
+            self.watermark_attempts += 1
+            body = b"Internal Server Error" if status == 500 else b"{}"
+            return httpx.Response(status, content=body)
+        if path == "/rest/v1/sources":
+            return httpx.Response(200, json=[{"id": _SOURCE_UUID}])
+        return httpx.Response(404)
+
+
+class TestWatermarkRetry:
+    def test_500_then_200_watermark_advances(self) -> None:
+        t = _FlakyWatermarkTransport([500, 200])
+        exp = _exporter(t)
+        with patch("scrapers.exporters.staging_exporter.time.sleep", lambda *_: None):
+            res = exp.export_source(
+                [_person("Juan")], source_slug="demo", source_fetched_ats=["2026-06-24T15:00:00Z"]
+            )
+        assert res.errors == []
+        assert t.watermark_attempts == 2  # 500 reintentado, luego 200
+
+    def test_persistent_500_watermark_blocked_and_logged(self, caplog: Any) -> None:
+        t = _FlakyWatermarkTransport([500])
+        exp = _exporter(t)
+        with patch("scrapers.exporters.staging_exporter.time.sleep", lambda *_: None):
+            with caplog.at_level("WARNING", logger="scrapers.exporters.staging_exporter"):
+                res = exp.export_source(
+                    [_person("Juan")], source_slug="demo", source_fetched_ats=["2026-06-24T15:00:00Z"]
+                )
+        assert res.errors
+        assert any("Internal Server Error" in r.getMessage() for r in caplog.records)
+
+
 # --- source_errors bloquean el watermark (C6) -------------------------------
 
 class TestSourceErrorsWatermark:

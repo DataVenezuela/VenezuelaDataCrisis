@@ -22,6 +22,7 @@ import logging
 import os
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
@@ -43,7 +44,7 @@ _WATERMARK_SAFETY_MARGIN = timedelta(minutes=5)
 _FETCHED_AT_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
 _RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
-_MAX_POST_RETRIES = 4
+_MAX_REQUEST_RETRIES = 4
 _DEFAULT_BATCH_SIZE = 100
 
 
@@ -300,7 +301,8 @@ class StagingExporter:
     def _set_watermark(self, source_slug: str, watermark_at: str) -> bool:
         assert self._client is not None
         try:
-            resp = self._post_with_retry(
+            resp = self._request_with_retry(
+                self._client.post,
                 _WATERMARKS_UPSERT_PATH,
                 {"slug": source_slug, "watermark_at": watermark_at},
                 headers={"Prefer": "resolution=merge-duplicates"},
@@ -312,10 +314,17 @@ class StagingExporter:
                 f"_set_watermark {source_slug}: sin permiso (status {resp.status_code}); "
                 "verificar SUPABASE_INGEST_JWT y grants del rol scraper_ingest"
             )
-        return resp.status_code in (200, 201)
+        ok = resp.status_code in (200, 201)
+        if not ok:
+            log.warning(
+                "POST watermark %s status=%s body=%r",
+                source_slug, resp.status_code, resp.text[:300],
+            )
+        return ok
 
-    def _post_with_retry(
+    def _request_with_retry(
         self,
+        method: Callable[..., httpx.Response],
         path: str,
         payload: list[dict[str, object]] | dict[str, object],
         *,
@@ -323,26 +332,27 @@ class StagingExporter:
         headers: dict[str, str] | None = None,
     ) -> httpx.Response:
         assert self._client is not None
+        verb = method.__name__.upper()
         last_exc: httpx.HTTPError | None = None
         resp: httpx.Response | None = None
-        for attempt in range(1, _MAX_POST_RETRIES + 1):
+        for attempt in range(1, _MAX_REQUEST_RETRIES + 1):
             try:
-                resp = self._client.post(path, json=payload, timeout=timeout, headers=headers)
+                resp = method(path, json=payload, timeout=timeout, headers=headers)
             except (httpx.TimeoutException, httpx.NetworkError) as exc:
                 last_exc = exc
-                if attempt < _MAX_POST_RETRIES:
+                if attempt < _MAX_REQUEST_RETRIES:
                     delay = backoff_delay(attempt)
                     log.warning(
-                        "%s en POST %s intento %d/%d — reintento en %.1fs",
-                        type(exc).__name__, path, attempt, _MAX_POST_RETRIES, delay,
+                        "%s en %s %s intento %d/%d — reintento en %.1fs",
+                        type(exc).__name__, verb, path, attempt, _MAX_REQUEST_RETRIES, delay,
                     )
                     time.sleep(delay)
                 continue
-            if resp.status_code in _RETRYABLE_STATUS and attempt < _MAX_POST_RETRIES:
+            if resp.status_code in _RETRYABLE_STATUS and attempt < _MAX_REQUEST_RETRIES:
                 delay = backoff_delay(attempt)
                 log.warning(
-                    "HTTP %s en POST %s intento %d/%d — reintento en %.1fs",
-                    resp.status_code, path, attempt, _MAX_POST_RETRIES, delay,
+                    "HTTP %s en %s %s intento %d/%d — reintento en %.1fs",
+                    resp.status_code, verb, path, attempt, _MAX_REQUEST_RETRIES, delay,
                 )
                 time.sleep(delay)
                 continue
@@ -422,8 +432,8 @@ class StagingExporter:
         for chunk in chunks:
             batch_headers = {"Prefer": "resolution=merge-duplicates,return=minimal"}
             try:
-                resp = self._post_with_retry(
-                    _APORTES_UPSERT_PATH, chunk, timeout=_batch_timeout, headers=batch_headers,
+                resp = self._request_with_retry(
+                    self._client.post, _APORTES_UPSERT_PATH, chunk, timeout=_batch_timeout, headers=batch_headers,
                 )
             except httpx.HTTPError as exc:
                 result.errors.append(f"POST {_APORTES_UPSERT_PATH} batch fallo: {exc}")
@@ -443,8 +453,8 @@ class StagingExporter:
                 )
                 for single in chunk:
                     try:
-                        r = self._post_with_retry(
-                            _APORTES_UPSERT_PATH, [single],
+                        r = self._request_with_retry(
+                            self._client.post, _APORTES_UPSERT_PATH, [single],
                             timeout=_batch_timeout, headers=batch_headers,
                         )
                     except httpx.HTTPError as exc:
