@@ -20,6 +20,7 @@ import scrapers.jobs.consolidation_job as consolidation_job
 
 from scrapers.jobs.consolidation_job import (
     PersonConsolidationConfig,
+    SupabasePersonDedupAdapter,
     canonical_from_winner,
     consolidate_entity_type,
     default_tier_rank,
@@ -76,7 +77,9 @@ def test_tres_aportes_mismo_hash_una_fila_y_tres_marcados() -> None:
     assert adapter.consolidated_ids == {"a0", "a1", "a2"}
 
 
-def test_gana_el_de_mayor_tier() -> None:
+def test_gana_el_de_menor_tier() -> None:
+    # Decision del equipo (#82): A=1..D=4, GANA EL MENOR (A es la fuente mas
+    # confiable), asi que el aporte con tier A gana el grupo.
     aportes = [
         _event_aporte("baja", trust_tier="D", source_id="social"),
         _event_aporte("alta", trust_tier="A", source_id="oficial"),
@@ -210,6 +213,63 @@ def test_acopio_center_tambien_consolida() -> None:
     assert canonical["winner_aporte_id"] == "c1"  # tier A gana
 
 
+class _FailingUpsertAdapter(FakeInMemoryAdapter):
+    """Fake que falla el upsert de un dedup_hash puntual (resto OK).
+
+    Simula un fallo parcial de batch (p.ej. un 409/500 de PostgREST en un grupo)
+    para verificar que el job NO aborta los grupos siguientes.
+    """
+
+    def __init__(self, aportes: list[Record], fail_hash: str) -> None:
+        super().__init__(aportes)
+        self._fail_hash = fail_hash
+
+    def upsert_canonical(self, entity_type: str, record: Record) -> None:
+        if record.get("dedup_hash") == self._fail_hash:
+            raise httpx.HTTPError(f"boom en upsert de {self._fail_hash}")
+        super().upsert_canonical(entity_type, record)
+
+
+def test_fallo_de_grupo_no_aborta_los_sanos(caplog: pytest.LogCaptureFixture) -> None:
+    # Bloqueante #1: si el upsert de un grupo falla, los demas grupos del batch
+    # deben consolidarse igual (analogo a la regla del staging_exporter: el batch
+    # avanza pese a fallos parciales). La excepcion NO se propaga.
+    aportes = [
+        _event_aporte("a1", dedup_hash="ha"),
+        _event_aporte("b1", dedup_hash="hb"),
+        _event_aporte("c1", dedup_hash="hc"),
+    ]
+    adapter = _FailingUpsertAdapter(aportes, fail_hash="ha")
+
+    caplog.set_level(logging.ERROR, logger="scrapers.jobs.consolidation_job")
+    summary = consolidate_entity_type(adapter, "Event", batch_size=10)
+
+    # Los grupos sanos se consolidan; el que falla NO.
+    assert adapter.consolidated_ids == {"b1", "c1"}
+    assert ("Event", "ha") not in adapter.canonical
+    assert ("Event", "hb") in adapter.canonical
+    assert ("Event", "hc") in adapter.canonical
+    assert summary["upserts"] == 2
+    # El fallo se cuenta y se loguea (al menos una vez; el grupo fallido se
+    # re-lee en la ronda siguiente y se reintenta, ver known follow-up del PR).
+    assert summary["errors"] >= 1
+    assert "ha" in caplog.text
+
+
+def test_fallo_de_unico_grupo_cuenta_error_sin_propagar() -> None:
+    # Un solo grupo que falla: no propaga, no consolida nada, cuenta el error.
+    aportes = [_event_aporte("solo", dedup_hash="ha")]
+    adapter = _FailingUpsertAdapter(aportes, fail_hash="ha")
+
+    summary = consolidate_entity_type(adapter, "Event", batch_size=10)
+
+    assert summary["errors"] == 1
+    assert summary["upserts"] == 0
+    assert summary["marked"] == 0
+    assert adapter.consolidated_ids == set()
+    assert adapter.canonical == {}
+
+
 def test_person_no_admite_automerge() -> None:
     adapter = FakeInMemoryAdapter()
     try:
@@ -253,23 +313,27 @@ def test_pick_winner_desempate_determinista_por_created_at_y_source_id() -> None
 
 
 def test_pick_winner_tier_rank_inyectable() -> None:
-    # Un mapeo inverso: "D" vale mas que "A".
+    # Un mapeo inverso donde "D" es el mejor (menor rango). Como pick_winner elige
+    # el MENOR rango, con este mapeo gana "d"; con el default (A=1) gana "a".
     def inverse_rank(tier: str) -> int:
-        return {"D": 4, "C": 3, "B": 2, "A": 1}.get(tier.upper(), 0)
+        return {"D": 1, "C": 2, "B": 3, "A": 4}.get(tier.upper(), 99)
 
     group: list[Record] = [
         {"id": "a", "trust_tier": "A", "created_at": "x", "source_id": "x"},
         {"id": "d", "trust_tier": "D", "created_at": "x", "source_id": "x"},
     ]
     assert pick_winner(group, tier_rank=inverse_rank)["id"] == "d"
-    assert pick_winner(group)["id"] == "a"  # default: A gana
+    assert pick_winner(group)["id"] == "a"  # default: A=1 gana (menor)
 
 
-def test_default_tier_rank_desconocido_es_cero() -> None:
-    assert default_tier_rank("A") == 4
-    assert default_tier_rank("a") == 4
-    assert default_tier_rank("Z") == 0
-    assert default_tier_rank("") == 0
+def test_default_tier_rank_menor_gana() -> None:
+    # Decision del equipo (#82): A=1, B=2, C=3, D=4; un tier desconocido cae al
+    # peor rango (mayor que D) para que nunca le gane a uno conocido.
+    assert default_tier_rank("A") == 1
+    assert default_tier_rank("a") == 1
+    assert default_tier_rank("D") == 4
+    assert default_tier_rank("Z") > default_tier_rank("D")
+    assert default_tier_rank("") > default_tier_rank("D")
 
 
 def test_canonical_from_winner_adjunta_metadata() -> None:
@@ -378,7 +442,8 @@ def _person_client(transport: _PersonTransport) -> httpx.Client:
 def _person_config(**overrides: Any) -> PersonConsolidationConfig:
     return PersonConsolidationConfig(
         supabase_url="https://test.supabase.co",
-        supabase_service_key="test-key",
+        publishable_key="test-publishable-key",
+        consolidation_jwt="test-consolidation-jwt",
         batch_size=int(overrides.get("batch_size", 500)),
         threshold=float(overrides.get("threshold", 0.85)),
     )
@@ -589,3 +654,141 @@ def test_person_without_block_keys_and_event_id_generates_no_invalid_keys() -> N
     assert result.blocks == 0
     assert result.candidates_inserted_or_updated == 0
     assert transport.post_bodies == []
+
+
+# --- Person config from_env (analogo a Event/Acopio, review de mayerlim) -----
+
+_PERSON_URL = "https://proj.supabase.co"
+_PERSON_PUBLISHABLE_KEY = "publishable-key-xyz"
+_PERSON_CONSOLIDATION_JWT = "consolidation-jwt-abc"
+
+
+def _clear_person_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+    monkeypatch.delenv("SUPABASE_PUBLISHABLE_KEY", raising=False)
+    monkeypatch.delenv("SUPABASE_CONSOLIDATION_JWT", raising=False)
+
+
+def test_person_from_env_sin_variables_es_dry_run_info(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Ninguna env seteada (dry-run intencional en dev local): INFO, NO ERROR.
+    _clear_person_env(monkeypatch)
+    caplog.set_level(logging.DEBUG, logger="scrapers.jobs.consolidation_job")
+    assert PersonConsolidationConfig.from_env() is None
+    records = [
+        r for r in caplog.records if r.name == "scrapers.jobs.consolidation_job"
+    ]
+    assert records
+    assert all(r.levelno < logging.ERROR for r in records)
+    assert any(r.levelno == logging.INFO for r in records)
+
+
+def test_person_from_env_config_parcial_es_error(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Alguna env seteada y otra faltante (config parcial en prod): ERROR con las
+    # faltantes; devuelve None (dry-run) sin abortar.
+    _clear_person_env(monkeypatch)
+    monkeypatch.setenv("SUPABASE_URL", _PERSON_URL)
+    monkeypatch.setenv("SUPABASE_PUBLISHABLE_KEY", _PERSON_PUBLISHABLE_KEY)
+    # falta SUPABASE_CONSOLIDATION_JWT => config parcial
+    caplog.set_level(logging.DEBUG, logger="scrapers.jobs.consolidation_job")
+    assert PersonConsolidationConfig.from_env() is None
+    errors = [
+        r for r in caplog.records
+        if r.name == "scrapers.jobs.consolidation_job" and r.levelno == logging.ERROR
+    ]
+    assert errors
+    assert any("SUPABASE_CONSOLIDATION_JWT" in r.getMessage() for r in errors)
+
+
+def test_person_from_env_ok_con_todas_las_vars(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear_person_env(monkeypatch)
+    monkeypatch.setenv("SUPABASE_URL", _PERSON_URL + "/")
+    monkeypatch.setenv("SUPABASE_PUBLISHABLE_KEY", _PERSON_PUBLISHABLE_KEY)
+    monkeypatch.setenv("SUPABASE_CONSOLIDATION_JWT", _PERSON_CONSOLIDATION_JWT)
+    config = PersonConsolidationConfig.from_env()
+    assert config is not None
+    assert config.supabase_url == _PERSON_URL  # trailing slash removido
+    assert config.publishable_key == _PERSON_PUBLISHABLE_KEY
+    assert config.consolidation_jwt == _PERSON_CONSOLIDATION_JWT
+
+
+def test_person_from_env_rechaza_http_plano(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Media #2: con todas las vars pero URL http:// (no https), la config Person
+    # debe entrar en dry-run (None) para NO mandar apikey/JWT/PII en claro,
+    # igual que SupabaseConsolidationConfig.from_env del adapter Event/Acopio.
+    _clear_person_env(monkeypatch)
+    monkeypatch.setenv("SUPABASE_URL", "http://proj.supabase.co")
+    monkeypatch.setenv("SUPABASE_PUBLISHABLE_KEY", _PERSON_PUBLISHABLE_KEY)
+    monkeypatch.setenv("SUPABASE_CONSOLIDATION_JWT", _PERSON_CONSOLIDATION_JWT)
+    caplog.set_level(logging.DEBUG, logger="scrapers.jobs.consolidation_job")
+    assert PersonConsolidationConfig.from_env() is None
+    errors = [
+        r for r in caplog.records
+        if r.name == "scrapers.jobs.consolidation_job" and r.levelno == logging.ERROR
+    ]
+    assert errors
+    assert any("https" in r.getMessage().lower() for r in errors)
+
+
+def test_person_from_config_headers_apikey_publishable_bearer_jwt() -> None:
+    """El adapter Person manda apikey=publishable y Bearer=JWT (NO la misma key).
+
+    Verifica el patron #200 en el path Person (analogo al test de Event/Acopio):
+    from_config arma headers distintos por credencial (apikey != Bearer), sin
+    service_role. Se lee el default de headers del httpx.Client, sin abrir red.
+    """
+    config = PersonConsolidationConfig(
+        supabase_url=_PERSON_URL,
+        publishable_key=_PERSON_PUBLISHABLE_KEY,
+        consolidation_jwt=_PERSON_CONSOLIDATION_JWT,
+    )
+    adapter = SupabasePersonDedupAdapter.from_config(config)
+    try:
+        headers = adapter._client.headers
+        assert headers["apikey"] == _PERSON_PUBLISHABLE_KEY
+        assert headers["Authorization"] == f"Bearer {_PERSON_CONSOLIDATION_JWT}"
+        # blindaje anti falso-verde: apikey y Bearer NO son el mismo valor.
+        assert headers["apikey"] != _PERSON_CONSOLIDATION_JWT
+    finally:
+        adapter.close()
+
+
+def test_person_run_cierra_client_propio(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Cuando run_person_consolidation arma el adapter (client=None), es dueno del
+    # httpx.Client y debe cerrarlo al terminar (fix de cierre, review de mayerlim).
+    closed: list[bool] = []
+
+    def _spy_close(self: SupabasePersonDedupAdapter) -> None:
+        closed.append(True)
+        self._client.close()
+
+    # fetch_batch vacio => corta al primer batch sin red real.
+    monkeypatch.setattr(
+        SupabasePersonDedupAdapter,
+        "fetch_batch",
+        lambda self, config, cursor: [],
+    )
+    monkeypatch.setattr(SupabasePersonDedupAdapter, "close", _spy_close)
+
+    run_person_consolidation(_person_config())
+
+    assert closed == [True]
+
+
+def test_person_run_no_cierra_client_inyectado() -> None:
+    # Si el caller inyecta el client (tests), run_person_consolidation NO debe
+    # cerrarlo: el caller es dueno de su ciclo de vida.
+    transport = _PersonTransport([[]])
+    client = _person_client(transport)
+    run_person_consolidation(_person_config(), client=client)
+    # El client sigue usable (no se cerro): un GET no lanza ClosedResourceError.
+    assert not client.is_closed
+    client.close()

@@ -64,8 +64,8 @@ RISK_LEVELS = frozenset({"low", "medium", "high"})
 def quarantine_payload_hash(raw: str | bytes) -> str:
     """SHA-256 hex puro (64 chars, SIN prefijo) del payload original.
 
-    A diferencia de ``adapters._shared.sha256_hex`` (que antepone ``sha256:``
-    para ``content_hash``), aqui se devuelve hex pelado porque
+    Igual que ``adapters._shared.sha256_hex`` (que tambien devuelve hex puro sin
+    prefijo para ``content_hash``), aqui se devuelve hex pelado porque
     ``quarantine_records.payload_hash`` es ``varchar(64)``. Ese hash sobrevive a
     la destruccion del registro y permite verificar que ese payload exacto fue
     visto y destruido deliberadamente.
