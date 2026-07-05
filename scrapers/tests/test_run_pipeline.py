@@ -1299,7 +1299,7 @@ class TestExporterBatchingWiring:
 # ---------------------------------------------------------------------------
 
 
-class TestSourceIdInFinallyBlock:
+class TestQuarantineLogUsesSourceSlug:
     """El log del finally debe usar source_slug del batch, no la ultima fuente del loop."""
 
     def test_finally_log_uses_quarantine_source_slug_not_last_loop_source(
@@ -1362,7 +1362,4 @@ sources:
             if "cuarentena" in r.getMessage().lower()
         ]
         assert any("src_a" in msg for msg in quarantine_logs)
-        assert not any(
-            "src_b" in msg and "cuarentena" in msg.lower()
-            for msg in quarantine_logs
-        )
+        assert not any("src_b" in msg for msg in quarantine_logs)

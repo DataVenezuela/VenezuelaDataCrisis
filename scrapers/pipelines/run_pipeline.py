@@ -965,7 +965,7 @@ def run_pipeline(
             # ultima fuente iterada; en max_workers>1 ni existe en este scope).
             source_slugs = sorted({r.source_slug for r in quarantine_batch})
             log.info(
-                "cuarentena [%s]: %d enviados (%d duplicados, %d errores)",
+                "cuarentena [%s] — total: %d enviados (%d duplicados, %d errores)",
                 ", ".join(source_slugs),
                 qres.sent,
                 qres.duplicates,
