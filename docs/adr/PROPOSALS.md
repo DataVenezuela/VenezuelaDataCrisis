@@ -4,7 +4,7 @@
 > ADR: trabajo operativo aún no construido, sin diseño cerrado ni compromiso del
 > equipo. **No es normativo.** Nada aquí está decidido ni implementado; es un
 > estacionamiento de ideas y puede borrarse o reescribirse sin proceso de
-> supersión de ADR. Cuando una propuesta madura hacia una decisión, se promueve a
+> reemplazo de ADR. Cuando una propuesta madura hacia una decisión, se promueve a
 > una ADR numerada (`docs/adr/NNNN-*.md`) y se quita de aquí.
 >
 > Convención: prosa en español, enums y campos en inglés, sin em-dashes (igual
@@ -22,6 +22,12 @@ la corrida como fallida si el proceso muere sin cerrarla. Daría visibilidad a l
 cuarentena que ADR 0004 crea (una cuarentena que crece sin observarse es un
 riesgo anotado ahí) y una señal para saber si una fuente dejó de producir. No
 existe `pipeline_runs` en el código.
+
+---
+
+## P5. (vacante)
+
+Número sin propuesta activa. El hueco es intencional, no una propuesta que falte.
 
 ---
 
