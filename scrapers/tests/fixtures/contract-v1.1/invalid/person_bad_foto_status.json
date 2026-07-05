@@ -1,0 +1,8 @@
+{
+  "_comment": "INVÁLIDO: foto_status con valor no permitido.",
+  "_expected_error": "field status must be one of",
+  "full_name": "Test Ficticio",
+  "event_id": "8f14e45f-ceea-467e-bd5d-0a4f2e0c1a3a",
+  "fuente": "encuentralos",
+  "foto_status": "deleted"
+}

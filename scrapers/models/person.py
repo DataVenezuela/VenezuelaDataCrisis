@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+import re
+
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 from scrapers.models._validators import validate_score_range, validate_uuid_str
 
 _PERSON_STATUS = {"missing", "found", "injured", "deceased", "unknown"}
 _TRUST_TIERS = {"A", "B", "C", "D"}
+_IDENTITY_KIND = {"hmac", "partial", "none"}
+_PII_PROVENANCE = {"cleartext", "source_masked_lossy", "source_hashed"}
+_FIELD_STATUS = {"present", "absent_source", "removed_minor", "removed_pii"}
+_PARTIAL_PATTERN = {"suffix_4", "suffix_3", "suffix_2", "edges_2_2"}
+
+_CEDULA_PARTIAL_RE = re.compile(r"^\d{2,4}$")
 
 
 class Person(BaseModel):
@@ -17,18 +25,25 @@ class Person(BaseModel):
     event_id: str
     cedula_hmac: str | None = None
     cedula_masked: str | None = None
+    cedula_partial: str | None = None
+    cedula_partial_pattern: str | None = None
+    identity_kind: str = "none"
+    pii_provenance: str = "cleartext"
     age_range: dict[str, int] | None = None
     is_minor: bool | None = None
     last_known_location: str | None = None
+    last_known_location_status: str | None = None
     status: str = "missing"
     verification_status: str = "unverified"
     trust_tier: str = "D"
     confidence_score: float = 0.0
     nota: str | None = None
     foto: str | None = None
+    foto_status: str | None = None
     deterministic_id: str | None = None
     source_record_id: str | None = None
     fuente: str
+    unmapped: dict[str, object] | None = None
 
     @field_validator("full_name", "fuente")
     @classmethod
@@ -80,6 +95,43 @@ class Person(BaseModel):
             raise ValueError("cedula_masked holds at most 15 characters")
         return v
 
+    @field_validator("cedula_partial")
+    @classmethod
+    def _partial_shape(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        if not _CEDULA_PARTIAL_RE.match(v):
+            raise ValueError("cedula_partial must be 2–4 digits")
+        return v
+
+    @field_validator("cedula_partial_pattern")
+    @classmethod
+    def _valid_partial_pattern(cls, v: str | None) -> str | None:
+        if v is not None and v not in _PARTIAL_PATTERN:
+            raise ValueError(f"cedula_partial_pattern must be one of {sorted(_PARTIAL_PATTERN)}")
+        return v
+
+    @field_validator("identity_kind")
+    @classmethod
+    def _valid_identity_kind(cls, v: str) -> str:
+        if v not in _IDENTITY_KIND:
+            raise ValueError(f"identity_kind must be one of {sorted(_IDENTITY_KIND)}")
+        return v
+
+    @field_validator("pii_provenance")
+    @classmethod
+    def _valid_pii_provenance(cls, v: str) -> str:
+        if v not in _PII_PROVENANCE:
+            raise ValueError(f"pii_provenance must be one of {sorted(_PII_PROVENANCE)}")
+        return v
+
+    @field_validator("foto_status", "last_known_location_status")
+    @classmethod
+    def _valid_field_status(cls, v: str | None) -> str | None:
+        if v is not None and v not in _FIELD_STATUS:
+            raise ValueError(f"field status must be one of {sorted(_FIELD_STATUS)}")
+        return v
+
     @field_validator("age_range")
     @classmethod
     def _age_range_shape(cls, v: dict[str, int] | None) -> dict[str, int] | None:
@@ -91,6 +143,18 @@ class Person(BaseModel):
         if lo is not None and hi is not None and lo > hi:
             raise ValueError("age_range['min'] must be <= age_range['max']")
         return v
+
+    @model_validator(mode="after")
+    def _identity_consistency(self) -> Person:
+        """identity_kind must be consistent with the cedula fields present."""
+        if self.identity_kind == "hmac" and self.cedula_hmac is None:
+            raise ValueError("identity_kind='hmac' requires cedula_hmac")
+        if self.identity_kind == "partial":
+            if self.cedula_partial is None:
+                raise ValueError("identity_kind='partial' requires cedula_partial")
+            if self.cedula_partial_pattern is None:
+                raise ValueError("identity_kind='partial' requires cedula_partial_pattern")
+        return self
 
     @model_validator(mode="after")
     def _infer_is_minor(self) -> Person:

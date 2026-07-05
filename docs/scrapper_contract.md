@@ -1,8 +1,8 @@
 # Contrato de scrapers: parser a entidad
 
 > **Estado:** Propuesta
-> **CONTRACT_VERSION:** 1.0
-> **Issue:** #231 (documenta el contrato existente), #235 (rediseño parser a entidad)
+> **CONTRACT_VERSION:** 1.1
+> **Issue:** #231 (documenta el contrato existente), #235 (rediseño parser a entidad), #242 (implementa §10)
 > **Origen:** issue #224 (punto 4), ADR 0004 (versionado), ADR 0006 (identidad/PII objetivo)
 > **Fecha:** 2026-07-04
 
@@ -63,19 +63,26 @@ aplica el código.
 | `full_name` | `str` | requerido, no vacío |
 | `event_id` | `str` | requerido, UUID válido (FK al evento) |
 | `cedula_hmac` | `str \| None` | 64 hex minúscula, sin prefijo. `None` si no hay cédula |
-| `cedula_masked` | `str \| None` | máx 15 chars. Ver §10 (lo supera `cedula_partial`) |
+| `cedula_masked` | `str \| None` | máx 15 chars. Superado por `cedula_partial` para dedup |
+| `cedula_partial` | `str \| None` | 2–4 dígitos del final/borde de la cédula |
+| `cedula_partial_pattern` | `str \| None` | `suffix_4`, `suffix_3`, `suffix_2`, `edges_2_2`; requerido con `cedula_partial` |
+| `identity_kind` | `str` | default `none`; `hmac` exige `cedula_hmac`, `partial` exige `cedula_partial` + patrón |
+| `pii_provenance` | `str` | default `cleartext`; `cleartext`, `source_masked_lossy`, `source_hashed` |
 | `age_range` | `dict \| None` | claves `min`/`max`; `min <= max` |
 | `is_minor` | `bool \| None` | si no se declara, se deriva de `age_range` (max < 18) |
 | `last_known_location` | `str \| None` | |
+| `last_known_location_status` | `str \| None` | `present`, `absent_source`, `removed_minor`, `removed_pii` |
 | `status` | `str` | default `missing`, enum §4 |
 | `verification_status` | `str` | default `unverified` (valores por convención, §4) |
 | `trust_tier` | `str` | default `D`, `A`/`B`/`C`/`D` |
 | `confidence_score` | `float` | default `0.0`, rango `[0.0, 1.0]`, rechaza bool |
 | `foto` | `str \| None` | URL, sin descargar |
+| `foto_status` | `str \| None` | `present`, `absent_source`, `removed_minor`, `removed_pii` |
 | `nota` | `str \| None` | |
 | `deterministic_id` | `str \| None` | id determinístico de dedup, ver `docs/specs/db-scraper-contract.md` §6 |
 | `source_record_id` | `str \| None` | id nativo del registro en la fuente |
 | `fuente` | `str` | requerido, slug de la fuente |
+| `unmapped` | `dict \| None` | campos del parser no mapeados al modelo; escaneados por el detector de PII |
 
 ### 3.2. Event (`scrapers/models/event.py`)
 
@@ -208,32 +215,30 @@ parser.
 
 ---
 
-## 10. Modelo objetivo (no implementado — seguimiento: issue #242)
+## 10. Modelo objetivo (implementado en v1.1 — issue #242)
 
-Forma a la que apunta el contrato pero que **aún no existe en el código**. No
-altera `CONTRACT_VERSION` (que describe lo real); una idea aquí se vuelve parte de
-la versión solo cuando se implementa y se sube la versión (ADR 0004). Las
-decisiones de identidad y PII están en la **ADR 0006**.
+Implementado en `CONTRACT_VERSION` 1.1 (bump minor: todos los campos nuevos son
+opcionales). Las decisiones de identidad y PII están en la **ADR 0006**.
 
-**Identidad explícita: discriminador `identity_kind`** (construir pronto:
-Encuéntralos entrega la cédula enmascarada hoy). `identity_kind` en
-`{hmac, partial, none}`, con `cedula_partial` (2 a 4 dígitos) y
-`cedula_partial_pattern` en `{suffix_4, suffix_3, suffix_2, edges_2_2}`.
-Validadores: `hmac` exige `cedula_hmac`; `partial` exige `cedula_partial`;
-`cedula_partial` exige `cedula_partial_pattern`. Regla asimétrica: la cédula
-parcial **solo suma** confianza cuando coincide (mismo patrón, mismos dígitos),
-nunca descarta cuando difiere. Supera a `cedula_masked`.
+**Identidad explícita: discriminador `identity_kind`** en `{hmac, partial, none}`
+(default `none`), con `cedula_partial` (2–4 dígitos) y `cedula_partial_pattern`
+en `{suffix_4, suffix_3, suffix_2, edges_2_2}`. Validadores en el modelo:
+`hmac` exige `cedula_hmac`; `partial` exige `cedula_partial` y
+`cedula_partial_pattern`. Regla asimétrica: la cédula parcial **solo suma**
+confianza cuando coincide (mismo patrón, mismos dígitos), nunca descarta cuando
+difiere. Supera a `cedula_masked`.
 
-**Procedencia de PII: `_pii_provenance`** (construir pronto) en
-`{cleartext, source_masked_lossy, source_hashed, source_encrypted}`. Invariante:
-si no es `cleartext`, `cedula_hmac` puede ser `None` y `identity_kind != hmac`.
+**Procedencia de PII: `pii_provenance`** en
+`{cleartext, source_masked_lossy, source_hashed}` (default `cleartext`). Invariante:
+si no es `cleartext`, `cedula_hmac` puede ser `None` e `identity_kind != hmac`.
 
-**Manejo de ausencias y campos desconocidos.** Campos `*_status` explícitos para
-`foto` y `last_known_location` en
-`{present, absent_source, removed_minor, removed_pii}`, para no confundir "la
-fuente no lo tenía" con "se removió por protección". Captura de campos no mapeados
-en `_unmapped` (escaneado por el detector de PII), manteniendo `extra="forbid"` en
-la entidad: rigor sin fragilidad, sin violar "nada se descarta en silencio".
+**Manejo de ausencias y campos desconocidos.** Campos `foto_status` y
+`last_known_location_status` en `{present, absent_source, removed_minor, removed_pii}`,
+para no confundir "la fuente no lo tenía" con "se removió por protección". Captura
+de campos no mapeados en `unmapped: dict | None` (escaneado por el detector de
+PII), manteniendo `extra="forbid"` en la entidad: rigor sin fragilidad, sin violar
+"nada se descarta en silencio". Los parsers son responsables de enrutar campos
+desconocidos al dict `unmapped` antes de construir la entidad.
 
 **Lista cerrada de `needs`** (hoy es texto libre): `agua`, `alimentos`,
 `medicamentos`, `colchonetas`, `ropa`, `calzado`, `higiene`, `pañales`,
