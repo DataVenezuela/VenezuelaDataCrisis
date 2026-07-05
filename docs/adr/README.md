@@ -15,3 +15,8 @@ ADR que reemplaza a la anterior.
 | [0001](./0001-arquitectura-serving-publico.md) | Arquitectura del plano de serving público | Aceptada |
 | [0002](./0002-endurecimiento-seguridad-cloudflare.md) | Endurecimiento de seguridad del plano público con Cloudflare | Propuesta |
 | [0003](./0003-reestructuracion-repos-deployment.md) | Reestructuración de repos: pipeline público, deployment y web privados | Propuesta |
+| [0004](./0004-versionado-de-contrato.md) | Versionado del contrato DB/scrapers | Propuesta |
+| [0006](./0006-proteccion-pii-ingesta.md) | Protección de PII en la ingesta | Propuesta |
+
+<!-- 0005: pendiente PR 238 (gobernabilidad) -->
+<!-- Los números no faltan: 0005 entra con ese PR y se inserta al fusionar. -->
