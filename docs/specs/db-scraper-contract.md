@@ -238,6 +238,11 @@ para el detalle de cómo se procesa `Person` específicamente.
 }
 ```
 
+> Nota: `source_url` se muestra con el esquema completo, pero hoy viaja ausente
+> (cableado muerto, ver §4 e issue #236). El ejemplo documenta la forma objetivo,
+> no lo que un consumidor recibe hoy. Lo mismo aplica a `parser_version` y
+> `normalizer_version` cuando se pueblen.
+
 ---
 
 ## 10. Lo que NO garantiza este contrato

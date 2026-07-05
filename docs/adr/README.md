@@ -16,3 +16,7 @@ ADR que reemplaza a la anterior.
 | [0002](./0002-endurecimiento-seguridad-cloudflare.md) | Endurecimiento de seguridad del plano público con Cloudflare | Propuesta |
 | [0004](./0004-versionado-de-contrato.md) | Versionado del contrato DB/scrapers | Propuesta |
 | [0006](./0006-proteccion-pii-ingesta.md) | Protección de PII en la ingesta | Propuesta |
+
+<!-- 0003: pendiente PR 230 (reestructuración de repos) -->
+<!-- 0005: pendiente PR 238 (gobernabilidad) -->
+<!-- Los números 0003 y 0005 no faltan: entran en PRs abiertos y se insertan al fusionar. -->

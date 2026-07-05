@@ -7,7 +7,7 @@
 | Decisores | Mantenedores (mathiasaiva, mayerlim), equipo de pipeline |
 | Reemplaza a | (ninguno) |
 | Complementa | ADR 0002 (endurecimiento del borde), ADR 0004 (versionado de contrato) |
-| Relacionado con | `docs/scrapper_contract.md` §5 y §10, `docs/adr/0003-reestructuracion-repos-deployment.md` |
+| Relacionado con | `docs/scrapper_contract.md` §5 y §10, `docs/adr/0003-reestructuracion-repos-deployment.md` <!-- pendiente PR 230 --> |
 
 ---
 

@@ -81,9 +81,11 @@ tag).
 **Riesgos y mitigaciones**
 
 - *Versión que no se sube al cambiar la forma*: el PR de contrato debe justificar
-  el nivel de bump; la revisión (CODEOWNERS, ADR 0005) lo verifica.
+  el nivel de bump; la revisión (CODEOWNERS, ADR 0005 <!-- pendiente PR 238 -->)
+  lo verifica.
 - *Cuarentena que crece sin observarse*: la cuarentena debe ser visible (métrica
-  o alerta), tema de una propuesta de telemetría futura (ver `PROPOSALS.md`).
+  o alerta), tema de una propuesta de telemetría futura (ver
+  `PROPOSALS.md` <!-- pendiente PR 238 -->).
 
 ---
 
@@ -110,4 +112,4 @@ y añadir la columna; recién entonces `vzla-deployment` puede fijar el tag.
 - Issue #231, PR #232: `docs/specs/db-scraper-contract.md` (contrato entidad->DB).
 - `docs/scrapper_contract.md` (contrato parser->entidad, complementario).
 - `docs/specs/contracts/TEMPLATE.md` (plantilla de spec de contrato).
-- `docs/adr/PROPOSALS.md` (telemetría de cuarentena, futura).
+- `docs/adr/PROPOSALS.md` (telemetría de cuarentena, futura). <!-- pendiente PR 238 -->
