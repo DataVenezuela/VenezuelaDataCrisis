@@ -72,6 +72,16 @@ class ConsolidationDataPort(Protocol):
         """Candidatos de Person para revision humana. NO lo usa el job de #91."""
         ...
 
+    # --- ciclo de vida -------------------------------------------------------
+
+    def close(self) -> None:
+        """Libera recursos del adapter (p.ej. el httpx.Client del real).
+
+        El caller (CLI/main) DEBE llamarlo al terminar, idealmente en un
+        ``try/finally``. En el fake es un no-op (no abre recursos).
+        """
+        ...
+
 
 class FakeInMemoryAdapter:
     """Implementacion en memoria de `ConsolidationDataPort` para tests offline.
@@ -127,3 +137,8 @@ class FakeInMemoryAdapter:
             and str(rec.get("id")) not in self.consolidated_ids
         ]
         return pending[:batch_size]
+
+    def close(self) -> None:
+        # No-op: el fake no abre recursos. Presente por el contrato para que el
+        # caller pueda cerrar el port de forma uniforme (real o fake).
+        return None
