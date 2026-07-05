@@ -1,11 +1,11 @@
-# ADR 0001: Arquitectura del plano de serving público
+# ADR 0001 — Arquitectura del plano de serving público
 
 | Campo | Valor |
 |---|---|
 | Estado | Aceptada |
 | Fecha | 2026-06-27 |
 | Decisores | DB/API, Scrapers/Cleaners, Infraestructura |
-| Reemplaza a | - |
+| Reemplaza a | — |
 | Relacionado con | `docs/pipeline.md`, `docs/schema.md`, `docs/base-standards.md` |
 
 ---
@@ -58,7 +58,7 @@ ataque sobre los datos completos.
 Se adopta una arquitectura de **dos planos desacoplados** unidos por un artefacto
 inmutable (patrón CQRS / read-model):
 
-### 3.1 Plano interno (fuente de verdad): Supabase / PostgreSQL
+### 3.1 Plano interno (fuente de verdad) — Supabase / PostgreSQL
 
 * Mantiene los **datos completos**, el historial y las relaciones (`docs/schema.md`).
 * Es donde el equipo de **Verification** trabaja: confirmar/rechazar candidatos
@@ -68,7 +68,7 @@ inmutable (patrón CQRS / read-model):
 * **Nunca recibe tráfico del público.** Acceso autenticado, interno.
 * Sigue gobernado por `base-standards.md §4–5` (Python, SQLAlchemy).
 
-### 3.2 Plano público (serving): Cloudflare Worker + D1
+### 3.2 Plano público (serving) — Cloudflare Worker + D1
 
 * Una **API de solo-lectura** servida desde el borde de Cloudflare.
 * Los datos viven en **D1** (SQLite gestionado en el borde) y contienen
@@ -76,7 +76,7 @@ inmutable (patrón CQRS / read-model):
 * La búsqueda usa **FTS5** + claves de bloqueo fonético precomputadas.
 * El borde aporta **caché, WAF, rate-limiting y Turnstile** (anti-bot).
 
-### 3.3 Puente: Build job (cron)
+### 3.3 Puente — Build job (cron)
 
 * Un job programado (GitHub Actions) proyecta la vista pública desde Supabase,
   arma el índice y lo publica a D1 con **swap atómico** (§7), cada 30–60 min.
@@ -129,7 +129,7 @@ person_record_id        UUID v4
 event_id                UUID v4
 full_name               normalizado (mayúsculas)
 alternate_names         lista
-cedula_hmac             HEX 64 (sin prefijo, para lookup, nunca reversible)
+cedula_hmac             HEX 64 (sin prefijo) — para lookup, nunca reversible
 cedula_masked           últimos 4 dígitos
 age_range               {min, max}
 sex
@@ -212,7 +212,7 @@ tocar el historial del plano interno. Cumple el mecanismo del README §"Segurida
 | Plano público (Worker + D1 + R2 + WAF + Turnstile) | Cloudflare | $0–5 / mes |
 | Plano interno (datos completos + UI) | Supabase | plan actual del equipo |
 | Scrapers + build job | GitHub Actions (repo público) | $0 |
-| Dominio | - | ~$10 / año |
+| Dominio | — | ~$10 / año |
 
 El borde absorbe la mayoría del tráfico (hit-rate esperado >95% por la naturaleza
 repetitiva de las consultas en crisis), por lo que el costo no escala con el pico.

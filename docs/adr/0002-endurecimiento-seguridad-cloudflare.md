@@ -17,7 +17,7 @@ La ADR 0001 fijó la arquitectura de **dos planos**: un plano interno (Supabase 
 PostgreSQL, fuente de verdad con datos completos) y un **plano público de
 solo-lectura** servido desde el borde de Cloudflare (Worker + D1 con la
 proyección sanitizada). Esa ADR enumeró los controles de borde (WAF, caché,
-rate-limit, Turnstile), pero solo a alto nivel (§8 y §12.4).
+rate-limit, Turnstile), pero solo a alto nivel (§8 y §12).
 
 Esta ADR **no reabre** la decisión arquitectónica de la 0001: la **implementa y
 la endurece**. Concreta *cómo* se configura cada control de Cloudflare, en qué

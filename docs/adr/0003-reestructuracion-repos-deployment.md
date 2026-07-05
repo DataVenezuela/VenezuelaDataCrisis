@@ -14,8 +14,8 @@
 > mientras tanto no se renombra ni se elimina ninguna referencia a
 > `dataVenezuela`. El contrato que acopla los repos está en progreso: la spec
 > entidad->DB vive en PR #232 (issue #231) y su versionado formal
-> (`CONTRACT_VERSION`, tag `contract-v1.0`) lo definirá la ADR 0004, aún
-> pendiente.
+> (`CONTRACT_VERSION`, tag `contract-v1.0`) lo define la ADR 0004 (incluida en
+> PR #232, aún sin fusionar).
 
 ---
 
@@ -92,7 +92,7 @@ configuración específica de producción.
 * **Importa `VZLA_DEDUP` como dependencia** y fija el tag de contrato
   `contract-v1.0`: consume el pipeline público a través de su contrato
   versionado, no copiando su código (ver §8 y ADR 0004).
-* **Gobernado por quórum de mantenedores** (ver ADR 0005, pendiente): los
+* **Gobernado por quórum de mantenedores** (ver ADR 0005, pendiente, sin issue/PR aún): los
   cambios se aprueban por quórum, no por un solo check o aprobador.
 * Incluye los scripts de creación de Worker que sean seguros de auditar
   públicamente; el `wrangler deploy` con credenciales reales corre solo desde
@@ -136,7 +136,7 @@ flowchart TD
         MW["Worker de merge (separado de D1)"]
     end
 
-    PIPE -->|"PR con esquema general,\nsin datos de produccion"| deploy
+    PIPE -->|"importa como dependencia\n(tag contract-v1.0)"| deploy
     ING --> SB[("Supabase: fuente de verdad")]
     BUILD --> D1[("D1: API publica")]
     UI --> MW
@@ -144,7 +144,7 @@ flowchart TD
     SB -.->|"DDL manual, acceso limitado,\nfuera de todo repo"| SB
 ```
 
-Flujo de código: `publico → deploy` (solo esquema general, vía PR con quórum).
+Flujo de código: `publico → deploy` (como dependencia, tag `contract-v1.0`; cambios de contrato vía PR con quórum).
 Flujo de datos: `ING → SB → BUILD → D1`. El DDL nunca entra por ningún repo.
 
 ---
@@ -200,8 +200,8 @@ de seguimiento, ambas en curso.
   documenta en `docs/specs/db-scraper-contract.md` (issue #224 punto 4, issue
   #231, PR #232, aún sin fusionar).
 * **Su versionado** (`CONTRACT_VERSION`, semver, y el tag `contract-v1.0` que
-  `vzla-deployment` fija) lo decidirá la **ADR 0004** (versionado de contrato),
-  todavía pendiente.
+  `vzla-deployment` fija) lo define la **ADR 0004** (versionado de contrato,
+  incluida en PR #232, aún sin fusionar).
 
 Cuando un scraper necesite algo nuevo, deja un PR contra ese contrato. La
 existencia del contrato es un prerequisito de **implementación** para abrir el
@@ -266,7 +266,7 @@ esquema general.
   quórum, más fricción que un solo repo.
 * Los contribuidores externos de scrapers ya no pueden ver ni probar contra
   fuentes/parsers reales de producción; dependen del contrato público, hoy en
-  progreso (spec en PR #232, versionado en ADR 0004 pendiente) (§8).
+  progreso (spec en PR #232, versionado en ADR 0004, ambos en PR #232) (§8).
 * `docs/base-standards.md §2` y la sección de `CONTRIBUTING.md` sobre el
   contrato exporter → DB citan `DataVenezuela/dataVenezuela` como fuente de
   verdad actual; quedan desactualizadas en cuanto esta ADR se implemente (ver
@@ -278,9 +278,9 @@ esquema general.
   documenta la decisión pero no cambia nada en producción. No renombrar ni
   eliminar referencias a `dataVenezuela` antes de que el reemplazo exista.
 * *El contrato DB/scrapers todavía sin finalizar (§8)* podría bloquear
-  contribuciones externas de scrapers si tarda demasiado: la spec sigue en PR
-  #232 y su versionado (ADR 0004) aún no se decide. Cerrar ambos es el siguiente
-  paso inmediato tras esta ADR.
+  contribuciones externas de scrapers si tarda demasiado: la spec y ADR 0004
+  están en PR #232, aún sin fusionar. Fusionar ese PR es el siguiente paso
+  inmediato tras esta ADR.
 
 ---
 
@@ -296,7 +296,7 @@ tag), asi que encabeza el orden:
 [ ] Crear el repo privado vzla-deployment (Workers, ingest cron, DB connection,
     parsers/fuentes de produccion); importa VZLA_DEDUP y fija contract-v1.0
 [ ] Configurar la gobernanza del repo de deployment (quorum de mantenedores)
-    segun ADR 0005
+    segun ADR 0005 (sin issue/PR aún; pendiente de abrir)
 [ ] Crear el repo privado vzla-web (login + MFA, Worker de merge separado)
 [ ] Migrar credenciales/secrets desde cualquier superficie publica hacia los
     repos privados correspondientes
