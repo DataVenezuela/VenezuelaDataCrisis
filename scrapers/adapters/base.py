@@ -24,7 +24,7 @@ http_status : int
 content_type : str
     Valor del header Content-Type devuelto por el servidor.
 content_hash : str
-    SHA-256 hexadecimal del raw_content (prefijo "sha256:").
+    SHA-256 del raw_content en hex puro (64 caracteres, sin prefijo).
 raw_content : str | dict | list
     Contenido crudo.  Para adapters JSON puede ser el objeto ya deserializado;
     para HTML/texto es un str.  Puede contener PII — uso interno únicamente.

@@ -25,7 +25,7 @@ def now_utc() -> str:
 
 
 def sha256_hex(data: bytes) -> str:
-    """SHA-256 hexadecimal con el prefijo ``sha256:`` que usa ``content_hash``."""
+    """SHA-256 en hex puro (64 caracteres, sin prefijo) que usa ``content_hash``."""
     return f"{hashlib.sha256(data).hexdigest()}"
 
 

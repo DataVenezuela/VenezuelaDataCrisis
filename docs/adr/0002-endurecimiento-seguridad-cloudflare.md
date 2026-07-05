@@ -5,9 +5,14 @@
 | Estado | Propuesta |
 | Fecha | 2026-06-28 |
 | Decisores | Infraestructura, DB/API, Scrapers/Cleaners |
-| Reemplaza a | - |
+| Reemplaza a | (ninguno) |
 | Complementa | `docs/adr/0001-arquitectura-serving-publico.md` |
 | Relacionado con | `docs/pipeline.md §14`, `docs/schema.md` (Vista pública), `docs/base-standards.md §10`, `docs/implementation-plan.md` Fase 4 |
+
+> **Estado / implementación:** `Propuesta`. Nada de este endurecimiento está
+> aplicado todavía. En `master` no existen `serving/` ni `infra/cloudflare/`
+> (ADR 0001 §12) y `build_public_index.yml` es un stub. Este documento describe
+> la configuración objetivo del borde, no el estado actual del repo.
 
 ---
 
@@ -17,20 +22,15 @@ La ADR 0001 fijó la arquitectura de **dos planos**: un plano interno (Supabase 
 PostgreSQL, fuente de verdad con datos completos) y un **plano público de
 solo-lectura** servido desde el borde de Cloudflare (Worker + D1 con la
 proyección sanitizada). Esa ADR enumeró los controles de borde (WAF, caché,
-rate-limit, Turnstile), pero solo a alto nivel (§8 y §12).
+rate-limit, Turnstile) solo a alto nivel (§8 y §12).
 
-Esta ADR **no reabre** la decisión arquitectónica de la 0001: la **implementa y
-la endurece**. Concreta *cómo* se configura cada control de Cloudflare, en qué
-orden actúan, qué amenazas mitiga cada uno y qué queda como configuración
-versionada. El objetivo declarado por el equipo: **proteger el API tanto como sea
-posible con Cloudflare**, asumiendo un contexto de crisis donde:
-
-1. El dato sirve a personas vulnerables (PII como riesgo existencial).
-2. El tráfico llega en picos extremos y repetitivos.
-3. El presupuesto es ~0; los controles deben caber en el plan gratuito o casi.
-
-> Regla de oro heredada (`docs/README.md`): *Duplicar es tolerable. Perder
-> trazabilidad no. Exponer PII no. El plano público no posee datos en claro.*
+Esta ADR **no reabre** esa decisión: la **implementa y la endurece**. Concreta
+*cómo* se configura cada control de Cloudflare, en qué orden actúan, qué amenaza
+mitiga cada uno y qué queda como configuración versionada. Objetivo del equipo:
+**proteger el API tanto como sea posible con Cloudflare** en un contexto de
+crisis donde la PII es un riesgo existencial, el tráfico llega en picos extremos
+y repetitivos, y el presupuesto es ~0 (los controles deben caber en el plan
+gratuito o casi).
 
 ---
 
@@ -61,7 +61,7 @@ busca que ni siquiera eso sea trivial de cosechar en masa.
 
 ---
 
-## 3. Decisión: Defensa en profundidad en el borde
+## 3. Decisión: defensa en profundidad en el borde
 
 Se adopta una cadena de control en capas. Cada petición del público atraviesa,
 **en este orden**, los siguientes filtros antes de tocar lógica de aplicación.
@@ -79,7 +79,7 @@ flowchart TD
     CACHE -->|miss| W["Worker: validación de contrato + input + query parametrizada"]
     W --> D1[("D1: solo proyección sanitizada, FTS5")]
 
-    CACHE -->|hit| RESP["Respuesta cacheada, el Worker no se ejecuta"]
+    CACHE -->|hit| RESP["Respuesta cacheada: el Worker no se ejecuta"]
 ```
 
 **Lema de diseño:** *el origen no existe para el público.* No hay IP de origen
@@ -92,14 +92,13 @@ y el dato sensible físicamente no está en este plano.
 
 ### 4.1 Zona, DNS y exposición
 
-* La zona del dominio vive en Cloudflare. **Todo** registro público va en modo
-  **proxy (nube naranja)**: nunca DNS-only. Así no se filtra ninguna IP de origen.
-* El API se publica mediante una **ruta de Worker** (`api.<dominio>/v1/*`), no un
-  registro `A/AAAA` hacia un servidor. No hay origen TCP que escanear.
-* `wrangler.toml` declara la ruta y el binding a D1; el Worker es el único
-  ejecutable con acceso a la base.
-* Se deshabilitan métodos no usados: el API es solo-lectura → solo `GET`,
-  `HEAD`, `OPTIONS`. Cualquier otro método se rechaza en WAF (§4.4).
+* Zona en Cloudflare. **Todo** registro público en modo **proxy (nube naranja)**,
+  nunca DNS-only: no se filtra ninguna IP de origen.
+* El API se publica como **ruta de Worker** (`api.<dominio>/v1/*`), no un registro
+  `A/AAAA`: no hay origen TCP que escanear. `wrangler.toml` declara la ruta y el
+  binding a D1; el Worker es el único ejecutable con acceso a la base.
+* API solo-lectura: solo `GET`, `HEAD`, `OPTIONS`; cualquier otro método se
+  rechaza en WAF (§4.4).
 
 ### 4.2 TLS y transporte
 
@@ -209,11 +208,10 @@ plan de implementación, sin introducir tooling nuevo:
   métodos de lectura y tamaño de query string. Filtran el grueso del fuzzing antes
   de ejecutar el Worker.
 
-> **Mejora opcional futura (no en uso):** si más adelante se formaliza el contrato
-> como un `serving/openapi.yaml`, se puede activar **API Shield schema validation**
-> de Cloudflare para validar el request contra ese schema en el borde. No es
-> requisito de esta ADR; es un endurecimiento adicional sobre la validación del
-> Worker, no un reemplazo.
+> **Mejora opcional futura (no en uso):** formalizar el contrato como
+> `serving/openapi.yaml` habilitaría **API Shield schema validation** de Cloudflare
+> en el borde. Es un endurecimiento adicional sobre la validación del Worker, no un
+> reemplazo ni un requisito de esta ADR.
 
 ### 4.9 Headers de seguridad de respuesta
 

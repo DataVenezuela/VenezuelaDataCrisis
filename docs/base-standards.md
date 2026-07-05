@@ -183,3 +183,15 @@ PR description must include: what changed, why, how to test, what risk it carrie
 `base-standards.md §5` (Python only) applies to the entire pipeline and the internal BD layer.
 
 The **public serving plane** (`serving/` directory, Cloudflare Worker) is implemented in TypeScript. This is an explicit exception documented in ADR 0001 (`docs/adr/0001-arquitectura-serving-publico.md`). This exception does not extend beyond `serving/`.
+
+---
+
+## 12. Principles (non-negotiable)
+
+These are product and architecture invariants, not workflow advice (see §1 for that). They constrain every design and review. Breaking one is not a trade-off to weigh: it is a stop-and-escalate.
+
+- **PII first.** Protecting real people outranks every other goal. Never expose, log, or persist PII in the clear. When in doubt, redact.
+- **Nothing is dropped silently.** Anything that fails to parse, validate, or match a contract goes to quarantine with its trace, never to a discard or a generic fallback.
+- **Persons never auto-merge.** The consolidation job proposes duplicate candidates; a human confirms. A wrong merge can cost a life.
+- **Near-zero cost at rest.** This is a no-budget humanitarian system. The architecture must idle at ~$0 and lean on the edge to absorb traffic spikes, not on always-on compute.
+- **Auditable code, closed deployment.** The pipeline code is public and auditable; the deployment (infrastructure, secrets, and the private repos) stays closed, so the full system cannot be cloned into a doxxing engine.
