@@ -1,4 +1,4 @@
-# ADR 0002 — Endurecimiento de seguridad del plano público con Cloudflare
+# ADR 0002: Endurecimiento de seguridad del plano público con Cloudflare
 
 | Campo | Valor |
 |---|---|
@@ -22,7 +22,7 @@ La ADR 0001 fijó la arquitectura de **dos planos**: un plano interno (Supabase 
 PostgreSQL, fuente de verdad con datos completos) y un **plano público de
 solo-lectura** servido desde el borde de Cloudflare (Worker + D1 con la
 proyección sanitizada). Esa ADR enumeró los controles de borde (WAF, caché,
-rate-limit, Turnstile) solo a alto nivel (§8 y §12.4).
+rate-limit, Turnstile) solo a alto nivel (§8 y §12).
 
 Esta ADR **no reabre** esa decisión: la **implementa y la endurece**. Concreta
 *cómo* se configura cada control de Cloudflare, en qué orden actúan, qué amenaza
@@ -362,7 +362,7 @@ la config de borde se versiona así:
 | Worker + D1 + caché + DDoS L3/4/7 + WAF managed básico + Turnstile | Cloudflare Free/Pro | $0–20 / mes |
 | Bot Management avanzado / API Shield schema validation | Add-on (opcional) | según necesidad; degradable a reglas WAF + validación en Worker |
 | Cloudflare Access (operadores internos) | Zero Trust (hasta 50 usuarios gratis) | $0 |
-| Plano interno (Supabase) | plan actual del equipo | — |
+| Plano interno (Supabase) | plan actual del equipo | - |
 
 La mayoría de los controles caben en planes gratuitos/baratos. Los add-ons
 (Bot Management, API Shield) son **mejoras**, no requisitos: su ausencia se
@@ -451,5 +451,5 @@ contiene PII; el peor caso de brecha del borde son datos ya sanitizados.
 Duplicar es tolerable.
 Perder trazabilidad no.
 Exponer PII no.
-El plano público no posee datos en claro, y el borde lo defiende en cada capa.
+El plano público no posee datos en claro. El borde lo defiende en cada capa.
 ```
