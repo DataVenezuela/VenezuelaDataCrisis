@@ -483,6 +483,18 @@ class TestApplyPiiSourceUrl:
         enriched = rp._enrich_records(recs, [])
         assert enriched[0]["_normalizer_version"] == rp._PIPELINE_VERSION
 
+    def test_normalizer_version_set_even_if_location_raises(self) -> None:
+        # Si normalize_location lanza, el registro cae al except pero debe
+        # conservar _normalizer_version (trazabilidad, issue #236).
+        rec = {"full_name": "JUAN DEMO", "last_known_location": "Caracas"}
+        errors: list[str] = []
+        with patch.object(
+            rp, "normalize_location", side_effect=ValueError("boom")
+        ):
+            enriched = rp._enrich_records([rec], errors)
+        assert enriched[0]["_normalizer_version"] == rp._PIPELINE_VERSION
+        assert errors  # el error se registro, no se descarto en silencio
+
 
 # ---------------------------------------------------------------------------
 # Tests: idempotencia

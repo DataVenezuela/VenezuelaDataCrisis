@@ -547,6 +547,13 @@ def _enrich_records(records: list[dict], errors: list[str]) -> list[dict]:
     enriched: list[dict] = []
     for rec in records:
         try:
+            # Trazabilidad (issue #236): version del normalizador que corrio.
+            # Se setea primero, antes de cualquier paso que pueda lanzar (p. ej.
+            # normalize_location): si algo falla, el registro cae al except y se
+            # agrega a enriched, pero debe conservar el meta-campo para que el
+            # exporter no lo exporte con normalizer_version null.
+            rec["_normalizer_version"] = _PIPELINE_VERSION
+
             # Normalizar ubicacion si viene como string crudo sin objeto
             loc = rec.get("last_known_location")
             if isinstance(loc, str) and loc:
@@ -557,9 +564,6 @@ def _enrich_records(records: list[dict], errors: list[str]) -> list[dict]:
                     rec["last_known_location"] = f"{municipio}, {estado}"
                 elif estado:
                     rec["last_known_location"] = estado
-
-            # Trazabilidad (issue #236): version del normalizador que corrio.
-            rec["_normalizer_version"] = _PIPELINE_VERSION
 
             # Computar deterministic_id (external_id de Person)
             name_norm = _norm_name(rec.get("full_name") or "")
