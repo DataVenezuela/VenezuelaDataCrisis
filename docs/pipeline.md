@@ -649,12 +649,15 @@ upsert directo a Supabase via PostgREST.
 Responsabilidades del exporter:
 - Construir el payload del aporte usando los contratos de
   `scrapers/dedup/specs.py`: `entity_type`, `external_id`, `dedup_hash`,
-  `dedup_version`, `block_keys`, `content_hash`, `source_id` y `raw_json`
-  (el record de negocio sin claves internas con prefijo `_`). Keys en
+  `dedup_version`, `block_keys`, `content_hash`, `source_id`, `artifact_id` y
+  `raw_json` (el record de negocio sin claves internas con prefijo `_`). Keys en
   snake_case. El exporter resuelve `source_id` (uuid) a partir del slug de la
-  fuente: `source_slug` no viaja al POST. Además emite algunas claves no
-  canónicas (`run_id`, `scraper_id`, `source_url`, `parser_version`) que hoy
-  no son columnas de `aportes`; ver `docs/specs/db-scraper-contract.md` §4.2.
+  fuente: `source_slug` no viaja al POST. Desde el cutover Bronze (#256) emite
+  `artifact_id` (FK NOT NULL, lo stampa el pipeline como `_artifact_id` tras
+  registrar la página en `raw_artifacts`) y **dejó de emitir**
+  `run_id`/`scraper_id`/`source_url`/`parser_version`: la procedencia de corrida y
+  la URL de origen viven en la capa Bronze. Ver
+  `docs/specs/db-scraper-contract.md` §4.2 y ADR 0008.
 - `external_id` es determinista y **por-registro-de-fuente** para todo tipo:
   `sha256("<entity>|<source_slug>|<source_record_id>")` cuando la fuente da un
   id de registro nativo, o `sha256("<entity>|<source_slug>|<content_hash>")`

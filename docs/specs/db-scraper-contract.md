@@ -1,10 +1,16 @@
 # Spec: Contrato público DB/Scrapers (#231)
 
 > **Estado:** Propuesta
-> **CONTRACT_VERSION:** 1.0
-> **Issue:** #231
+> **CONTRACT_VERSION:** 2.0
+> **Issue:** #231 (cutover Bronze: #256)
 > **Origen:** issue #224 (punto 4), ADR 0003 §8, ADR 0004 (versionado)
-> **Fecha:** 2026-07-04
+> **Fecha:** 2026-07-07
+
+> **Cambio 1.0 -> 2.0 (breaking, issue #256):** el payload de `aportes` ahora emite
+> `artifact_id` (FK NOT NULL -> `raw_artifacts`) y dejó de emitir
+> `run_id`/`scraper_id`/`source_url`/`parser_version`. La procedencia de corrida y
+> la URL de origen viven en la capa Bronze (`scrape_runs` / `raw_artifacts`), que el
+> **pipeline** escribe vía `ProvenanceExporter` (ver §4.3 y ADR 0008).
 
 ---
 
@@ -56,9 +62,14 @@ Antes de que un scraper pueda exportar registros a staging:
 3. El JWT (`SUPABASE_INGEST_JWT`) debe estar firmado para el rol
    `scraper_ingest`, con permisos de `SELECT` sobre `sources` y
    `source_watermarks`, e `INSERT`/`UPDATE` (upsert) sobre `aportes` y
-   `source_watermarks`. Un JWT sin estos grants produce `401`/`403`, que
-   `get_watermark`/`_set_watermark` propagan como `PermissionError`
-   explícito (no como dry-run silencioso).
+   `source_watermarks`. Desde el cutover Bronze (#256) también necesita `INSERT`
+   sobre `scrape_runs` y `raw_artifacts` (con `RETURNING`/`SELECT` para leer
+   `run_id`/`artifact_id`) y `UPDATE` sobre `scrape_runs` (cierre de corrida). Un
+   JWT sin estos grants produce `401`/`403`: en el path de watermark
+   `get_watermark`/`_set_watermark` lo propagan como `PermissionError`; en el path
+   de Bronze `start_run`/`record_artifact` lo loguean a `ERROR` (grant faltante,
+   distinto de un fallo transitorio) y devuelven `None`, lo que hace fallar cerrado
+   la fuente (no se exporta ningún aporte sin su `raw_artifact`).
 
 Nada de esto lo garantiza el scraper: son condiciones de despliegue/config
 que el equipo de DB/API debe dejar satisfechas para que el contrato de este
@@ -84,10 +95,19 @@ Rutas usadas:
 
 | Método | Ruta | Uso |
 |---|---|---|
-| `GET` | `/rest/v1/sources?slug=eq.<slug>&select=source_id` | Resolver `source_slug → source_id` |
+| `GET` | `/rest/v1/sources?slug=eq.<slug>&select=id` | Resolver `source_slug → source_id` |
 | `GET` | `/rest/v1/source_watermarks?slug=eq.<slug>&select=watermark_at` | Leer el watermark actual de la fuente |
+| `POST` | `/rest/v1/scrape_runs` (Bronze, #256) | Abrir la corrida de la fuente (`Prefer: return=representation` para leer `run_id`) |
+| `PATCH` | `/rest/v1/scrape_runs?run_id=eq.<run_id>` (Bronze, #256) | Cerrar la corrida (`finished_at` + `stats`) |
+| `POST` | `/rest/v1/raw_artifacts` (Bronze, #256) | Registrar la página cruda append-only (`Prefer: return=representation` para leer `artifact_id`) |
 | `POST` | `/rest/v1/aportes?on_conflict=source_id,external_id` | Upsert de registros a staging |
 | `POST` | `/rest/v1/source_watermarks?on_conflict=slug` | Upsert del watermark tras exportar |
+
+> **Nota (`select=id` vs `source_id`):** el exporter resuelve la fuente con
+> `select=id` y lee `rows[0]["id"]` (así lo implementan `StagingExporter` y
+> `ProvenanceExporter`). `docs/schema.md` nombra esa PK `source_id`. Si la Data API
+> real expone `source_id` en vez de `id`, hay que alinear ambos writers a la vez
+> (usan el mismo patrón); es una discrepancia preexistente, no introducida por #256.
 
 Los `POST` llevan `Prefer: resolution=merge-duplicates` (más
 `return=minimal` en el de `aportes`), para que PostgREST resuelva el
@@ -103,8 +123,9 @@ La fuente de verdad del esquema es `docs/schema.md`. El `aportes` canónico tien
 estas columnas: `id`, `entity_type`, `raw_json`, `artifact_id`, `source_record_id`,
 `external_id`, `dedup_hash`, `dedup_version`, `block_keys`, `content_hash`,
 `normalizer_version`, `created_at`, `source_id`. `id` y `created_at` los genera la
-DB; `artifact_id` es **NOT NULL** y referencia `raw_artifacts` (ver nota de hueco
-abajo).
+DB; `artifact_id` es **NOT NULL** y referencia `raw_artifacts`. Desde #256 el
+exporter emite `artifact_id` (lo stampa el pipeline como meta-campo `_artifact_id`
+tras registrar la página en Bronze).
 
 ### 4.2 Claves que emite `_build_payload` hoy
 
@@ -120,37 +141,43 @@ columna del `aportes` canónico:
 | `block_keys` | sí | `scrapers/dedup/specs.py::block_keys` | sí |
 | `content_hash` | sí | sha256 del record limpio (sin claves `_*`), JSON canónico ordenado | sí |
 | `source_id` | sí | resuelto de `sources.slug`, §2 | sí |
+| `artifact_id` | sí | meta-campo `_artifact_id`, stampado por el pipeline tras registrar la página en Bronze (§4.3) | sí, **`NOT NULL`** (FK -> `raw_artifacts`) |
 | `raw_json` | sí | el record limpio (sin claves internas `_*`) | sí |
 | `dedup_hash` | no (el código la omite, ver §6) | omitida si no hay valor (ver §6) | sí, **`NOT NULL`** en canon (ver §4.3) |
 | `source_record_id` | no | omitida si `rec["_source_record_id"]` es `None`/vacío | sí |
 | `normalizer_version` | no | omitida si `rec["_normalizer_version"]` es `None`/vacío | sí |
-| `run_id` | sí | UUID de la corrida (`self.run_id`) | **no** (la corrida vive en `raw_artifacts.run_id` vía `artifact_id`) |
-| `scraper_id` | sí | constante fija `_SCRAPER_ID` (UUID) | **no** (no existe en el `aportes` canónico) |
-| `source_url` | no | omitida si `rec["_source_url"]` es `None`/vacío | **no** (es columna de `raw_artifacts`) |
-| `parser_version` | no | omitida si `rec["_parser_version"]` es `None`/vacío | **no** (el `aportes` canónico usa `normalizer_version`) |
 
 `source_slug` (string) **nunca** viaja en el payload: la DB espera `source_id`
 (uuid), no el slug legible del YAML.
 
-### 4.3 Divergencias código vs canon (huecos conocidos)
+Desde #256 el payload **ya no incluye** `run_id`, `scraper_id`, `source_url` ni
+`parser_version` (ver §4.3): son procedencia de corrida y URL, que ahora viven en
+la capa Bronze (`scrape_runs` / `raw_artifacts`).
 
-Estas divergencias son huecos de un diseño nuevo, no del contrato canónico. Se
-cierran fuera de este pase de docs (ver el Apéndice del plan de limpieza / issue
-de seguimiento #236):
+### 4.3 Estado código vs canon
 
-- El exporter emite `run_id`/`scraper_id`/`source_url`/`parser_version`, que **no**
-  son columnas del `aportes` canónico. La provenance de corrida y URL vive en
-  `raw_artifacts` (referenciada por `aportes.artifact_id`).
-- El exporter **no** envía `artifact_id` ni (para `Person` sin `deterministic_id`)
-  `dedup_hash`, aunque el canon (`docs/schema.md`) marca ambas `NOT NULL`. Aun así
-  producción inserta OK: señal de que la tabla `aportes` viva todavía es la legacy
-  (nullability laxa), no el `aportes` canónico. La migración de `aportes` a
-  `schema.md` reconcilia esto; hasta entonces `schema.md` describe el destino, no
-  el estado vivo de esas dos columnas.
-- **Cableado muerto (hoy):** `_source_url`, `_parser_version` y
-  `_normalizer_version` se leen pero el pipeline nunca los asigna, así que esas
-  claves siempre se omiten. Solo `_entity_type` y `_source_record_id` se pueblan
-  de verdad. La columna `contract_version` por fila (ADR 0004) tampoco existe aún.
+El cutover Bronze (#256) cerró los huecos de `artifact_id` y de la procedencia de
+corrida que antes rastreaba el issue de seguimiento #236:
+
+- **`artifact_id` (cerrado, #256):** el **pipeline** escribe la capa Bronze vía
+  `ProvenanceExporter` (`scrapers/exporters/provenance_exporter.py`): una fila
+  `scrape_runs` por fuente por corrida y una fila `raw_artifacts` **append-only**
+  por página fetcheada (dos corridas => dos artifacts de la misma página). El
+  `artifact_id` devuelto se stampa como meta-campo `_artifact_id` en cada aporte de
+  esa página, y `_build_payload` lo emite. Si no se puede crear la corrida o
+  registrar la página, la fuente **falla cerrado**: no se exporta ningún aporte sin
+  su `raw_artifact` y el watermark no avanza (re-fetch la próxima corrida).
+- **`run_id`/`scraper_id`/`source_url`/`parser_version` (cerrado, #256):** ya no se
+  emiten. La corrida vive en `scrape_runs`/`raw_artifacts.run_id`; la URL de origen
+  en `raw_artifacts.source_url`. El aporte llega a ambas vía `artifact_id`.
+  `_source_url` y `_parser_version` (que antes eran cableado muerto) dejaron de
+  usarse en el exporter; `record_artifact` toma la URL directo del `RawContent` de
+  la página.
+- **`dedup_hash` para `Person` sin `deterministic_id` (hueco abierto):** el código
+  aún **omite** `dedup_hash` en ese caso, aunque el canon lo marca `NOT NULL` (ver
+  §6). Es un hueco separado del alcance de #256 (toca el dedup de `Person`, no la
+  procedencia).
+- La columna `contract_version` por fila (ADR 0004) sigue sin existir.
 
 ---
 
@@ -239,6 +266,13 @@ identidad del aporte.
   - Se aplica un margen de seguridad de 5 minutos
     (`_WATERMARK_SAFETY_MARGIN`) restado al máximo `fetched_at` del batch,
     para no perder registros que hayan llegado durante el ciclo de scraping.
+  - **Fail-closed de Bronze (#256):** si no se puede abrir la corrida
+    (`start_run`) o registrar una página (`record_artifact`), ese error se acumula
+    en `source_errors`, así que el watermark **no avanza** para la fuente entera
+    (semántica at-least-once: se re-fetcha la próxima corrida). A diferencia de un
+    `POST` de `aportes` fallido, un fallo de procedencia retiene toda la fuente: un
+    solo timestamp de watermark no puede expresar "todas las páginas menos la 1
+    están hechas".
 
 ---
 
@@ -260,29 +294,28 @@ fusión vive solo en gold. Ver `CONTRIBUTING.md` ("Dónde aterriza cada cosa") y
 
 ```json
 {
-  "run_id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
   "entity_type": "person",
   "external_id": "3b4c9e2a1fd82f6a0bc347e1a9f2c8d5e047b3a12f9c6d71e8b405a3c2d1f9e0",
   "dedup_version": "person-detid-v1",
   "block_keys": ["ced:f0e1d2c3-b4a5-6789-0fed-cba987654321:3b4c9e...1f9e0"],
   "content_hash": "9f1c3e8a2b7d6c5f4e3d2c1b0a9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c3b2a1f",
   "source_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-  "scraper_id": "00000000-0000-0000-0000-000000000001",
+  "artifact_id": "c1d2e3f4-a5b6-7890-cdef-1234567890ab",
+  "normalizer_version": "0.x.y",
   "raw_json": {
     "full_name": "JOSE LUIS PEREZ DEMO",
     "event_id": "f0e1d2c3-b4a5-6789-0fed-cba987654321",
     "status": "missing",
     "fuente": "encuentralos.tecnosoft.dev"
-  },
-  "source_url": "https://encuentralos.tecnosoft.dev/registro/demo-12345"
+  }
 }
 ```
 
-> Nota: el ejemplo muestra lo que emite el exporter **hoy**. `run_id`,
-> `scraper_id` y `source_url` **no** son columnas del `aportes` canónico (ver §4.3
-> y `docs/schema.md`); `source_url` además viaja ausente por cableado muerto
-> (issue #236). El ejemplo no representa el `aportes` canónico, sino la salida
-> actual del código a cerrar contra el schema.
+> Nota: el ejemplo muestra el `aportes` canónico que emite el exporter tras el
+> cutover #256. `artifact_id` (FK -> `raw_artifacts`) es obligatorio; la URL de
+> origen (`https://encuentralos.tecnosoft.dev/registro/demo-12345`) y la corrida
+> viven en la fila `raw_artifacts` referenciada por ese `artifact_id`, no en el
+> aporte. `run_id`/`scraper_id`/`source_url`/`parser_version` ya no se emiten.
 
 ---
 
@@ -303,9 +336,10 @@ fusión vive solo en gold. Ver `CONTRIBUTING.md` ("Dónde aterriza cada cosa") y
 ## 11. Referencias
 
 - `scrapers/exporters/staging_exporter.py`
+- `scrapers/exporters/provenance_exporter.py` (Bronze: `scrape_runs` / `raw_artifacts`)
 - `scrapers/dedup/specs.py`
-- `scrapers/pipelines/run_pipeline.py` (`_run_source`, líneas ~675-807)
-- `scrapers/tests/test_staging_contract.py`
-- issue #224 (punto 4), ADR 0003 §8 y §12
+- `scrapers/pipelines/run_pipeline.py` (`_run_source`)
+- `scrapers/tests/test_staging_contract.py`, `scrapers/tests/test_provenance_exporter.py`
+- issue #224 (punto 4), issue #256 (cutover Bronze), ADR 0003 §8 y §12, ADR 0008
 - `docs/specs/person-dedup.md`
 - `docs/source_config.md`
