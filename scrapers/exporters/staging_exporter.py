@@ -7,6 +7,12 @@ Cada batch de registros (post-PII, post-score, post-minor-protection)
 se upserta con ``Prefer: resolution=merge-duplicates``; la idempotencia
 por external_id absorbe re-envios sin duplicar.
 
+El payload es el ``aportes`` canonico (issue #256): emite ``artifact_id``
+(FK NOT NULL -> raw_artifacts, stampado por el pipeline como ``_artifact_id``
+tras registrar la pagina en Bronze via ``ProvenanceExporter``) y ya NO emite
+``run_id``/``scraper_id``/``source_url``/``parser_version`` (la procedencia de
+corrida y la URL viven en ``raw_artifacts``).
+
 Sin red real en tests: el httpx.Client es inyectable via el parametro
 ``client`` del constructor (los tests pasan httpx.Client(transport=...)).
 Si faltan las env vars SUPABASE_*, el exporter entra en dry-run silencioso:
@@ -43,7 +49,11 @@ _DEFAULT_WATERMARK = "1970-01-01T00:00:00Z"
 _APORTES_UPSERT_PATH = "/rest/v1/aportes?on_conflict=source_id,external_id"
 _WATERMARKS_PATH = "/rest/v1/source_watermarks"
 _WATERMARKS_UPSERT_PATH = "/rest/v1/source_watermarks?on_conflict=slug"
-_SCRAPER_ID = "00000000-0000-0000-0000-000000000001"
+
+# Placeholder de artifact_id para dry-run: el aporte canonico exige artifact_id
+# NOT NULL, pero en dry-run no hay red ni Bronze, asi que se usa este valor solo
+# para poder construir el payload de log. NUNCA viaja a la DB (dry-run no POSTea).
+_DRYRUN_ARTIFACT_ID = "00000000-0000-0000-0000-000000000000"
 
 _WATERMARK_SAFETY_MARGIN = timedelta(minutes=5)
 _FETCHED_AT_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
@@ -176,6 +186,10 @@ class StagingExporter:
     ) -> None:
         self.config = config
         self.enabled = config is not None
+        # run_id se conserva como handle de correlacion de la corrida (compartido
+        # con QuarantineExporter en run_pipeline); ya NO se emite en el payload de
+        # aportes: la procedencia de corrida vive en raw_artifacts.run_id, al que
+        # el aporte llega via artifact_id (issue #256).
         self.run_id = run_id or str(uuid.uuid4())
         self._owns_client = client is None
         self._client: httpx.Client | None = client
@@ -248,22 +262,37 @@ class StagingExporter:
                 "verificar que la fuente exista en la tabla sources "
                 "y que el JWT tenga SELECT sobre sources"
             )
+        # artifact_id (FK NOT NULL -> raw_artifacts) lo stampa el pipeline como
+        # meta-campo _artifact_id, tras registrar la pagina en Bronze
+        # (ProvenanceExporter). Sin el no puede existir el aporte canonico: en
+        # modo enabled se falla cerrado (el registro no se envia y no cuenta como
+        # sent, asi el watermark no avanza); en dry-run se usa un placeholder solo
+        # para poder construir el payload de log. La corrida y la URL de origen
+        # ahora viven en raw_artifacts (via artifact_id), ya no en el aporte:
+        # por eso se dejaron de emitir run_id/scraper_id/source_url/parser_version
+        # (issue #256).
+        artifact_id = _opt_str(rec.get("_artifact_id"))
+        if artifact_id is None:
+            if self.enabled:
+                raise ValueError(
+                    "falta _artifact_id: el aporte canonico exige artifact_id "
+                    "NOT NULL (raw_artifacts); el pipeline debe registrar la "
+                    "pagina en Bronze antes de exportar el aporte"
+                )
+            artifact_id = _DRYRUN_ARTIFACT_ID
         payload: dict[str, object] = {
-            "run_id": self.run_id,
             "entity_type": _entity_type_slug(entity_type),
             "external_id": external_id,
             "dedup_version": spec.version,
             "block_keys": specs.block_keys(rec, entity_type),
             "content_hash": content_hash,
             "source_id": source_id,
-            "scraper_id": _SCRAPER_ID,
+            "artifact_id": artifact_id,
             "raw_json": clean,
         }
         for key, value in (
             ("dedup_hash", dedup_hash),
             ("source_record_id", src_rec_id),
-            ("source_url", _opt_str(rec.get("_source_url"))),
-            ("parser_version", _opt_str(rec.get("_parser_version"))),
             ("normalizer_version", _opt_str(rec.get("_normalizer_version"))),
         ):
             if value is not None:

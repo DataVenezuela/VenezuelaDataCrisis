@@ -1,11 +1,15 @@
 """
 scrapers/tests/test_staging_contract.py
 ==========================================
-Test de contrato del payload contra el schema real de dataVenezuela.
+Test de contrato del payload contra el ``aportes`` canonico.
 
-Valida que los payloads que genera _build_payload tengan las columnas
-correctas (según las migraciones 0001_init.sql y 0008_ingesta_staging_dedup.sql)
-y que el batch upsert use on_conflict resoluble.
+Valida que los payloads que genera ``_build_payload`` tengan las columnas
+canonicas (segun ``docs/schema.md`` y ``docs/specs/db-scraper-contract.md``, tras
+el cutover Bronze de #256) y que el batch upsert use ``on_conflict`` resoluble.
+
+Cutover #256: el payload emite ``artifact_id`` (FK NOT NULL -> raw_artifacts) y
+ya NO emite ``run_id``/``scraper_id``/``source_url``/``parser_version`` (la
+procedencia de corrida y la URL viven en ``raw_artifacts``).
 """
 
 from __future__ import annotations
@@ -17,28 +21,32 @@ import httpx
 from scrapers.exporters.staging_exporter import StagingConfig, StagingExporter
 
 _EVENT_ID = "8f14e45f-ceea-467e-bd5d-0a4f2e0c1a3a"
+_ARTIFACT_UUID = "c1d2e3f4-a5b6-7890-cdef-1234567890ab"
 
-# Columnas reales de public.aportes según 0001_init + 0008_ingesta_staging_dedup
+# Columnas del ``aportes`` canonico que puede emitir _build_payload
+# (docs/schema.md). id/created_at los genera la DB.
 _APORTES_COLUMNS = {
-    "run_id", "entity_type", "external_id", "dedup_hash", "dedup_version",
-    "block_keys", "content_hash", "source_id", "scraper_id",
-    "raw_json", "source_record_id", "source_url",
-    "parser_version", "normalizer_version",
+    "entity_type", "external_id", "dedup_hash", "dedup_version",
+    "block_keys", "content_hash", "source_id", "artifact_id",
+    "raw_json", "source_record_id", "normalizer_version",
 }
 
-# Columnas de public.source_watermarks según 0008
+# Columnas de public.source_watermarks
 _WATERMARK_COLUMNS = {"slug", "watermark_at"}
 
 # Columnas que produce _build_payload (obligatorias + opcionales)
-_PAYLOAD_REQUIRED = {"run_id", "entity_type", "external_id", "dedup_version",
-                     "block_keys", "content_hash", "source_id", "scraper_id", "raw_json"}
-_PAYLOAD_OPTIONAL = {"dedup_hash", "source_record_id", "source_url",
-                     "parser_version", "normalizer_version"}
+_PAYLOAD_REQUIRED = {"entity_type", "external_id", "dedup_version", "block_keys",
+                     "content_hash", "source_id", "artifact_id", "raw_json"}
+_PAYLOAD_OPTIONAL = {"dedup_hash", "source_record_id", "normalizer_version"}
+
+# Claves legacy que el cutover #256 elimino del payload de aportes.
+_LEGACY_DROPPED = {"run_id", "scraper_id", "source_url", "parser_version"}
 
 
 def _person(det: str | None = "detid123") -> dict[str, Any]:
     return {
         "_entity_type": "Person",
+        "_artifact_id": _ARTIFACT_UUID,
         "full_name": "JUAN DEMO",
         "event_id": _EVENT_ID,
         "last_known_location": "Lara",
@@ -66,13 +74,12 @@ def _exporter_for_payload() -> StagingExporter:
 
 
 class TestPayloadContract:
-    """Valida columnas del payload contra el schema real de aportes."""
+    """Valida columnas del payload contra el aportes canonico."""
 
     def test_all_payload_keys_are_valid_columns(self) -> None:
         exp = _exporter_for_payload()
         payload = exp._build_payload(_person(), "demo_src")
         all_keys = set(payload.keys())
-        # Todas las keys del payload deben ser columnas reales de aportes
         invalid = all_keys - _APORTES_COLUMNS
         assert not invalid, f"keys del payload que no son columnas de aportes: {invalid}"
 
@@ -81,6 +88,17 @@ class TestPayloadContract:
         payload = exp._build_payload(_person(), "demo_src")
         missing = _PAYLOAD_REQUIRED - set(payload.keys())
         assert not missing, f"faltan keys requeridas en payload: {missing}"
+
+    def test_artifact_id_is_present_and_from_meta(self) -> None:
+        exp = _exporter_for_payload()
+        payload = exp._build_payload(_person(), "demo_src")
+        assert payload["artifact_id"] == _ARTIFACT_UUID
+
+    def test_legacy_provenance_keys_dropped(self) -> None:
+        exp = _exporter_for_payload()
+        payload = exp._build_payload(_person(), "demo_src")
+        present_legacy = _LEGACY_DROPPED & set(payload.keys())
+        assert not present_legacy, f"claves legacy no deben viajar: {present_legacy}"
 
     def test_optional_keys_omitted_when_none(self) -> None:
         exp = _exporter_for_payload()
@@ -104,7 +122,7 @@ class TestPayloadContract:
 
 
 class TestWatermarkContract:
-    """Valida columnas del watermark contra el schema real de source_watermarks."""
+    """Valida columnas del watermark contra el schema de source_watermarks."""
 
     def test_watermark_path_targets_source_watermarks(self) -> None:
         """La PK de source_watermarks es slug (no source_slug)."""
@@ -124,8 +142,3 @@ class TestOnConflict:
         assert "on_conflict=source_id,external_id" in path, (
             f"path debe contener on_conflict=source_id,external_id, got: {path}"
         )
-
-    def test_scraper_id_is_constant(self) -> None:
-        from scrapers.exporters.staging_exporter import _SCRAPER_ID
-        assert _SCRAPER_ID, "scraper_id debe ser un UUID no vacio"
-        assert _SCRAPER_ID.count("-") == 4, "scraper_id debe tener formato UUID"
