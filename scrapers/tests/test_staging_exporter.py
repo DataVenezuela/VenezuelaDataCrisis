@@ -26,7 +26,6 @@ from scrapers.exporters.staging_exporter import (
     StagingConfig,
     StagingExporter,
     _apply_safety_margin,
-    compute_external_id,
 )
 
 _EVENT_ID = "8f14e45f-ceea-467e-bd5d-0a4f2e0c1a3a"
@@ -163,39 +162,102 @@ class TestPayload:
 
 
 class TestSharedFingerprint:
+    """Issue #255: external_id es por-registro-de-fuente para TODO tipo.
+
+    El fingerprint v1 (Event/AcopioCenter) y el deterministic_id (Person)
+    siguen viajando en dedup_hash para linkear en gold, pero ya NO son la
+    identidad del aporte: external_id nunca vuelve a ser el fingerprint.
+    """
+
     def _export_and_get(self, rec: dict[str, Any]) -> dict[str, Any]:
         t = _RecordingTransport()
         _exporter(t).export_source([rec], source_slug="demo", source_fetched_ats=["2026-06-24T15:00:00Z"])
         return t.batch_posts[0][0]
 
-    def test_event_external_id_equals_dedup_hash(self) -> None:
-        body = self._export_and_get(_event())
-        assert body["external_id"] == body["dedup_hash"]
-
-    def test_event_external_id_is_fingerprint_v1(self) -> None:
+    def test_event_dedup_hash_is_fingerprint_v1(self) -> None:
         rec = _event()
         body = self._export_and_get(rec)
-        expected = specs.event_dedup_key(rec)
-        assert body["external_id"] == expected
-        assert body["dedup_hash"] == expected
+        assert body["dedup_hash"] == specs.event_dedup_key(rec)
 
-    def test_acopio_external_id_equals_dedup_hash(self) -> None:
-        body = self._export_and_get(_acopio())
-        assert body["external_id"] == body["dedup_hash"]
+    def test_event_external_id_is_not_the_fingerprint(self) -> None:
+        rec = _event()
+        body = self._export_and_get(rec)
+        assert body["external_id"] != specs.event_dedup_key(rec)
+        assert body["external_id"] != body["dedup_hash"]
 
-    def test_acopio_external_id_is_fingerprint_v1(self) -> None:
+    def test_acopio_dedup_hash_is_fingerprint_v1(self) -> None:
         rec = _acopio()
         body = self._export_and_get(rec)
-        expected = specs.acopio_dedup_key(rec)
-        assert body["external_id"] == expected
-        assert body["dedup_hash"] == expected
+        assert body["dedup_hash"] == specs.acopio_dedup_key(rec)
 
-    def test_values_match_legacy_separate_computation(self) -> None:
-        for rec in (_event(), _acopio()):
-            entity_type = rec["_entity_type"]
+    def test_acopio_external_id_is_not_the_fingerprint(self) -> None:
+        rec = _acopio()
+        body = self._export_and_get(rec)
+        assert body["external_id"] != specs.acopio_dedup_key(rec)
+        assert body["external_id"] != body["dedup_hash"]
+
+    def test_external_id_is_64_hexchars_for_all_types(self) -> None:
+        for rec in (_person("Juan"), _event(), _acopio()):
             body = self._export_and_get(rec)
-            assert body["external_id"] == compute_external_id(rec, entity_type)
-            assert body["dedup_hash"] == specs.dedup_key(rec, entity_type)
+            assert re.fullmatch(r"[0-9a-f]{64}", body["external_id"])
+
+
+# --- silver nunca colapsa (issue #255) --------------------------------------
+
+
+class TestSilverNeverCollapses:
+    """La identidad del aporte es el registro-fuente, nunca su contenido.
+
+    Dos registros DISTINTOS de una misma fuente que comparten cedula,
+    fingerprint o nombre deben producir DOS aportes (dos external_id), no uno.
+    Las senales de dedup siguen en block_keys/dedup_hash para linkear en gold.
+    """
+
+    def _export(self, recs: list[dict[str, Any]], slug: str = "demo") -> list[dict[str, Any]]:
+        t = _RecordingTransport()
+        _exporter(t).export_source(recs, source_slug=slug, source_fetched_ats=["2026-06-24T15:00:00Z"])
+        return [payload for batch in t.batch_posts for payload in batch]
+
+    def test_two_persons_same_cedula_distinct_records_two_aportes(self) -> None:
+        # Misma cedula_hmac (mismo signal fuerte de fingerprint) pero distinto
+        # contenido, sin source_record_id nativo: antes colapsaban a un aporte,
+        # ahora son dos. La cedula sigue en block_keys para linkearlos en gold.
+        a = _person("Juan Perez", hmac="ced-abc", det=None)
+        b = _person("Juana Perez", hmac="ced-abc", det=None)
+        bodies = self._export([a, b])
+        assert len({body["external_id"] for body in bodies}) == 2
+        for body in bodies:
+            assert any(k.startswith(f"ced:{_EVENT_ID}:ced-abc") for k in body["block_keys"])
+
+    def test_two_persons_same_deterministic_id_distinct_records_two_aportes(self) -> None:
+        # Mismo deterministic_id via distinto _source_record_id de la misma fuente.
+        a = _person("Juan", det="same-det")
+        a["_source_record_id"] = "rec-1"
+        b = _person("Juan", det="same-det")
+        b["_source_record_id"] = "rec-2"
+        bodies = self._export([a, b])
+        assert len({body["external_id"] for body in bodies}) == 2
+        # El deterministic_id compartido sigue en dedup_hash para el linkeo.
+        assert bodies[0]["dedup_hash"] == bodies[1]["dedup_hash"] == "same-det"
+
+    def test_two_events_same_fingerprint_distinct_content_two_aportes(self) -> None:
+        # Mismo event_type/location/hora (mismo fingerprint, que excluye
+        # description) pero description distinta: dos aportes, un dedup_hash.
+        a = _event()
+        b = _event()
+        b["description"] = "Otra descripcion del mismo sismo"
+        bodies = self._export([a, b])
+        assert len({body["external_id"] for body in bodies}) == 2
+        assert bodies[0]["dedup_hash"] == bodies[1]["dedup_hash"]
+
+    def test_two_acopios_same_fingerprint_distinct_content_two_aportes(self) -> None:
+        # Mismo name/location/event (mismo fingerprint) pero needs distintos.
+        a = _acopio()
+        b = _acopio()
+        b["needs"] = ["agua", "medicinas"]
+        bodies = self._export([a, b])
+        assert len({body["external_id"] for body in bodies}) == 2
+        assert bodies[0]["dedup_hash"] == bodies[1]["dedup_hash"]
 
 
 # --- idempotencia -----------------------------------------------------------
@@ -208,20 +270,11 @@ class TestIdempotency:
         _exporter(t2).export_source([_person("Juan")], source_slug="demo", source_fetched_ats=["2026-06-24T15:00:00Z"])
         assert t1.batch_posts[0][0]["external_id"] == t2.batch_posts[0][0]["external_id"]
 
-    def test_person_external_id_is_deterministic_id(self) -> None:
-        rec = _person("Juan", det="abc999")
-        assert compute_external_id(rec, "Person") == "abc999"
-
-    def test_person_external_id_fallback_to_hmac(self) -> None:
-        rec = _person("Juan", hmac="hmac-1", det=None)
-        eid = compute_external_id(rec, "Person")
-        assert eid and len(eid) == 64
-        assert compute_external_id(_person("Juan", hmac="hmac-1", det=None), "Person") == eid
-
-    def test_person_external_id_fallback_distinguishes_records(self) -> None:
-        a = compute_external_id(_person("Juan", det=None), "Person")
-        b = compute_external_id(_person("Ana", det=None), "Person")
-        assert a != b
+    def test_idempotent_event_external_id_same_across_runs(self) -> None:
+        t1, t2 = _RecordingTransport(), _RecordingTransport()
+        _exporter(t1).export_source([_event()], source_slug="demo", source_fetched_ats=["2026-06-24T15:00:00Z"])
+        _exporter(t2).export_source([_event()], source_slug="demo", source_fetched_ats=["2026-06-24T15:00:00Z"])
+        assert t1.batch_posts[0][0]["external_id"] == t2.batch_posts[0][0]["external_id"]
 
 
 # --- source_record_id -------------------------------------------------------
@@ -260,10 +313,19 @@ class TestSourceRecordId:
         body = self._export_one(rec)
         assert body.get("source_record_id") == "test-uuid-999"
 
-    def test_without_source_record_id_falls_back_to_deterministic(self) -> None:
+    def test_without_source_record_id_falls_back_to_content_hash(self) -> None:
+        # Sin _source_record_id nativo, external_id se ancla al content_hash del
+        # registro (no al deterministic_id): dos registros con el mismo
+        # deterministic_id pero distinto contenido no colapsan.
+        import hashlib
+
         rec = _person("Juan Demo", det="detid-fallback")
-        body = self._export_one(rec)
-        assert body["external_id"] == "detid-fallback"
+        body = self._export_one(rec, slug="demo")
+        assert body["external_id"] != "detid-fallback"
+        expected = hashlib.sha256(
+            f"person|demo|{body['content_hash']}".encode()
+        ).hexdigest()
+        assert body["external_id"] == expected
 
     def test_external_id_is_64_hexchars(self) -> None:
         rec = _person("Juan Demo")
@@ -712,7 +774,12 @@ class TestBatchFallback:
 
     def test_batch_400_one_bad_record_others_sent(self) -> None:
         """Un registro inválido genera error pero no bloquea los demás del batch."""
-        BAD_DET = "det-bad"
+        import hashlib
+
+        # external_id ya no es el deterministic_id; se ancla al registro-fuente.
+        # El registro malo trae un _source_record_id, asi su external_id es
+        # predecible y el transport falso lo puede rechazar puntualmente.
+        bad_external_id = hashlib.sha256(b"person|demo|rec-bad").hexdigest()
 
         class _Transport(httpx.BaseTransport):
             def handle_request(self, request: httpx.Request) -> httpx.Response:
@@ -724,14 +791,16 @@ class TestBatchFallback:
                     body = json.loads(request.content)
                     if len(body) > 1:
                         return httpx.Response(400, json={"message": "batch rejected"})
-                    if body[0].get("external_id") == BAD_DET:
+                    if body[0].get("external_id") == bad_external_id:
                         return httpx.Response(400, json={"message": "bad record"})
                     return httpx.Response(201, json={})
                 return httpx.Response(404)
 
+        bad = _person("Bad", det="det-bad")
+        bad["_source_record_id"] = "rec-bad"
         records = [
             _person("Good1", det="det-ok-1"),
-            _person("Bad", det=BAD_DET),
+            bad,
             _person("Good2", det="det-ok-2"),
         ]
         res = _exporter(_Transport()).export_source(
@@ -740,7 +809,7 @@ class TestBatchFallback:
         )
         assert res.sent == 2
         assert len(res.errors) == 1
-        assert BAD_DET in res.errors[0]
+        assert bad_external_id in res.errors[0]
 
 
 # --- dry-run ----------------------------------------------------------------

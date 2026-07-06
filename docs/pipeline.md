@@ -655,10 +655,14 @@ Responsabilidades del exporter:
   fuente: `source_slug` no viaja al POST. Además emite algunas claves no
   canónicas (`run_id`, `scraper_id`, `source_url`, `parser_version`) que hoy
   no son columnas de `aportes`; ver `docs/specs/db-scraper-contract.md` §4.2.
-- `external_id` es determinista (fingerprint v1 para Event/AcopioCenter,
-  `deterministic_id` para Person). PostgREST hace upsert por `external_id`
-  via `Prefer: resolution=merge-duplicates`, así que re-correr la misma
-  fuente no duplica (idempotencia).
+- `external_id` es determinista y **por-registro-de-fuente** para todo tipo:
+  `sha256("<entity>|<source_slug>|<source_record_id>")` cuando la fuente da un
+  id de registro nativo, o `sha256("<entity>|<source_slug>|<content_hash>")`
+  cuando no. Ya no es el fingerprint ni el `deterministic_id`: dos registros
+  distintos de una fuente que comparten cédula o fingerprint son dos aportes,
+  no uno (la dedup vive en edges y gold, no en silver). PostgREST hace upsert
+  por `external_id` via `Prefer: resolution=merge-duplicates`, así que
+  re-correr la misma fuente no duplica (idempotencia).
 - Enviar en lotes (batch) configurables por fuente (`bulk_size` /
   `max_concurrent_posts` de `SourceConfig`). Cada batch exitoso (2xx) cuenta
   como enviado; un batch fallido se registra en `result.errors`.
@@ -1062,7 +1066,7 @@ Ejemplo de payload (los registros se envían en batches PostgREST):
 {
   "run_id": "uuid-v4",
   "entity_type": "person",
-  "external_id": "deterministico-16-hex-o-sha256",
+  "external_id": "sha256-hex (source_slug + source_record_id o content_hash)",
   "dedup_hash": "deterministico",
   "dedup_version": "person-detid-v1",
   "block_keys": ["ced:uuid-v4:hmac", "phon:uuid-v4:lara:JN"],

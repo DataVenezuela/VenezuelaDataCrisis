@@ -745,11 +745,10 @@ sources:
     @staticmethod
     def _unique_persons(suffix: str) -> list[Person]:
         """Personas con nombre/ubicacion distintos por fuente para que el
-        external_id (deterministic_id, basado en nombre+ubicacion) no
-        coincida entre fuentes — si coincidiera, dataVenezuela las trataria
-        como la misma persona reportada por dos fuentes y devolveria 409
-        (comportamiento correcto de idempotencia, pero no lo que este test
-        quiere medir: throughput agregado de fuentes realmente distintas).
+        external_id (por-registro-de-fuente: source_slug + content_hash) no
+        coincida entre fuentes — asi cada fuente aporta filas propias y el
+        test mide throughput agregado de fuentes realmente distintas, sin que
+        el upsert por (source_id, external_id) las colapse.
         """
         return [
             Person(

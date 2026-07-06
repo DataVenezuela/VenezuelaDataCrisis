@@ -138,21 +138,29 @@ def _apply_safety_margin(watermark_at: str) -> str:
     return (dt - _WATERMARK_SAFETY_MARGIN).strftime(_FETCHED_AT_FORMAT)
 
 
-def compute_external_id(rec: dict[str, object], entity_type: str) -> str:
-    if entity_type == "Event":
-        return specs.event_dedup_key(rec)
-    if entity_type == "AcopioCenter":
-        return specs.acopio_dedup_key(rec)
-    det = rec.get("deterministic_id")
-    if det:
-        return str(det)
-    event_id = str(rec.get("event_id") or "")
-    cedula_hmac = rec.get("cedula_hmac")
-    if isinstance(cedula_hmac, str) and cedula_hmac.strip():
-        seed = f"person|{event_id}|{cedula_hmac}"
-        return hashlib.sha256(seed.encode("utf-8")).hexdigest()
-    clean = {k: v for k, v in rec.items() if not k.startswith("_")}
-    seed = f"person|{event_id}|{_content_hash(clean)}"
+def _aporte_external_id(
+    entity_type: str,
+    source_slug: str,
+    source_record_id: str | None,
+    content_hash: str,
+) -> str:
+    """Identidad del aporte = registro-fuente, nunca su contenido ni identidad real.
+
+    Por el modelo medallion (``.agents/CONTEXT.md``: "silver nunca colapsa"): dos
+    registros DISTINTOS de una misma fuente que compartan cedula, fingerprint o
+    incluso nombre NO deben fundirse en un solo aporte al ingerir. La
+    deduplicacion vive en los edges (``dedup_candidates``) y en gold, jamas en
+    silver.
+
+    ``external_id`` es por-registro-de-fuente para TODO tipo de entidad:
+    ``sha256(entity | source | source_record_id)`` cuando la fuente da un id de
+    registro nativo, o ``sha256(entity | source | content_hash)`` cuando no lo da.
+    Las senales de dedup (``dedup_hash``, ``deterministic_id``, fingerprint,
+    fonetica) siguen viajando por ``block_keys`` y ``raw_json``: alimentan el
+    linkeo, ya no la identidad del aporte.
+    """
+    basis = source_record_id if source_record_id else content_hash
+    seed = f"{entity_type.lower()}|{source_slug}|{basis}"
     return hashlib.sha256(seed.encode("utf-8")).hexdigest()
 
 
@@ -225,22 +233,13 @@ class StagingExporter:
         clean = {k: v for k, v in rec.items() if not k.startswith("_")}
         spec = specs.spec_for_entity_type(entity_type)
 
-        if entity_type == "Event":
-            fingerprint = specs.event_dedup_key(rec)
-            external_id: str = fingerprint
-            dedup_hash: str | None = fingerprint
-        elif entity_type == "AcopioCenter":
-            fingerprint = specs.acopio_dedup_key(rec)
-            external_id = fingerprint
-            dedup_hash = fingerprint
-        else:
-            src_rec_id = _opt_str(rec.get("_source_record_id"))
-            if src_rec_id:
-                seed = f"person|{source_slug}|{src_rec_id}"
-                external_id = hashlib.sha256(seed.encode("utf-8")).hexdigest()
-            else:
-                external_id = compute_external_id(rec, entity_type)
-            dedup_hash = specs.dedup_key(rec, entity_type)
+        # Identidad del aporte = registro-fuente, uniforme para todo tipo. El
+        # fingerprint/deterministic_id sigue en dedup_hash + block_keys para el
+        # linkeo en gold, pero ya no keyea aportes (ver _aporte_external_id).
+        content_hash = _content_hash(clean)
+        src_rec_id = _opt_str(rec.get("_source_record_id"))
+        external_id = _aporte_external_id(entity_type, source_slug, src_rec_id, content_hash)
+        dedup_hash = specs.dedup_key(rec, entity_type)
 
         source_id = self._resolve_source_id(source_slug)
         if source_id is None:
@@ -255,14 +254,14 @@ class StagingExporter:
             "external_id": external_id,
             "dedup_version": spec.version,
             "block_keys": specs.block_keys(rec, entity_type),
-            "content_hash": _content_hash(clean),
+            "content_hash": content_hash,
             "source_id": source_id,
             "scraper_id": _SCRAPER_ID,
             "raw_json": clean,
         }
         for key, value in (
             ("dedup_hash", dedup_hash),
-            ("source_record_id", _opt_str(rec.get("_source_record_id"))),
+            ("source_record_id", src_rec_id),
             ("source_url", _opt_str(rec.get("_source_url"))),
             ("parser_version", _opt_str(rec.get("_parser_version"))),
             ("normalizer_version", _opt_str(rec.get("_normalizer_version"))),
