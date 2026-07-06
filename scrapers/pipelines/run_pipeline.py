@@ -490,7 +490,7 @@ def _apply_pii(
             # poblar source_url/parser_version en aportes.
             if source_url:
                 d["_source_url"] = source_url
-            if fetched_at:
+            if fetched_at is not None:
                 d["_fetched_at"] = fetched_at
             d["_parser_version"] = _PIPELINE_VERSION
             # _source_record_id (prefijo _) es el meta-campo que _build_payload
