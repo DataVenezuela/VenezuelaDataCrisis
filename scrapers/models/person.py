@@ -154,6 +154,10 @@ class Person(BaseModel):
                 raise ValueError("identity_kind='partial' requires cedula_partial")
             if self.cedula_partial_pattern is None:
                 raise ValueError("identity_kind='partial' requires cedula_partial_pattern")
+        if self.cedula_partial is not None and self.identity_kind != "partial":
+            raise ValueError("cedula_partial requires identity_kind='partial'")
+        if self.cedula_partial_pattern is not None and self.cedula_partial is None:
+            raise ValueError("cedula_partial_pattern requires cedula_partial")
         return self
 
     @model_validator(mode="after")

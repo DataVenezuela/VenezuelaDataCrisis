@@ -291,14 +291,16 @@ def test_person_identity_kind_partial_requires_cedula_partial_and_pattern():
 
 
 def test_person_cedula_partial_validates_digits():
-    Person(full_name="A", event_id=_EVENT_ID, fuente="s", cedula_partial="12")
-    Person(full_name="A", event_id=_EVENT_ID, fuente="s", cedula_partial="1234")
+    _partial = dict(identity_kind="partial", cedula_partial_pattern="suffix_2")
+    Person(full_name="A", event_id=_EVENT_ID, fuente="s", cedula_partial="12", **_partial)
+    Person(full_name="A", event_id=_EVENT_ID, fuente="s", cedula_partial="1234",
+           identity_kind="partial", cedula_partial_pattern="suffix_4")
     with pytest.raises(ValidationError):
-        Person(full_name="A", event_id=_EVENT_ID, fuente="s", cedula_partial="1")
+        Person(full_name="A", event_id=_EVENT_ID, fuente="s", cedula_partial="1", **_partial)
     with pytest.raises(ValidationError):
-        Person(full_name="A", event_id=_EVENT_ID, fuente="s", cedula_partial="12345")
+        Person(full_name="A", event_id=_EVENT_ID, fuente="s", cedula_partial="12345", **_partial)
     with pytest.raises(ValidationError):
-        Person(full_name="A", event_id=_EVENT_ID, fuente="s", cedula_partial="ab12")
+        Person(full_name="A", event_id=_EVENT_ID, fuente="s", cedula_partial="ab12", **_partial)
 
 
 def test_person_pii_provenance_valid_values():
