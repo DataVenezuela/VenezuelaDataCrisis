@@ -3,7 +3,7 @@
 
 Tras los terremotos del 24 de junio, miles de familias buscan a sus seres queridos en decenas de páginas distintas. La misma persona aparece en cuatro lugares con cuatro nombres distintos.  Este proyecto recolecta esos registros, los unifica en una base de datos limpia y deduplicada, y los expone via API para que cualquier dev pueda construir encima.
 
-→ [Contribuir](CONTRIBUTING.md) · [Scraping](./scrapers/README.md) · [Pipeline de Limpieza](scrapers/PIPELINE.md) · [Reportar un problema](../../issues)
+→ [Contribuir](CONTRIBUTING.md) · [Scraping](./scrapers/README.md) · [Pipeline de Limpieza](docs/pipeline.md) · [Reportar un problema](../../issues)
 
 ---
 
@@ -58,12 +58,16 @@ Fuentes externas
       ↓
 Adapters + Parsers + PII masking + Normalización
       ↓
-Raw DB (R2 + Supabase)    ←── Quarantine DB        [en desarrollo]
+raw_artifacts (bronze, Supabase)   ←── Quarantine DB   [en desarrollo]
       ↓
-Staging (aportes)              ← inbox cross-source  [✅ en producción]
-      ↓  consolidation job                            [en desarrollo]
-Canonical (persons / events / acopio_centers)
-      ↓  build job
+aportes (silver / staging)     ← inbox cross-source  [✅ en producción]
+      ├─ materializer → persons / acopio_centers (silver 1:1) + events (catálogo)  [en desarrollo]
+      │
+      ↓  consolidation job: similaridad sobre aportes → aristas   [en desarrollo]
+dedup_candidates (edges: ced: fuertes / phon: difusas)
+      ↓  gold clustering (agrupa por relación, no por tiempo)
+gold_entities / gold_members / gold_history (gold, fusión canónica)
+      ↓  build job: gold publicado + aportes huérfanos (datos tipados de silver)
 Cloudflare Worker + D1         ← API pública          [en desarrollo]
 ```
 

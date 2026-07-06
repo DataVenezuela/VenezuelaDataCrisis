@@ -82,23 +82,19 @@ Checklist mental:
 
 ### PRs que tocan contrato exporter -> DB
 
-Si un PR cambia payloads, queries, watermarks, exporters, jobs de
-consolidación, o cualquier contrato entre este repo y la BD/API de
-`DataVenezuela/dataVenezuela`, no inventes ni copies un schema de referencia
-en este repo. La fuente de verdad es el repo `DataVenezuela/dataVenezuela`,
-especialmente:
-
-- `supabase/migrations/*.sql`
-- `docs/api-dedup.md`
-- los schemas Zod/rutas que validan el endpoint tocado
+Si un PR cambia payloads, queries, watermarks, exporters, o jobs de
+consolidación, la fuente de verdad del esquema es `docs/schema.md` (mirror
+completo y autoritativo) más las specs de contrato en `docs/specs/`
+(`db-scraper-contract.md`, `person-dedup.md`). No inventes ni copies un schema
+de referencia paralelo en este repo.
 
 Checklist adicional:
 
 ```md
-- [ ] Leí las migraciones reales de `DataVenezuela/dataVenezuela` antes de tocar el contrato.
-- [ ] Cité en el PR la migración/doc/ruta que respalda cada columna o payload nuevo.
+- [ ] Contrasté cada columna o payload nuevo contra `docs/schema.md` y las specs de `docs/specs/`.
+- [ ] Cité en el PR la sección de `schema.md` / spec que respalda cada cambio de contrato.
 - [ ] No agregué archivos `tools/sql/issue_*.sql` como "schema real" paralelo.
-- [ ] Los tests no validan contra una copia inventada del schema, sino contra el contrato documentado.
+- [ ] Los tests validan contra el contrato documentado (`schema.md` / `docs/specs/`), no contra una copia inventada.
 - [ ] Si el contrato real es ambiguo, dejé el PR pequeño en docs/proceso o pedí decisión de mantenedor antes de codear.
 ```
 
@@ -111,12 +107,18 @@ Requiere al menos una aprobación antes de mergear. Branch protection activo: la
 El pipeline **no escribe JSONL en disco**. El destino de las entidades procesadas es la tabla `aportes` en Supabase, vía escritura directa PostgREST `POST /rest/v1/aportes` (upsert idempotente por `(source_id, external_id)`, auth con `SUPABASE_INGEST_JWT` + header `apikey`). El watermark por fuente vive en `/rest/v1/source_watermarks`, mismo auth.
 
 ```
-Adapter → Parser → PII → Normalización → staging exporter → aportes (Supabase)
-                                                   ↓
-                                         consolidation job (cada 20 min)
-                                                   ↓
-                                         persons / events / acopio_centers
+Adapter → Parser → PII → Normalización → staging exporter → aportes (silver, Supabase)
+                                                   ├─ materializer → persons / acopio_centers (silver 1:1) + events (catálogo)
+                                                   │
+                                                   ↓  consolidation job (cada 20 min): similaridad → aristas
+                                         dedup_candidates (edges: ced: fuertes / phon: difusas)
+                                                   ↓  gold clustering (por relación)
+                                         gold_entities / gold_members / gold_history (gold, fusión canónica)
+                                                   ↓  build job: gold publicado + huérfanos
+                                         Cloudflare D1 → Worker (API pública)
 ```
+
+Silver nunca colapsa (un aporte, una fila tipada); la fusión vive solo en gold, y el plano público (D1) lee gold, no silver crudo.
 
 Si no hay parser para una fuente, el registro va a **cuarentena**. No se descarta, no se procesa con un fallback genérico. La cuarentena es trazable y revisable.
 

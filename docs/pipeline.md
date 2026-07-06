@@ -2,7 +2,7 @@
 
 Este documento describe el flujo técnico del pipeline de VZLA_DEDUP.
 
-El objetivo es recolectar registros dispersos, convertirlos en entidades tipadas, proteger datos sensibles, normalizarlos y enviarlos a staging en Supabase para que el consolidation job los deduplique y los mueva a las tablas canónicas.
+El objetivo es recolectar registros dispersos, convertirlos en entidades tipadas, proteger datos sensibles, normalizarlos y enviarlos a staging (`aportes`) en Supabase. A partir de ahí un pipeline medallón los proyecta a tablas tipadas 1:1 (silver), los enlaza con aristas de candidatos puntuados (`dedup_candidates`) y los agrupa en entidades canónicas fusionadas (`gold_entities`) que consume la API pública. Silver nunca colapsa registros: la fusión vive solo en gold.
 
 ---
 
@@ -27,10 +27,14 @@ Claves de dedup pre-calculadas (dedup_hash, block_keys)
 │  inmutable, trazable        │     │  no redactable, etc.  │
 └─────────────────────────────┘     └──────────────────────┘
       ↓
-Staging exporter → POST /rest/v1/aportes → aportes (Supabase)
-      ↓  consolidation job (cada 20 min)
-Canonical: persons / events / acopio_centers
-      ↓  build job (cada 30 min)
+Staging exporter → POST /rest/v1/aportes → aportes (Supabase)   [silver / staging]
+      ├─ materializer → persons / acopio_centers (silver 1:1, PK = aportes.id) + events (catálogo)
+      │
+      ↓  consolidation job (cada 20 min): similaridad sobre aportes → aristas
+dedup_candidates (edges: ced:… fuertes / phon:… difusas)
+      ↓  gold clustering (agrupa por relación, no por tiempo)
+gold_entities + gold_members + gold_history (gold, fusión canónica)
+      ↓  build job: gold publicado + aportes huérfanos (con datos tipados de silver)
 Cloudflare D1 → Worker → API pública
 ```
 
@@ -123,8 +127,17 @@ flowchart TD
     G --> H[Claves de dedup precalculadas]
     H --> I[Technical Validator]
     I --> J[Staging exporter POST /rest/v1/aportes]
-    J --> K[aportes Supabase]
-    K --> L[Consolidation / Verification]
+    J --> K[(aportes / silver)]
+    K --> M[Materializer 1:1]
+    M --> N[(persons / acopio_centers silver 1:1 + events catálogo)]
+    K --> O[Consolidation job]
+    O --> P[(dedup_candidates / edges)]
+    P --> Q[Gold clustering]
+    Q --> R[(gold_entities + gold_members + gold_history / gold)]
+    R --> S[Build job]
+    N --> S
+    S --> T[(Cloudflare D1)]
+    T --> U[Worker / API pública]
 ```
 
 ---
@@ -160,13 +173,13 @@ Antes de crear un scraper, la fuente debe registrarse en un archivo de configura
 Ejemplo:
 
 ```yaml
-source_key: hospital_central_demo
+id: hospital_central_demo
 name: Hospital Central Demo
 type: html_static
 entity_type: person
 url: https://example.org/demo
-parser: hospital_central_person_parser
-trust_tier: 1
+parser_asignado: hospital_central_person_parser
+trust_tier: C
 enabled: true
 rate_limit_per_minute: 10
 allowed_domains:
@@ -353,17 +366,22 @@ Antes de exportar, debe pasar por sanitización PII y normalización.
 
 Después del parser, el sistema debe trabajar con entidades tipadas.
 
-Entidades principales:
+Entidades principales (los tres tipos que produce el parser, más el evento que
+las contextualiza):
 
 ```text
-Event
-Person
-PersonNote
-PersonSource
-PersonPhoto
-AcopioCenter
-DedupCandidate
+Person       → aportes / persons
+AcopioCenter → aportes / acopio_centers
+Event        → events (catálogo compartido de eventos)
 ```
+
+Cada registro parseado se persiste como un `aporte` (silver) y se proyecta 1:1 a
+su tabla tipada de silver (`persons` / `acopio_centers`). La corroboración entre
+fuentes **no** es una entidad tipada aparte: emerge del grafo de aristas
+(`dedup_candidates`) y de la pertenencia a un cluster de gold (`gold_members`),
+no de un modelo `PersonSource`. De la misma forma, notas y fotos viajan dentro
+del `raw_json` del aporte, no como tablas `PersonNote` / `PersonPhoto`
+independientes.
 
 La idea es que el resto del pipeline no dependa de la estructura original de la fuente.
 
@@ -487,10 +505,12 @@ reporta `edad` (`edad < 18` → `true`); si la fuente no reporta edad,
 `is_minor` queda en `None`. Cualquier parser futuro que reciba una edad
 puntual o un `age_range` debe derivar `is_minor` de la misma forma.
 
-Pendiente para Stage 1 (#81): `person_sources` (tabla/modelo todavía no
-implementado en este repo) debe heredar/propagar la misma protección — un
-`PersonSource` corroborando un `Person` con `is_minor=true` no debe exponer
-más detalle del que expone el `Person` protegido.
+Pendiente: cuando varios aportes corroboran a la misma persona y quedan en un
+mismo cluster de gold (`gold_members`), la proyección pública no debe exponer más
+detalle del que expone el aporte protegido con `is_minor=true`. La protección se
+aplica por aporte antes de staging; el build a D1 debe respetarla al fusionar el
+cluster (no reintroducir foto, cédula parcial ni ubicación exacta desde otro
+miembro del mismo cluster).
 
 ---
 
@@ -628,22 +648,31 @@ upsert directo a Supabase via PostgREST.
 
 Responsabilidades del exporter:
 - Construir el payload del aporte usando los contratos de
-  `scrapers/dedup/specs.py`: `run_id`, `entity_type`, `external_id`,
-  `dedup_hash`, `dedup_version`, `block_keys`, `content_hash`, `source_slug`
-  y `raw_json` (el record de negocio sin claves internas con prefijo `_`).
-  Keys en snake_case, alineadas 1:1 con las columnas reales de `aportes`.
+  `scrapers/dedup/specs.py`: `entity_type`, `external_id`, `dedup_hash`,
+  `dedup_version`, `block_keys`, `content_hash`, `source_id` y `raw_json`
+  (el record de negocio sin claves internas con prefijo `_`). Keys en
+  snake_case. El exporter resuelve `source_id` (uuid) a partir del slug de la
+  fuente: `source_slug` no viaja al POST. Además emite algunas claves no
+  canónicas (`run_id`, `scraper_id`, `source_url`, `parser_version`) que hoy
+  no son columnas de `aportes`; ver `docs/specs/db-scraper-contract.md` §4.2.
 - `external_id` es determinista (fingerprint v1 para Event/AcopioCenter,
   `deterministic_id` para Person). PostgREST hace upsert por `external_id`
   via `Prefer: resolution=merge-duplicates`, así que re-correr la misma
   fuente no duplica (idempotencia).
-- Enviar en lotes (batch) de hasta 100 registros por request. Cada batch
-  exitoso (201) cuenta como enviado; un batch fallido se registra como error
-  y bloquea el avance del watermark.
+- Enviar en lotes (batch) configurables por fuente (`bulk_size` /
+  `max_concurrent_posts` de `SourceConfig`). Cada batch exitoso (2xx) cuenta
+  como enviado; un batch fallido se registra en `result.errors`.
 - Avanzar el watermark de la fuente (`POST /rest/v1/source_watermarks` con
   `Prefer: resolution=merge-duplicates`, body `{"slug": "...", "watermark_at": "<ISO>"}`)
   a `max(fetched_at)` menos un margen de seguridad (`_WATERMARK_SAFETY_MARGIN`,
-  ver más abajo) solo cuando todos los batches de esa fuente terminaron en
-  201. Si cualquiera falla, el watermark no cambia.
+  ver más abajo). El watermark avanza si no hubo errores previos al export
+  (parseo, PII, enriquecimiento, protección de menores) y se envió al menos un
+  registro (`sent > 0`): puede avanzar aunque algún `POST` a `aportes` haya
+  fallado. El margen de seguridad de 5 minutos más la idempotencia por
+  `external_id` sostienen la entrega at-least-once (el ciclo siguiente reenvía
+  los registros de la ventana de overlap sin duplicar). Un watermark avanzado
+  no implica cero pérdida en ese ciclo. Ver
+  `docs/specs/db-scraper-contract.md` §7.
 
 Auth con Supabase: header `apikey` con la publishable key del proyecto
 (`SUPABASE_PUBLISHABLE_KEY`) + `Authorization: Bearer` con un JWT firmado
@@ -653,20 +682,15 @@ valida localmente, sin requests extra de auth.
 
 ### Fuente de verdad del contrato exporter -> DB
 
-El schema de staging, watermarks, cuarentena y futuros jobs que escriban directo
-a Supabase no se define en este repo. Para cambios que toquen el contrato
-exporter -> DB, la fuente de verdad es `DataVenezuela/dataVenezuela`:
+El schema de staging, watermarks, cuarentena y jobs que escriben directo a
+Supabase tiene su fuente de verdad en `docs/schema.md` (mirror completo y
+autoritativo) más las specs de contrato en `docs/specs/`
+(`db-scraper-contract.md`, `person-dedup.md`).
 
-- `supabase/migrations/*.sql`
-- `docs/api-dedup.md`
-- schemas Zod y rutas del endpoint correspondiente
-
-No agregues en `VenezuelaDataCrisis` una copia local ad hoc del schema real
-(por ejemplo `tools/sql/issue_*.sql`) para que los tests pasen contra esa copia.
-Si hace falta un fixture de contrato, debe indicar contra qué migración/doc de
-`dataVenezuela` fue sincronizado y no reemplaza la revisión del repo fuente.
-Esto evita que exporters y jobs pasen CI contra columnas o payloads que no
-existen en la BD real.
+No agregues una copia local ad hoc del schema real (por ejemplo
+`tools/sql/issue_*.sql`) para que los tests pasen contra esa copia. Los fixtures
+de contrato deben derivar de `docs/schema.md`. Esto evita que exporters y jobs
+pasen CI contra columnas o payloads que no existen en la BD real.
 
 ### Semántica del watermark: `fetched_at` (wall-clock local) vs `updated_at` (servidor)
 
@@ -687,7 +711,7 @@ pedir).
 
 Mitigación: `_apply_safety_margin` resta `_WATERMARK_SAFETY_MARGIN` (5
 minutos) al watermark antes de persistirlo, creando una ventana de overlap
-en cada corrida. La idempotencia por `external_id` en `dataVenezuela` absorbe
+en cada corrida. La idempotencia por `external_id` en la BD absorbe
 los registros re-enviados en ese overlap sin duplicar. El margen es una
 mitigación, no una garantía formal — depende de que el reloj del scraper y el
 del servidor de la fuente no diverjan más que el margen, y de que la latencia
@@ -734,13 +758,17 @@ aceptable. Todo lo que el pipeline antes perdía va a la **Quarantine DB** para
 revisión humana.
 
 `scrapers/exporters/quarantine_exporter.py` (`QuarantineExporter`) espeja al
-`StagingExporter`: un `POST /api/v1/quarantine` por registro al backend, cliente
+`StagingExporter`: un `POST /api/v1/quarantine` por registro, cliente
 `httpx` inyectable, retry/backoff en 429/5xx, y **dry-run silencioso** si faltan
 `QUARANTINE_API_KEY` / `QUARANTINE_BASE_URL`. Comparte el `run_id` de la corrida
 con el staging exporter para correlacionar qué se exportó y qué se cuarentenó.
 
-La tabla `quarantine_records` vive en el backend (igual que `aportes`); el
-scraper no ejecuta SQL.
+> **BUG (pendiente):** ese `POST /api/v1/quarantine` apuntaba al backend HTTP que
+> ya no existe, así que el envío a cuarentena está roto. La ruta hay que
+> actualizarla: la cuarentena debe escribir directo a Supabase (como `aportes`,
+> vía PostgREST) contra la tabla `quarantined_records`.
+
+La tabla `quarantined_records` es la de `docs/schema.md`; el scraper no ejecuta SQL.
 
 ### Qué va a cuarentena y desde dónde
 
@@ -768,27 +796,154 @@ cuarentenar (nunca se hizo fetch), pero la omisión queda **visible** en
 - `pii_findings_summary`: **conteos por tipo** de `detect_pii`
   (`{"identity_document": 2, "phone": 1}`), nunca los valores.
 - `payload_hash`: SHA-256 hex puro (64 chars, sin prefijo `sha256:`) del payload
-  **original**. Sobrevive a la destrucción para verificar qué se vio y destruyó.
+  **original**. Sobrevive a la redacción y a la expiración de retención para
+  verificar qué se vio.
 
 ### Estados de revisión (en el backend)
 
-`pending` → `in_review` → (`approved_for_staging` | `needs_manual_redaction` |
-`rejected`) → `destroyed`. `approved_for_staging` permite reintroducir el
-registro al pipeline. La **destrucción auditable** borra
-`payload_preview_redacted` y `pii_findings_summary` pero conserva la fila con
-`destroyed_at` y `payload_hash`.
+`review_status` es un enum definido en el esquema (`docs/schema.md`; valores
+como `pending`, `in_review`, `approved_for_staging`, `needs_manual_redaction`,
+`rejected`). `approved_for_staging` permite reintroducir el registro al pipeline;
+`approved_at` y `review_decision` registran la resolución humana, y
+`retention_until` controla la ventana de retención. La purga auditable borra
+`payload_preview_redacted` y `pii_findings_summary` pero conserva la fila y su
+`payload_hash`.
 
 ---
 
-## Capa 5 — Consolidation job (Issue #82)
+## Capa 5 — De staging a gold: materializer, aristas y clustering (Issues #82, #90, #200)
 
-Proceso independiente que corre cada 20 minutos. Lee `aportes WHERE consolidated_at IS NULL`.
+Una vez que un aporte está en `aportes` (silver/staging), tres procesos
+independientes lo llevan hasta la capa publicable. Ninguno modifica ni borra el
+aporte original: la trazabilidad hacia el aporte de origen se conserva siempre.
 
-**Event y AcopioCenter:** dedup automática por `dedup_hash`. El registro con mayor `trust_tier` gana. La decisión queda en `dedup_decisions`.
+```text
+aportes (silver)
+   │  materializer (proyección determinista 1:1)
+   ▼
+persons / acopio_centers (silver 1:1, PK = aportes.id) + events (catálogo)
 
-**Person:** nunca auto-merge. El job calcula similitud (Jaro-Winkler + HMAC match + rango de edad + ubicación) dentro de bloques fonéticos y genera candidatos en `dedup_candidates`. Un voluntario humano aprueba o rechaza. Cada versión anterior queda en `canonical_record_versions`.
+aportes (silver)
+   │  consolidation job (similaridad → aristas puntuadas)
+   ▼
+dedup_candidates (edges entre aportes)
+   │  gold clustering (componentes conexos por relación)
+   ▼
+gold_entities + gold_members + gold_history (gold, fusión canónica)
+```
 
-El job es incremental e idempotente: si se interrumpe, la próxima corrida retoma desde donde quedó sin re-procesar lo ya consolidado.
+Regla de oro de esta capa: **silver nunca colapsa** (un aporte, una fila tipada)
+y **la fusión vive solo en gold**. Duplicar en silver es tolerable; fusionar mal
+en gold puede ser peligroso, así que solo las señales fuertes fusionan de forma
+automática.
+
+### 5.1 Materializer: aportes → silver (proyección 1:1)
+
+Proyecta cada aporte a su tabla tipada según `entity_type`, sin tomar ninguna
+decisión de dedup:
+
+- `person` → `persons`, con `person_record_id = aportes.id` (PK compartida, FK a
+  `aportes`).
+- `acopio` → `acopio_centers`, con `acopio_id = aportes.id` (PK compartida, FK a
+  `aportes`).
+- El contexto de evento vive en `events`, que es un **catálogo compartido**, no
+  una proyección 1:1 por aporte: tiene PK propia (`event_id`) sin FK a `aportes`
+  (ver `docs/schema.md`). No se crea una fila de `events` por cada aporte de tipo
+  `event`; el materializer resuelve o asegura el `event_id` del catálogo (desde
+  `raw_json` / `block_keys`, que lo llevan embebido) y luego fija
+  `persons.event_id` / `acopio_centers.event_id` para referenciarlo. La fila del
+  catálogo debe existir antes de proyectar los registros que la referencian.
+
+La proyección es un upsert idempotente sobre la PK compartida: lee `raw_json` y
+mapea `full_name`, `cedula_hmac`, `cedula_masked`, `identity_kind`,
+`pii_provenance`, `status`, `trust_tier`, `last_known_location`, `age_range`,
+etc., a columnas reales (ver `docs/schema.md`). No hay merge ni pérdida: las
+tablas tipadas son una vista 1:1 de `aportes` (ambas capas son silver).
+
+### 5.2 Consolidation job: aristas de candidatos (edges)
+
+Proceso independiente (cron cada 20 min) que compara aportes y **genera aristas
+puntuadas** en `dedup_candidates`, en lugar de fusionar en el sitio. Cada arista
+referencia dos aportes:
+
+- `left_aporte_id` / `right_aporte_id`: FK a `aportes.id` (no a las tablas
+  tipadas de silver).
+- `blocking_key`: la clave de bloqueo que produjo el par (`ced:…` determinista o
+  `phon:…` fonética).
+- `score` (numeric) y `reasons` (jsonb): la fuerza y el porqué del candidato.
+- `priority` (integer): prioridad de revisión.
+- `touches_gold` (boolean): si el par ya toca un cluster de gold existente.
+- `decision` (enum `dedup_decision`, default `pending`), `resolved_by`,
+  `second_reviewer`, `resolved_at`: la resolución humana cuando aplica.
+
+**Person nunca auto-fusiona.** El job calcula similaridad (Jaro-Winkler sobre
+nombre + match de `cedula_hmac` + rango de edad + ubicación) dentro de bloques
+(`block_keys`), y solo emite candidatos. La decisión de fusión la toma el
+clustering (señal fuerte) o un humano (señal difusa), nunca este job.
+
+**Blocking entre lotes, no solo dentro del lote.** Un lote nuevo se bloquea
+contra **todos** los aportes que comparten sus `block_keys`, sin importar en qué
+corrida o página llegaron. Sin esto, dos aportes con la misma cédula que caen en
+páginas o ciclos distintos nunca se comparan y se publican como duplicados
+visibles: justo el daño que el proyecto existe para evitar. El upsert idempotente
+por par canónico (`LEAST/GREATEST(left, right)`) mantiene barata la
+recomparación.
+
+El job es incremental e idempotente: si se interrumpe, la próxima corrida retoma
+sin re-procesar lo ya consolidado ni duplicar aristas.
+
+### 5.3 Gold clustering: entidades canónicas
+
+Proceso que agrupa aportes **por relación, no por tiempo de llegada**: corre
+componentes conexos sobre el grafo de aristas y materializa clusters en gold.
+
+- `gold_entities`: una fila por entidad canónica. `canonical_aporte_id` es el
+  aporte representante (mayor `trust_tier`, desempate por el más antiguo);
+  `confidence_score` resume la fuerza de las aristas del cluster; `superseded_by`
+  encadena divisiones históricas.
+- `gold_members`: qué aportes componen el cluster (`gold_id`, `aporte_id`,
+  `via_candidate` = la arista que los unió).
+- `gold_history`: bitácora append-only de cada acción (`actor_kind` `system` o
+  `human`, `via_candidate`, `detail`).
+
+**Compuerta de publicación = fuerza de la arista.** Los clusters unidos por
+aristas fuertes (`ced:…`, identidad determinista, riesgo de falso merge casi
+nulo) se fusionan y publican automáticamente. Las aristas difusas (`phon:…`,
+solo fonética o nombre) **no** fusionan: quedan como `dedup_candidates` en
+`pending`, formando la cola de revisión humana, y sus aportes se publican **sin
+fusionar** hasta que un humano acepta el candidato.
+
+**Estabilidad del `gold_id`:** se acuña una vez (`gen_random_uuid`) y se reutiliza
+mientras el cluster recomputado solape cualquier `gold_members` actual; solo se
+acuña uno nuevo cuando no hay solape. No se derivan los ids de un hash del
+conjunto de miembros (cambiaría la identidad cada vez que crece el cluster y
+rompería `superseded_by`, `gold_history` y `gold_members.via_candidate`).
+
+**Huérfanos:** un aporte sin ninguna arista fuerte no recibe fila en gold; el
+build público une "clusters de gold + aportes huérfanos" para que cada entidad
+aparezca exactamente una vez (ver sección 11, DB/API).
+
+### `verification_status` vs confianza de merge
+
+Son ejes ortogonales, no confundir:
+
+- **Confianza de merge** = ¿son el mismo registro? Vive en `score` /
+  `confidence_score` / `dedup_candidates.decision` y en la fuerza de la arista
+  (`ced:` vs `phon:`).
+- **`verification_status`** (en `gold_entities`) = ¿el estado en el mundo real
+  está confirmado? Es una decisión humana, ortogonal al merge: una entidad
+  correctamente fusionada puede seguir `unverified`, y una `verified` no implica
+  nada sobre cómo se fusionó.
+
+### Restricciones must-link / cannot-link (Fase 2)
+
+Cuando un humano resuelve un `dedup_candidate` (`accept` / `reject`), esa
+decisión se vuelve una **restricción permanente** que todo re-clustering futuro
+respeta: `accept` = must-link, `reject` = cannot-link. El veto por cédula (dos
+cédulas distintas) es un cannot-link duro. Las divisiones que esto provoque son
+trazables vía `superseded_by` + `gold_history`. El re-clustering periódico sobre
+todo el grafo (incluyendo nodos ya en gold) es la recomputación "por relación, no
+por tiempo" y se documenta como trabajo de Fase 2.
 
 ---
 
@@ -801,20 +956,26 @@ Ejemplo:
 ```json
 {
   "candidate_id": "uuid-v4",
-  "event_id": "uuid-v4",
-  "left_person_record_id": "uuid-v4",
-  "right_person_record_id": "uuid-v4",
+  "left_aporte_id": "uuid-v4",
+  "right_aporte_id": "uuid-v4",
+  "blocking_key": "phon:uuid-v4:lara:JN",
   "score": 0.87,
   "reasons": [
     "similar_name",
     "same_state",
     "compatible_age_range"
   ],
-  "blocking_key": "JLS-PE-LARA",
+  "priority": 1,
+  "touches_gold": false,
   "decision": "pending",
   "created_at": "2026-06-24T17:30:00Z"
 }
 ```
+
+La arista referencia dos `aportes` (`left_aporte_id` / `right_aporte_id`), no las
+tablas tipadas de silver. Una arista con `blocking_key` `ced:…` es señal fuerte
+(fusiona en gold automáticamente); una `phon:…` es difusa (queda `pending` para
+revisión humana).
 
 El estado inicial debe ser:
 
@@ -907,7 +1068,6 @@ Ejemplo de payload (los registros se envían en batches PostgREST):
   "block_keys": ["ced:uuid-v4:hmac", "phon:uuid-v4:lara:JN"],
   "content_hash": "sha256-hex",
   "source_id": "uuid-v4",
-  "scraper_id": "scraper-id",
   "raw_json": {"full_name": "JOSE PEREZ", "event_id": "uuid-v4"}
 }
 ```
@@ -933,13 +1093,18 @@ Cada aporte debe cumplir:
 
 ## 10b. Cuarentena (POST /api/v1/quarantine)
 
-Contrato del endpoint que el backend (dataVenezuela) debe exponer para la
-Quarantine DB (ver "Capa 4b"). El scraper hace un POST por registro no
-procesable. `run_id` se comparte con el aporte de la misma corrida.
+> **BUG (pendiente):** este endpoint HTTP apuntaba al backend removido y hoy no
+> tiene destino. La ruta hay que actualizarla a escritura directa en Supabase
+> (`quarantined_records`, vía PostgREST), igual que `aportes`. El contrato de
+> payload de abajo describe lo que el `QuarantineExporter` envía hoy, no un
+> destino vivo.
+
+El scraper hace un POST por registro no procesable. `run_id` se comparte con el
+aporte de la misma corrida.
 
 Ejemplo de payload (campos que envía el `QuarantineExporter`). **Claves en
-camelCase**: es el contrato de la API de dataVenezuela (schema Zod del endpoint
-`/api/v1/quarantine`); el backend las mapea a columnas snake_case:
+camelCase** (contrato heredado del backend removido); al migrar a Supabase directo
+habrá que mapearlas a las columnas snake_case de `quarantined_records`:
 
 ```json
 {
@@ -983,75 +1148,85 @@ Respuestas que clasifica el exporter:
 5. `payload_hash` = SHA-256 hex puro (64) del payload original.
 6. Trazabilidad: `source_slug` + `source_url` + `run_id`.
 
-### DDL de referencia (`quarantine_records`, en el backend)
+### DDL de referencia (`quarantined_records`, en el backend)
+
+Este bloque refleja el `quarantined_records` de `docs/schema.md` (mirror completo
+y autoritativo, columnas y nombres canónicos):
 
 ```sql
-CREATE TABLE public.quarantine_records (
-  quarantine_id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  run_id                   uuid,
-  source_slug              text NOT NULL REFERENCES public.sources(slug),
+CREATE TABLE public.quarantined_records (
+  id                       uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  run_id                   uuid REFERENCES public.scrape_runs(run_id),
+  source_slug              text NOT NULL,
   source_url               text,
-  reason_code              text NOT NULL CHECK (reason_code IN (
-                             'pii_untreatable','invalid_schema','parser_unavailable',
-                             'pdf_no_text','unclassified_sensitive',
-                             'contradictory_sources','ambiguous_manual_review')),
+  reason_code              reason_code NOT NULL,   -- enum: pii_untreatable, invalid_schema,
+                                                   -- parser_unavailable, pdf_no_text,
+                                                   -- unclassified_sensitive, contradictory_sources,
+                                                   -- ambiguous_manual_review
   reason_detail            text,
-  risk_level               text NOT NULL CHECK (risk_level IN ('low','medium','high')),
+  risk_level               risk_level NOT NULL,    -- enum: low, medium, high
   payload_preview_redacted text,
   payload_hash             varchar(64),
   pii_findings_summary     jsonb,
-  review_status            text NOT NULL DEFAULT 'pending' CHECK (review_status IN (
-                             'pending','in_review','approved_for_staging',
-                             'needs_manual_redaction','rejected','destroyed')),
+  review_status            review_status NOT NULL DEFAULT 'pending',  -- enum del esquema
   review_decision          text,
   retention_until          timestamptz,
-  destroyed_at             timestamptz,
-  created_at               timestamptz NOT NULL DEFAULT now(),
-  CONSTRAINT quarantine_destroyed_consistency CHECK (
-    review_status <> 'destroyed' OR (
-      destroyed_at IS NOT NULL AND payload_hash IS NOT NULL
-      AND payload_preview_redacted IS NULL AND pii_findings_summary IS NULL))
+  approved_at              timestamptz,
+  quarantined_at           timestamptz NOT NULL DEFAULT now()
 );
 ```
 
 ---
 
-## 11. DB/API
+## 11. DB/API y build al plano público
 
-DB/API ingiere los JSONL producidos por el pipeline.
+El plano público (Cloudflare D1 + Worker) no ingiere JSONL: el export a disco fue
+eliminado en #81. Un build job (bridge Supabase → D1) proyecta y sanitiza la capa
+publicable y la republica a D1 cada 30-60 min.
 
-Responsabilidades de DB/API:
+**Qué lee el build: solo gold, no silver crudo.** La fuente publicable es
+`gold_entities` publicado (clusters unidos por aristas fuertes) más los aportes
+huérfanos (sin arista fuerte), uniendo los datos tipados desde silver
+(`persons` / `acopio_centers`). Así cada entidad aparece exactamente una vez y
+las fusiones difusas (`phon:…` sin `accept` humano) nunca colapsan la vista
+pública.
 
-* Validar nuevamente schema.
-* Guardar entidades.
-* Mantener relaciones.
-* Mantener trazabilidad.
-* Exponer endpoints seguros.
+Responsabilidades del plano público:
+
+* Aplicar la sanitización de ADR 0002 (sin cédula ni teléfono crudos).
 * Controlar qué campos son públicos.
-* Proteger datos sensibles.
-* Permitir revisión humana.
-* Permitir actualizaciones sin destruir historial.
+* Mantener relaciones y trazabilidad de la entidad publicada.
+* Exponer endpoints seguros detrás de WAF, rate-limiting y Turnstile.
+* Proteger datos sensibles (incluida la protección de menores heredada del
+  cluster).
+* Permitir actualizaciones sin destruir historial (`gold_history` en el plano
+  interno).
 
-DB/API no debe asumir que un registro está verificado solo porque fue ingerido correctamente.
+El plano público no debe asumir que una entidad está verificada solo porque fue
+publicada: `verification_status` es una decisión humana ortogonal a la fusión
+(ver Capa 5).
 
 ---
 
-## Conversión de `trust_tier`
+## `trust_tier` en el modelo
 
-Los modelos tipados (`Person`, `Event`, `AcopioCenter`) usan `trust_tier: str` con valores `A/B/C/D` por legibilidad en configs y código de parsers.
+Los modelos tipados (`Person`, `Event`, `AcopioCenter`) usan `trust_tier` como
+letra (`A/B/C/D`), y así se persiste: la columna `trust_tier` de `persons` y
+`acopio_centers` es el enum `trust_tier` con esos mismos valores, no un entero.
+No hay conversión a una escala numérica en el pipeline.
 
-La tabla `person_sources` persiste el trust tier como `SMALLINT` (`1/2/3`). Ningún módulo del pipeline hace esa conversión hoy — la implementa Stage 1 (#81) al momento de escribir `person_sources`.
-
-Mapeo canónico:
+Semántica de los tiers:
 
 ```text
-A → 1   (fuente oficial)
-B → 2   (ONG verificada)
-C → 2   (ONG no verificada)
-D → 3   (redes sociales, anónimo)
+A   fuente oficial
+B   ONG verificada
+C   ONG no verificada
+D   redes sociales, anónimo
 ```
 
-Este mapeo es la única fuente de verdad para esa conversión — cualquier implementación de Stage 1 debe usar exactamente estos valores en vez de inventar una escala propia.
+`gold_entities` no copia el `trust_tier`: el clustering elige como
+`canonical_aporte_id` el aporte de mayor `trust_tier` (desempate por el más
+antiguo), y ese aporte porta el tier a través de su fila silver.
 
 ---
 
@@ -1212,7 +1387,7 @@ Casos mínimos:
 6. Fuente con enum desconocido.
 7. Registro con cédula en claro antes del sanitizer.
 8. Verificación de que la cédula no aparece en output.
-9. Output JSONL válido.
+9. Payload de staging válido (JSON serializable, claves alineadas con `aportes`).
 10. Error controlado sin tumbar el pipeline.
 
 ---
@@ -1226,7 +1401,8 @@ Casos mínimos:
 5. La dedup de personas no es destructiva: propone, un humano decide.
 6. Todo registro mantiene trazabilidad hacia la fuente y el raw artifact.
 7. Los campos desconocidos se exportan como `null`, nunca se omiten.
-8. El staging exporter avanza el watermark solo cuando confirma entrega.
+8. El staging exporter avanza el watermark con margen de seguridad e
+   idempotencia (at-least-once); no espera que todos los POST confirmen.
 
 ---
 
@@ -1260,20 +1436,22 @@ python -m scrapers.cli validate --config scrapers/config/sources.demo.yaml
 | Staging exporter (`POST /rest/v1/aportes`) | ✅ Issue #81 |
 | Dedup specs + fingerprint v1 | ✅ Issue #81 |
 | Raw artifact store (R2) | ❌ bloqueado por #81 |
-| Quarantine exporter (`POST /api/v1/quarantine`) + ruteo | ✅ Issue #88 (scraper) |
-| Quarantine DB (tabla `quarantine_records`) | ⏳ Issue #88 (backend) |
+| Quarantine exporter (`POST /api/v1/quarantine`) + ruteo | ⚠️ ruta rota: apunta al backend removido, hay que re-apuntar a Supabase directo |
+| Quarantine DB (tabla `quarantined_records`) | ⏳ destino de la migración (Supabase directo) |
 | Watermark por fuente | ✅ Issue #57 |
-| Consolidation job | ❌ Issue #82, bloqueado por #81 |
-| Build job (Supabase → D1) | ❌ bloqueado por canonical |
+| Materializer (aportes → silver 1:1) | ❌ diseñado, sin writer |
+| Consolidation job (aristas `dedup_candidates`) | ⚠️ existe (`consolidation_job.py`) pero huérfano del cron y con mismatch de schema: emite el shape viejo `*_person_record_id`; la tabla real usa `*_aporte_id` + `priority` int + `touches_gold` |
+| Gold clustering (`gold_entities` / `gold_members` / `gold_history`) | ❌ diseñado, sin writer |
+| Build job (D1 lee gold publicado + huérfanos) | ❌ bloqueado por gold |
 | Cloudflare Worker | ❌ bloqueado por build job |
 
 ---
 
 ## Estado operacional — verificado en producción (30 jun 2026)
 
-Esta sección documenta hechos confirmados corriendo el pipeline contra
-`dataVenezuela` en producción, no diseño. Ver `AGENTS.md` para el contexto
-completo dirigido a agentes.
+Esta sección documenta hechos confirmados corriendo el pipeline contra la BD de
+producción (Supabase), no diseño. Ver `AGENTS.md` para el contexto completo
+dirigido a agentes.
 
 **Confirmado funcionando:**
 - `encuentralos_tecnosoft` end-to-end: fetch → parse → PII → normalización →
@@ -1289,15 +1467,15 @@ completo dirigido a agentes.
 fetch usa streaming por página (#218), así que ya no se cargan todas las páginas
 en memoria antes de exportar. El export a `/rest/v1/aportes` va en batches
 concurrentes (`bulk_size` / `max_concurrent_posts`), no un POST por registro.
-La garantía at-least-once se mantiene: el watermark de la fuente solo avanza si
-**todos** los batches terminaron en 200/201 (ver "Capa 4 — Staging exporter"
-arriba).
+La garantía at-least-once se mantiene vía el margen de seguridad y la
+idempotencia por `external_id`: el watermark puede avanzar aunque algún batch
+falle, y el ciclo siguiente reenvía la ventana de overlap sin duplicar (ver
+"Capa 4 — Staging exporter" arriba y `docs/specs/db-scraper-contract.md` §7).
 
-**Infraestructura: Supabase y dataVenezuela (Vercel) se gestionan por separado.**
-El staging escribe directo a Supabase vía PostgREST, así que un 403 en staging
-apunta al JWT/grants del rol `scraper_ingest` (`SUPABASE_INGEST_JWT`), no a
-Vercel. Las APIs que sí sirve dataVenezuela en Vercel (cuarentena y lectura
-pública) dependen de sus propias env vars: mover el proyecto Supabase a otra
-organización no las actualiza automáticamente, así que si esas APIs devuelven
-403 o no reflejan cambios, verificar primero sus env vars antes de asumir un bug
-en el pipeline.
+**Infraestructura: Supabase, la cuarentena y el API público se gestionan por
+separado.** El staging escribe directo a Supabase vía PostgREST, así que un 403
+en staging apunta al JWT/grants del rol `scraper_ingest` (`SUPABASE_INGEST_JWT`).
+El API público de lectura lo sirve un **Cloudflare Worker + D1** (proyección
+sanitizada), no el pipeline. La cuarentena (`POST /api/v1/quarantine`) apunta hoy
+a un backend removido: es un bug pendiente (ver "Capa 4b" / §10b), no una
+diferencia de env vars.

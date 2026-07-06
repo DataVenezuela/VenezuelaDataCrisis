@@ -7,7 +7,7 @@
 | Decisores | Mantenedores (mathiasaiva, mayerlim), equipo de pipeline |
 | Reemplaza a | (ninguno) |
 | Complementa | ADR 0002 (endurecimiento del borde), ADR 0004 (versionado de contrato) |
-| Relacionado con | `docs/scrapper_contract.md` §5 y §10, `docs/adr/0003-reestructuracion-repos-deployment.md` <!-- pendiente PR 230 --> |
+| Relacionado con | `docs/adr/0003-reestructuracion-repos-deployment.md` <!-- pendiente PR 230 --> |
 
 ---
 
@@ -41,7 +41,7 @@ interno (lo que entra).
   acota la ubicación a nivel estado). Si la reducción no se puede aplicar, el
   registro va a cuarentena (fail-closed).
 
-**Modelo de identidad y procedencia (objetivo, ver `scrapper_contract.md` §10).**
+**Modelo de identidad y procedencia (objetivo).**
 
 - `identity_kind` en `{hmac, partial, none}`: modela la ausencia legítima de
   identificador fuerte sin debilitar las garantías de quien sí lo tiene.
@@ -67,8 +67,10 @@ gate obligatorio previo a la persistencia. El gate real son el tokenizado,
 
 **Negativas / costos asumidos**
 
-- El modelo objetivo agrega campos y validadores (`identity_kind`,
-  `_pii_provenance`, `*_status`) que hoy no existen.
+- El modelo objetivo agrega campos y validadores. `identity_kind` y
+  `pii_provenance` ya existen como columnas de `persons` en el esquema canónico
+  (`docs/schema.md`); los `*_status` (p. ej. `removed_minor`/`removed_pii`) todavía
+  no.
 - Tokenizar y reducir tiene costo por registro.
 
 **Riesgos y mitigaciones**
@@ -84,14 +86,15 @@ gate obligatorio previo a la persistencia. El gate real son el tokenizado,
 - **Real hoy:** `cedula_hmac` en el parser mas backstop de pipeline;
   `telefono_contacto` descartado; `derive_is_minor` + `protect_minor_fields`
   fail-closed a cuarentena; `REASON_CODES` con `risk_level`.
-- **Objetivo (no construido):** `identity_kind`, `_pii_provenance`, `*_status`, y
-  `detect_pii` como gate obligatorio. Ver `docs/scrapper_contract.md` §10.
+- **Ya en el esquema canónico:** `identity_kind` y `pii_provenance` como columnas
+  de `persons` (ver `docs/schema.md`); la clave en vuelo lleva prefijo
+  (`_pii_provenance`) y persiste como `pii_provenance`.
+- **Objetivo (no construido):** `*_status`, y `detect_pii` como gate obligatorio.
 
 ---
 
 ## 5. Enlaces
 
 - ADR 0002 (endurecimiento del borde), ADR 0004 (versionado de contrato).
-- `docs/scrapper_contract.md` §5 (reglas de PII) y §10 (modelo objetivo).
 - `scrapers/sanitizers/` (`pii_tokenizer.py`, `minor_protection.py`, `pii_detector.py`).
 - `scrapers/exporters/quarantine_exporter.py`, `shared/hashing.py`.

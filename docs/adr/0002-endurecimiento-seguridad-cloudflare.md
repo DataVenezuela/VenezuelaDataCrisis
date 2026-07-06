@@ -7,7 +7,7 @@
 | Decisores | Infraestructura, DB/API, Scrapers/Cleaners |
 | Reemplaza a | (ninguno) |
 | Complementa | `docs/adr/0001-arquitectura-serving-publico.md` |
-| Relacionado con | `docs/pipeline.md §14`, `docs/schema.md` (Vista pública), `docs/base-standards.md §10`, `docs/implementation-plan.md` Fase 4 |
+| Relacionado con | `docs/pipeline.md §14`, `docs/schema.md` (Vista pública), `docs/base-standards.md §10` |
 
 > **Estado / implementación:** `Propuesta`. Nada de este endurecimiento está
 > aplicado todavía. En `master` no existen `serving/` ni `infra/cloudflare/`
@@ -195,12 +195,11 @@ costo y un **control de disponibilidad**:
 ### 4.8 Validación del contrato del request
 
 El contrato v1 (ADR 0001 §6) está hoy definido como **prosa**, no como una
-especificación formal: el repo **no usa OpenAPI/Swagger** ni FastAPI (los stubs
-`api/*` están vacíos; el serving será un Worker delgado en TypeScript, ADR 0001
-§3.4 y §12). Por eso la validación del request se hace con lo que ya está en el
-plan de implementación, sin introducir tooling nuevo:
+especificación formal: el repo **no usa OpenAPI/Swagger** ni FastAPI (el serving
+será un Worker delgado en TypeScript, ADR 0001 §3.4 y §12). Por eso la validación
+del request se hace sin introducir tooling nuevo:
 
-* **Validación en el Worker** (`docs/implementation-plan.md` Fase 3): rechaza
+* **Validación en el Worker**: rechaza
   parámetros no declarados, tipos inválidos y longitudes fuera de rango; hace
   cumplir `nombre` ≥ 3 caracteres y el tope de 20 resultados. Es la fuente de
   verdad del contrato.
@@ -237,8 +236,7 @@ explícito, nunca `*`.
 Aunque el borde filtra la mayoría, el Worker no confía en nada:
 
 * **Queries siempre parametrizadas** (`.bind()`), jamás interpolación de strings
-  en SQL → anti-inyección incluso si una regla WAF falla (`docs/implementation-plan.md`
-  Fase 3, `query.ts`).
+  en SQL → anti-inyección incluso si una regla WAF falla (`query.ts`).
 * **Allowlist de parámetros**: solo se leen los del contrato; el resto se ignora.
 * **Sin "listar todo"**, sin paginación profunda, máx. 20 resultados por respuesta
   (ADR 0001 §6) → la enumeración total es inviable por diseño.
@@ -287,7 +285,7 @@ se endurecen, todo lo posible, con Cloudflare:
   conexión saliente, no hay IP pública que atacar.
 * Acceso a la base por **allowlist de IP** y credenciales rotables; principio de
   menor privilegio (el build job usa un rol **solo-lectura** sobre las vistas
-  públicas `public_*`, §1 de la vista pública en `docs/schema.md`).
+  públicas `public_*` propuestas, que proyectan gold publicado sin PII cruda).
 
 ### 5.2 Build job (Supabase → D1): integridad del artefacto
 
@@ -299,7 +297,7 @@ se endurecen, todo lo posible, con Cloudflare:
 * **Swap atómico** (ADR 0001 §7): ninguna lectura observa estado parcial; un build
   interrumpido no deja D1 sin tablas vivas (`cancel-in-progress: false`).
 * Test de **no-PII** obligatorio sobre lo que se publica a D1
-  (`docs/implementation-plan.md` Fase 2): si la proyección contiene un campo
+  si la proyección contiene un campo
   prohibido, el build falla y no publica.
 * **Derecho al olvido**: una `denylist` se propaga al plano público en ≤1 ciclo;
   el borde sirve el artefacto nuevo en cuanto se hace el swap (ADR 0001 §7).
@@ -416,8 +414,8 @@ pero misma garantía mínima.
 
 ## 11. Plan de implementación (checklist)
 
-Extiende la **Fase 4** de `docs/implementation-plan.md` ("Borde: caché, WAF y
-anti-abuso") con el detalle de esta ADR. Orden sugerido:
+Detalla el borde (caché, WAF y anti-abuso) con lo específico de esta ADR. Orden
+sugerido:
 
 ```text
 [ ] Zona en Cloudflare con proxy obligatorio; ruta de Worker api.<dominio>/v1/*

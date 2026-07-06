@@ -25,24 +25,29 @@ Work fast, but never break project contracts, expose sensitive data, or introduc
 
 ## 2. Architecture — read this first
 
-VZLA_DEDUP is split across two repos:
+VZLA_DEDUP spans two planes:
 
 - **`DataVenezuela/VZLA_DEDUP`** — Python scraping pipeline (this repo)
-- **`DataVenezuela/dataVenezuela`** — Next.js + Supabase (BD/API layer)
+- **DB/API layer** — Supabase (Postgres) internal plane + the public read/API backend
 
-The pipeline has four layers. Understand them before touching anything:
+The pipeline is a medallion flow (bronze → silver → gold). Understand it before touching anything:
 
 ```
 Adapters + Parsers + PII masking + Normalization
       ↓
-Raw DB (Cloudflare R2 + Supabase metadata)    ←── Quarantine DB
+raw_artifacts (bronze, Supabase)    ←── Quarantine DB
       ↓
-Staging (aportes table in Supabase)
-      ↓  consolidation job
-Canonical (persons / events / acopio_centers)
-      ↓  build job
+aportes (silver / staging, Supabase)
+      ├─ materializer → persons / acopio_centers (silver 1:1) + events (catalog)
+      │
+      ↓  consolidation job → dedup_candidates (edges: ced: strong / phon: fuzzy)
+      ↓  gold clustering (by relation, not by time)
+gold_entities / gold_members / gold_history (gold, canonical merge)
+      ↓  build job: published gold + orphan aportes (typed data from silver)
 Cloudflare Worker + D1  →  Public API
 ```
+
+Silver never collapses (one aporte, one typed row); merges live only in gold, and the public plane (D1) reads gold, not raw silver.
 
 **The pipeline does not write JSONL to disk.** Output goes to the `aportes` staging table via direct PostgREST `POST /rest/v1/aportes`.
 
@@ -56,7 +61,6 @@ Before coding, read the relevant docs:
 
 ```
 docs/pipeline.md          — full technical flow, implementation status per component
-docs/scrapper_contract.md — entity contract for parsers
 docs/source_config.md     — how to declare sources in YAML
 docs/schema.md            — entity schema and enums
 docs/adr/                 — architecture decision records
@@ -115,7 +119,7 @@ pip install -r scrapers/requirements.txt
 |---|---|
 | `cedula_hmac` | Pure 64-char hex, **no prefix**. Never `hmac_sha256:...` |
 | `trust_tier` (scrapers) | Letters `A`/`B`/`C`/`D`, never integers |
-| `trust_tier` (DB) | Integers `1`/`2`/`3`. Conversion happens in the staging exporter |
+| `trust_tier` (DB) | Same letter enum `A`/`B`/`C`/`D` (`trust_tier` type). No integer representation, no conversion in the exporter |
 | `Person.status` | English: `missing`/`found`/`injured`/`deceased`/`unknown` |
 | `is_minor` | Always declare. `None` if unknown — never omit the field |
 | PII timing | HMAC before creating the entity, never after |

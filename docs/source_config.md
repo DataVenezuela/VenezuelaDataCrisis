@@ -12,7 +12,7 @@ La configuración de fuentes existe para que el pipeline sepa qué scrapear, có
 > campos planos de `SourceConfig`: `page_size`, `probe_limit`,
 > `max_concurrent_pages` y `max_concurrent_posts` (documentados abajo).
 > `page_size` sí se pasa al `ApiAdapter` (`run_pipeline.py`); si se omite, el
-> adapter usa su default interno (`page_size=20`). Solo aplica a fuentes
+> adapter usa su default interno (`_DEFAULT_PAGE_SIZE=100`). Solo aplica a fuentes
 > `api_json`.
 
 ```yaml
@@ -32,7 +32,7 @@ sources:
     max_concurrent_pages: 4  # opcional; solo aplica si la primera pagina reporta total
     max_concurrent_posts: 8  # opcional; POSTs paralelos al staging API (default: 1)
     probe_limit: 1000        # opcional; tamaño de la primera request para descubrir el límite real del API
-    page_size: 20            # opcional; tamaño de página que se pasa al ApiAdapter (default interno: 20)
+    page_size: 100           # opcional; tamaño de página que se pasa al ApiAdapter (default interno: 100)
 
   - id: mi_fuente_html
     name: "Hospital Central Barquisimeto"
@@ -103,14 +103,14 @@ No se deben agregar campos nuevos al contrato sin actualizar este documento.
 
 ## `trust_tier`
 
-El `trust_tier` en el YAML siempre usa **letras**. La BD usa enteros. La conversión ocurre en el staging exporter.
+El `trust_tier` usa **letras** tanto en el YAML como en la BD: la columna `trust_tier` (enum `trust_tier` en Postgres) guarda la misma letra `A`/`B`/`C`/`D`. No hay conversión a entero en el staging exporter.
 
-| Letra | Entero BD | Significado |
-|---|---|---|
-| `A` | `1` | Fuente oficial: gobierno, USGS, Cruz Roja, FUNVISIS |
-| `B` | `2` | ONG verificada o medio establecido |
-| `C` | `3` | Voluntario/comunidad con ownership visible |
-| `D` | `3` | Anónima o sin verificar |
+| Letra | Significado |
+|---|---|
+| `A` | Fuente oficial: gobierno, USGS, Cruz Roja, FUNVISIS |
+| `B` | ONG verificada o medio establecido |
+| `C` | Voluntario/comunidad con ownership visible |
+| `D` | Anónima o sin verificar |
 
 ---
 

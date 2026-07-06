@@ -1,16 +1,18 @@
 # VZLA_DEDUP — Esquema de base de datos
 
-Este documento refleja el esquema real del plano interno (Supabase/Postgres) como
-referencia de contexto del modelo de datos completo (bronze, silver y gold).
+Este documento es el mirror completo y autoritativo del esquema del plano interno
+(Supabase/Postgres): el modelo de datos completo (bronze, silver y gold). Es la
+fuente de verdad del esquema para este repo.
 
-La fuente de verdad ejecutable son las migraciones del repo
-`DataVenezuela/dataVenezuela` (`supabase/migrations/*.sql`). El bloque de abajo es
-solo para contexto: no refleja necesariamente el orden de creacion ni todas las
-constraints ejecutables.
+El bloque de abajo documenta el `aportes` canónico (el destino de la migración en
+curso) y excluye a propósito la tabla `aportes` vieja (legacy), que está siendo
+migrada a esta forma. Salvo esa exclusión el mirror es completo; lo único que no
+garantiza es el orden de creacion ni que todas las constraints sean ejecutables
+tal cual (ver WARNING).
 
 ```sql
--- WARNING: This schema is for context only and is not meant to be run.
--- Table order and constraints may not be valid for execution.
+-- WARNING: Authoritative schema mirror, not meant to be run as-is.
+-- Table order and some constraints may not be valid for execution.
 CREATE TABLE public.sources (
   source_id uuid NOT NULL DEFAULT gen_random_uuid(),
   slug text NOT NULL UNIQUE,

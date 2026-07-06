@@ -70,8 +70,7 @@ Minor protection → Staging exporter (POST /rest/v1/aportes).
 **Paquetes:**
 - `scrapers/` — pipeline principal. Su `requirements.txt` es la única
   dependencia runtime.
-- `shared/` — `hashing.py` (HMAC), `helpers.py`. `config.py` está **vacío**.
-- `api/` — esqueleto local, no usado en producción.
+- `shared/` — `hashing.py` (HMAC), `helpers.py`.
 - `verification/` — `__init__.py` solamente, no implementado.
 - `docs/` — diseño aspiracional. El código manda.
 
@@ -102,8 +101,8 @@ Tests 100% offline, sin red real:
 ## Estado real de producción
 
 El pipeline corre en producción con `encuentralos_tecnosoft` conectado de punta
-a punta: fetch → parse → PII → normalización → POST a dataVenezuela → tabla
-`aportes` en Supabase. El watermark filtering (`updated_after`) está activo
+a punta: fetch → parse → PII → normalización → POST a Supabase (PostgREST) → tabla
+`aportes`. El watermark filtering (`updated_after`) está activo
 — confirmado en logs de producción con `#57/#130/#131` mergeados.
 `ingest.yml` ya invoca `python -m scrapers.cli --verbose ingest` y el progreso
 del fetch (páginas descargadas, entidades parseadas) se ve en los logs de
@@ -151,7 +150,7 @@ Auth via custom JWT firmado con `role: scraper_ingest` (`SUPABASE_INGEST_JWT`)
 El rol `scraper_ingest` se crea con `NOLOGIN NOINHERIT NOBYPASSRLS` y se
 concede a `authenticator` para que PostgREST pueda hacer SET ROLE.
 Además necesita RLS policies en `aportes` y `source_watermarks` del lado
-de dataVenezuela (issue cross-repo).
+de la BD (Supabase).
 
 `PII_SALT` y `PII_HMAC_SECRET` se cargan del **mismo único secret** de
 GitHub Actions (`secrets.PII_HMAC_SECRET`, ver `ingest.yml:82-83`). No existe
@@ -160,15 +159,11 @@ busques ni crees un segundo secret. Sin ellas en CI, `cedula_hmac` queda
 `None` y los campos PII crudos se eliminan antes de exportar — comportamiento
 esperado, el pipeline no falla.
 
-### `shared/config.py` está vacío
-
-No leerlo buscando configuración. La config de staging vive en
-`StagingConfig.from_env()` en `scrapers/exporters/staging_exporter.py`.
-
 ### Infraestructura: Supabase es el destino directo (Issue #200)
 
-El scraper escribe directo a Supabase via PostgREST, sin pasar por Vercel.
-`dataVenezuela` (Vercel) solo sirve el API público de lectura/búsqueda.
+El scraper escribe directo a Supabase via PostgREST, sin pasar por un backend
+intermedio. El API público de lectura/búsqueda lo sirve un Cloudflare Worker + D1
+(proyección sanitizada), separado del pipeline.
 
 `PARTNER_API_SALT` y `sources.owner_id` ya no afectan el path de ingest
 porque el scraper usa un JWT firmado con `role: scraper_ingest`, no las
@@ -194,12 +189,16 @@ recibimos no lo refleja, pero el `fetched_at` que persistimos como watermark
 es *posterior* a esa actualización. La siguiente corrida pediría
 `updated_after=<ese watermark>` y el servidor excluiría ese registro — quedaría
 perdido permanentemente. El margen de 5 minutos crea una ventana de overlap; la
-idempotencia por `external_id` en dataVenezuela absorbe los re-envíos sin
+idempotencia por `external_id` en la BD absorbe los re-envíos sin
 duplicar.
 
-El watermark solo avanza si **todos** los POST de la fuente fueron 200/201 **y**
-no hubo errores previos (parse, PII, enriquecimiento, minor protection). Esto
-garantiza at-least-once delivery.
+El watermark avanza si no hubo errores previos al export (parse, PII,
+enriquecimiento, minor protection) **y** se envió al menos un registro
+(`sent > 0`): puede avanzar aunque algún POST a `aportes` haya fallado. La
+entrega at-least-once la sostienen el margen de seguridad de 5 minutos y la
+idempotencia por `external_id`, no el bloqueo del watermark. Un watermark
+avanzado no implica cero pérdida en ese ciclo (ver
+`docs/specs/db-scraper-contract.md` §7).
 
 ---
 
@@ -208,7 +207,6 @@ garantiza at-least-once delivery.
 Estas partes de `docs/` están verificadas y no hace falta cuestionarlas:
 - `docs/pipeline.md` — el flujo de capas (adapters → parsers → PII →
   normalización → dedup keys → staging exporter) es preciso.
-- `docs/scrapper_contract.md` — el contrato de parsers es correcto.
 - La política de `cedula_hmac` (preserva el prefijo V/E, nunca usa prefijo
   `hmac_sha256:`) está implementada exactamente como se documenta.
 - La protección de menores (`is_minor=true` → anula foto, cedula_masked,

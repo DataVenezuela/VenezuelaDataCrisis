@@ -2,10 +2,11 @@
 
 | Campo | Valor |
 |---|---|
-| Estado | Aceptada |
+| Estado | Aceptada (§5 y salida de datos reemplazadas por ADR 0007) |
 | Fecha | 2026-06-27 |
 | Decisores | DB/API, Scrapers/Cleaners, Infraestructura |
 | Reemplaza a | — |
+| Reemplazada por | [ADR 0007](./0007-modelo-consolidacion-gold.md) (parcial: §5 modelo de datos del artefacto público y salida de ingesta) |
 | Relacionado con | `docs/pipeline.md`, `docs/schema.md`, `docs/base-standards.md` |
 
 ---
@@ -120,6 +121,16 @@ El artefacto D1 es la frontera entre el plano caliente y el frío.
 ---
 
 ## 5. Modelo de datos del artefacto público
+
+> **Reemplazada por [ADR 0007](./0007-modelo-consolidacion-gold.md).** Esta sección
+> describe el modelo pre-gold: el artefacto público proyectado directamente desde
+> `persons` (silver), con `verification_status` como campo de `persons`. En el
+> modelo canónico vigente el plano público lee **gold** (`gold_entities`
+> publicado + aportes huérfanos, con datos tipados de silver), cada entidad
+> aparece una vez tras el clustering, y `verification_status` vive en
+> `gold_entities`, no en `persons`. La salida de ingesta tampoco es JSONL (nota
+> "salida JSONL sanitizada" del diagrama §4): es escritura directa a `aportes` vía
+> PostgREST (#81). Se conserva el texto original como registro histórico.
 
 El artefacto D1 contiene **solo** los campos seguros de exportación. Para
 `persons`, derivados de `docs/schema.md`:
@@ -276,10 +287,6 @@ en el borde cerca del usuario. Costo: TypeScript y el cuidado del rebuild de D1.
 5. docs/schema.md           → declarar la "vista pública" (campos §5) si falta
 6. Tests                    → contrato API §6, garantía de no-PII en la proyección
 ```
-
-Los stubs actuales `api/main.py`, `api/auth.py`, `api/routes/records.py` y
-`shared/storage.py` quedan supeditados a esta decisión: o se reorientan al plano
-interno (Supabase/SQLAlchemy) o al build job, no a servir tráfico público.
 
 ---
 

@@ -23,6 +23,11 @@ cuarentena que ADR 0004 crea (una cuarentena que crece sin observarse es un
 riesgo anotado ahí) y una señal para saber si una fuente dejó de producir. No
 existe `pipeline_runs` en el código.
 
+> Nota de canon: `scrape_runs` (ver `docs/schema.md`) ya registra por corrida
+> `started_at`/`finished_at`/`stats jsonb`. P4 se solapa parcialmente; el delta
+> real es la granularidad (por corrida de pipeline vs por scrape) y el centinela
+> de caída, no una tabla nueva desde cero.
+
 ---
 
 ## P5. (vacante)
@@ -49,5 +54,10 @@ La regla de dominio es que las personas nunca se auto-mergean: un candidato de
 duplicado dudoso necesita ojo humano. Falta la cola que haga eso operable. La idea
 es una tabla `merge_candidates` (pares o grupos propuestos, con su score y motivo)
 priorizada, con un SLA de revisión para que la cola no crezca sin atender. Se
-apoyaría en la evidencia que ya produce el dedup. No existe `merge_candidates` en
-el código.
+apoyaría en la evidencia que ya produce el dedup.
+
+> Nota de canon: `dedup_candidates` (ver `docs/schema.md` y `docs/pipeline.md`
+> §5.2-5.3) **ya es** esa cola: tiene `priority` entero, `score`, `reasons`,
+> `decision` (default `pending`), `resolved_by` y `second_reviewer`. No hace falta
+> una tabla `merge_candidates` nueva; el delta real es el SLA/operabilidad de la
+> cola, no el modelo de datos.

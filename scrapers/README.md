@@ -1,5 +1,5 @@
 # Módulo `scrapers`
-Para entender el proceso de procesado de datos, leer: [Pipeline](PIPELINE.md)
+Para entender el proceso de procesado de datos, leer: [Pipeline](../docs/pipeline.md)
 
 Este paquete implementa el pipeline de recolección: fetch de fuentes externas, parsing a entidades tipadas, enmascaramiento de PII, normalización y envío a staging en Supabase.
 
