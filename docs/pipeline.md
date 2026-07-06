@@ -27,7 +27,7 @@ Claves de dedup pre-calculadas (dedup_hash, block_keys)
 │  inmutable, trazable        │     │  no redactable, etc.  │
 └─────────────────────────────┘     └──────────────────────┘
       ↓
-Staging exporter → POST /api/aportes → aportes (Supabase)
+Staging exporter → POST /rest/v1/aportes → aportes (Supabase)
       ↓  consolidation job (cada 20 min)
 Canonical: persons / events / acopio_centers
       ↓  build job (cada 30 min)
@@ -88,7 +88,7 @@ python -m scrapers.cli run --config scrapers/config/sources.yaml --output scrape
 ### Tests
 
 Tests de integración offline en `scrapers/tests/test_run_pipeline.py`. Ninguno
-hace red real: el destino staging (`/api/aportes`) se intercepta con
+hace red real: el destino staging (`/rest/v1/aportes`) se intercepta con
 `httpx.BaseTransport` inyectado en el `StagingExporter`.
 
 ---
@@ -122,7 +122,7 @@ flowchart TD
     F --> G[Normalizer]
     G --> H[Claves de dedup precalculadas]
     H --> I[Technical Validator]
-    I --> J[Staging exporter POST /api/aportes]
+    I --> J[Staging exporter POST /rest/v1/aportes]
     J --> K[aportes Supabase]
     K --> L[Consolidation / Verification]
 ```
@@ -700,7 +700,8 @@ múltiples fuentes (`run_pipeline._run_source` itera todas las habilitadas), as�
 que `source_slug` es siempre `source.id` y se pasa explícito en cada llamada a
 `StagingExporter.get_watermark(source_slug)` / `export_source(..., source_slug=...)`.
 Esto mantiene watermarks independientes por fuente dentro de la misma corrida.
-Como `source.id` viaja sin escapar en el path REST (`/api/source-watermarks/{id}`),
+Como `source.id` viaja como valor `slug` hacia `/rest/v1/source_watermarks` (en
+el body del upsert y como filtro en las lecturas PostgREST),
 `validate_sources_config` exige que sea único entre fuentes y que solo contenga
 `[a-zA-Z0-9_-]`.
 
@@ -715,9 +716,10 @@ Una lectura fallida del watermark (red, 5xx, o un body 2xx con JSON
 malformado/no-dict) tampoco bloquea el fetch ni filtra el cierre del adapter:
 degrada al mismo default en vez de abortar la fuente.
 
-Modo dry-run silencioso: si falta cualquiera de `STAGING_API_KEY` o
-`STAGING_BASE_URL`, el exporter queda deshabilitado, no abre cliente HTTP (cero
-red), loguea a INFO lo que enviaría y termina con `staging_sent=0` sin error.
+Modo dry-run silencioso: si faltan las env vars `SUPABASE_*` (`SUPABASE_URL`,
+`SUPABASE_PUBLISHABLE_KEY`, `SUPABASE_INGEST_JWT`), el exporter queda
+deshabilitado, no abre cliente HTTP (cero red), loguea a INFO lo que enviaría y
+termina con `staging_sent=0` sin error.
 
 El exporter no toma decisiones de dedup. Su única responsabilidad es persistir
 en staging; el dedup vive en el consolidation job (#82).
@@ -885,14 +887,15 @@ Son responsabilidades distintas.
 
 ---
 
-## 10. Staging (POST /api/aportes)
+## 10. Staging (POST /rest/v1/aportes)
 
 El export a JSONL en disco fue eliminado en #81. El destino final es la tabla
-`aportes` de dataVenezuela vía `POST /api/aportes` (ver "Capa 4 — Staging
-exporter"). Cada aporte es un objeto JSON con `external_id` determinista para
-idempotencia.
+`aportes` en Supabase, vía escritura directa PostgREST `POST /rest/v1/aportes`
+(ver "Capa 4 — Staging exporter"). Cada aporte es un objeto JSON con
+`external_id` determinista; el upsert es idempotente por `(source_id,
+external_id)`.
 
-Ejemplo de payload (un POST por registro):
+Ejemplo de payload (los registros se envían en batches PostgREST):
 
 ```json
 {
@@ -903,8 +906,9 @@ Ejemplo de payload (un POST por registro):
   "dedup_version": "person-detid-v1",
   "block_keys": ["ced:uuid-v4:hmac", "phon:uuid-v4:lara:JN"],
   "content_hash": "sha256-hex",
-  "source_slug": "encuentralos",
-  "data": {"full_name": "JOSE PEREZ", "event_id": "uuid-v4"}
+  "source_id": "uuid-v4",
+  "scraper_id": "scraper-id",
+  "raw_json": {"full_name": "JOSE PEREZ", "event_id": "uuid-v4"}
 }
 ```
 
@@ -915,15 +919,15 @@ Ejemplo de payload (un POST por registro):
 Cada aporte debe cumplir:
 
 1. UTF-8, JSON válido.
-2. Un POST por registro.
+2. Upsert idempotente por `(source_id, external_id)`.
 3. `external_id` determinista (idempotencia por upsert).
 4. Campos requeridos presentes.
 5. Campos desconocidos como `null`.
 6. Fechas en UTC ISO 8601.
 7. IDs como UUID v4.
 8. Enums controlados.
-9. Sin PII en claro (`data` ya viene redactado).
-10. Trazabilidad hacia fuente (`source_slug`).
+9. Sin PII en claro (`raw_json` ya viene redactado).
+10. Trazabilidad hacia fuente (`source_id`).
 
 ---
 
@@ -934,8 +938,8 @@ Quarantine DB (ver "Capa 4b"). El scraper hace un POST por registro no
 procesable. `run_id` se comparte con el aporte de la misma corrida.
 
 Ejemplo de payload (campos que envía el `QuarantineExporter`). **Claves en
-camelCase**: es el contrato de la API de dataVenezuela (schema Zod, igual que
-`/api/aportes`); el backend las mapea a columnas snake_case:
+camelCase**: es el contrato de la API de dataVenezuela (schema Zod del endpoint
+`/api/v1/quarantine`); el backend las mapea a columnas snake_case:
 
 ```json
 {
@@ -1253,7 +1257,7 @@ python -m scrapers.cli validate --config scrapers/config/sources.demo.yaml
 | PII HMAC (`shared/hashing.py`) | ✅ |
 | Normalización (texto, fechas, ubicaciones, NLP) | ✅ |
 | Modelos Pydantic (Person/AcopioCenter/Event) | ⏳ fix #85 pendiente |
-| Staging exporter (`POST /api/aportes`) | ✅ Issue #81 |
+| Staging exporter (`POST /rest/v1/aportes`) | ✅ Issue #81 |
 | Dedup specs + fingerprint v1 | ✅ Issue #81 |
 | Raw artifact store (R2) | ❌ bloqueado por #81 |
 | Quarantine exporter (`POST /api/v1/quarantine`) + ruteo | ✅ Issue #88 (scraper) |
@@ -1273,30 +1277,27 @@ completo dirigido a agentes.
 
 **Confirmado funcionando:**
 - `encuentralos_tecnosoft` end-to-end: fetch → parse → PII → normalización →
-  POST `/api/aportes` → tabla `aportes` en Supabase.
+  POST `/rest/v1/aportes` → tabla `aportes` en Supabase.
 - Watermark filtering activo: el log de producción muestra
   `updated_after=...` en la query real al adapter.
 - `ingest.yml` ya invoca `python -m scrapers.cli --verbose ingest` — el
   progreso del fetch (páginas descargadas, entidades parseadas) sí se ve en
   los logs de GitHub Actions.
 
-**Brecha activa — `page_size` no es configurable:**
-`encuentralos_tecnosoft` tiene **~98.830 registros**, no los ~290 que dice
-la nota original del YAML — la fuente escaló después de que se escribió esa
-estimación. Con `page_size=20` (hardcodeado, ver `docs/source_config.md`)
-eso son ~4.941 páginas. El timeout de 15 minutos en `ingest.yml` no alcanza
-para ese volumen ni para el fetch ni mucho menos para los ~98.830 POST
-individuales subsecuentes a `/api/aportes`. Subir `page_size` reduce el
-costo del fetch pero no toca el cuello de botella real, que es el POST
-secuencial por registro en `staging_exporter.export_source`. Cualquier
-solución de paralelismo ahí debe preservar la garantía de que el watermark
-solo avanza si **todos** los POST de la fuente terminaron en 200/201 (ver
-"Capa 4 — Staging exporter" arriba) — paralelizar sin preservar esa
-garantía rompe la semántica de at-least-once delivery documentada.
+**Volumen grande (`encuentralos_tecnosoft`, ~98.830 registros):**
+`page_size` es configurable por fuente (campo plano de `SourceConfig`) y el
+fetch usa streaming por página (#218), así que ya no se cargan todas las páginas
+en memoria antes de exportar. El export a `/rest/v1/aportes` va en batches
+concurrentes (`bulk_size` / `max_concurrent_posts`), no un POST por registro.
+La garantía at-least-once se mantiene: el watermark de la fuente solo avanza si
+**todos** los batches terminaron en 200/201 (ver "Capa 4 — Staging exporter"
+arriba).
 
-**Infraestructura — Supabase y Vercel se gestionan por separado:**
-Mover el proyecto Supabase a otra organización no actualiza las env vars de
-Vercel automáticamente. Si `dataVenezuela` devuelve 403 o no refleja
-cambios hechos directo en Supabase, verificar primero que las env vars de
-Vercel (`SUPABASE_URL`, `PARTNER_API_SALT`) apunten al proyecto correcto
-antes de asumir que el bug está en el pipeline.
+**Infraestructura: Supabase y dataVenezuela (Vercel) se gestionan por separado.**
+El staging escribe directo a Supabase vía PostgREST, así que un 403 en staging
+apunta al JWT/grants del rol `scraper_ingest` (`SUPABASE_INGEST_JWT`), no a
+Vercel. Las APIs que sí sirve dataVenezuela en Vercel (cuarentena y lectura
+pública) dependen de sus propias env vars: mover el proyecto Supabase a otra
+organización no las actualiza automáticamente, así que si esas APIs devuelven
+403 o no reflejan cambios, verificar primero sus env vars antes de asumir un bug
+en el pipeline.

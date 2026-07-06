@@ -8,15 +8,12 @@ La configuración de fuentes existe para que el pipeline sepa qué scrapear, có
 
 ## Formato YAML
 
-> ⚠️ El bloque `pagination:` de este ejemplo es **aspiracional, no
-> implementado**. `SourceConfig` (`scrapers/models/source.py`) no tiene
-> campo `pagination` ni `page_size`, y `_get_adapter` en `run_pipeline.py`
-> instancia `ApiAdapter` sin pasarlo — siempre usa el default interno de
-> `api_adapter.py` (`page_size=20`), sin importar lo que digas en el YAML.
-> Si agregás este bloque a una fuente real, el loader lo ignora
-> silenciosamente sin error. Ver `AGENTS.md` §2.1 para el detalle completo
-> y el impacto medido en producción (`encuentralos_tecnosoft`, ~98.830
-> registros con page_size=20 ≈ 4.941 requests).
+> Nota: no existe un bloque anidado `pagination:`. La paginación se controla con
+> campos planos de `SourceConfig`: `page_size`, `probe_limit`,
+> `max_concurrent_pages` y `max_concurrent_posts` (documentados abajo).
+> `page_size` sí se pasa al `ApiAdapter` (`run_pipeline.py`); si se omite, el
+> adapter usa su default interno (`page_size=20`). Solo aplica a fuentes
+> `api_json`.
 
 ```yaml
 project:
@@ -35,11 +32,7 @@ sources:
     max_concurrent_pages: 4  # opcional; solo aplica si la primera pagina reporta total
     max_concurrent_posts: 8  # opcional; POSTs paralelos al staging API (default: 1)
     probe_limit: 1000        # opcional; tamaño de la primera request para descubrir el límite real del API
-    # pagination:               # NO IMPLEMENTADO — ver advertencia arriba
-    #   path: /api/personas
-    #   limit_param: limit
-    #   offset_param: offset
-    #   page_size: 20
+    page_size: 20            # opcional; tamaño de página que se pasa al ApiAdapter (default interno: 20)
 
   - id: mi_fuente_html
     name: "Hospital Central Barquisimeto"
@@ -88,7 +81,7 @@ Fuente social experimental deshabilitada:
 | `probe_limit` | no | Entero positivo: tamaño de la primera request de paginación, usado para descubrir el límite real que soporta el API. Si el API devuelve ≥ `probe_limit` registros, ese valor se adopta como `page_size` efectivo; si devuelve menos y hay más datos, el cap detectado queda en los logs. La primera página se reutiliza como datos reales (sin requests extra). Sin este campo, `api_adapter.py` usa el `page_size` configurado o su default interno. Solo aplica a fuentes `api_json`. |
 | `allowed_domains` | no | Lista de hosts **exactos** permitidos para `url`. Si se define y el host de la URL no está en la lista, la fuente se omite **sin hacer ningún request** y el error queda visible en el summary. Match exacto, case-insensitive — no acepta subdominios. |
 | `rate_limit_per_minute` | no | Entero positivo: máximo de requests por ventana deslizante de 60s. Solo lo aplica `api_json` (es el único adapter que pagina dentro de una corrida); los demás fetchean una vez por corrida y su frecuencia la gobierna `refresh_minutes`. |
-| `bulk_size` | no | Entero positivo: cuántos aportes enviar por request a `POST /api/aportes/bulk`. Si está configurado, el pipeline usa `export_source_bulk()` en lugar del loop individual de `export_source()`. Reduce N POSTs a `ceil(N/bulk_size)` requests (ej. 109 915 → ~220 con `bulk_size: 500`). Solo aplica si el backend expone `POST /api/aportes/bulk`. Omitir = un POST por registro (comportamiento original). |
+| `bulk_size` | no | Entero positivo: cuántos aportes agrupar por request (batch) al upsert PostgREST `POST /rest/v1/aportes`. El pipeline llama a `export_batch()` con `batch_size=bulk_size`, reduciendo N registros a `ceil(N/bulk_size)` requests (ej. 109 915 con `bulk_size: 500` = ~220 requests). Omitir = default interno de batch. |
 
 No se deben agregar campos nuevos al contrato sin actualizar este documento.
 
@@ -135,7 +128,7 @@ Cuando lleguen registros de una fuente sin parser registrado, el pipeline los en
 - Si `allowed_domains` está presente, el host de `url` debe coincidir exactamente con uno de sus valores
 - Si `rate_limit_per_minute` está presente, debe ser un entero positivo
 - Si `probe_limit` está presente, debe ser un entero positivo; solo tiene efecto en fuentes `api_json`
-- Si `bulk_size` está presente, debe ser un entero positivo; requiere que el backend exponga `POST /api/aportes/bulk`
+- Si `bulk_size` está presente, debe ser un entero positivo (tamaño de batch para el upsert a `/rest/v1/aportes`)
 - Si la fuente no es pública, su uso debe revisarse antes de agregarse (ver `scrapers/security/SOURCE_POLICY.md`)
 - El `id` debe ser único en el archivo
 - `trust_tier` = letra, nunca entero en el YAML

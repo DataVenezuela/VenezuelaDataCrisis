@@ -59,7 +59,7 @@ Subcomandos: `run`, `ingest`, `validate`, `list-enabled`, `consolidate`.
 
 **Pipeline stages (orden fijo):** Adapter → Parser → PII tokenization →
 Enrichment (deterministic_id, location normalisation) → Confidence score →
-Minor protection → Staging exporter (POST /api/aportes).
+Minor protection → Staging exporter (POST /rest/v1/aportes).
 
 **Solo 1 parser implementado:** `encuentralos` en
 `scrapers/parsers/encuentralos_parser.py`. Parser nuevo necesita: implementar
@@ -86,7 +86,7 @@ Minor protection → Staging exporter (POST /api/aportes).
 ## Testing patterns
 
 Tests 100% offline, sin red real:
-- Staging (`/api/aportes`) se intercepta con `httpx.BaseTransport`
+- Staging (`/rest/v1/aportes`) se intercepta con `httpx.BaseTransport`
   inyectado en `StagingExporter` via `_patch_exporter` (ver
   `test_run_pipeline.py:_StagingTransport`).
 - Adapters/parsers se mockean con `unittest.mock.patch` sobre
@@ -113,28 +113,20 @@ GitHub Actions.
 
 ## Operational gotchas
 
-### `page_size` está hardcodeado, el YAML lo ignora silenciosamente
+### `page_size` es configurable por fuente (campo plano, no `pagination:`)
 
-`docs/source_config.md` documenta un bloque `pagination.page_size` en el YAML.
-**Ese campo no existe en el código.** `SourceConfig` en
-`scrapers/models/source.py` no tiene el campo, y `_get_adapter` en
-`run_pipeline.py` instancia `ApiAdapter` sin pasar `page_size`, así que siempre
-usa el default de `api_adapter.py` (`_DEFAULT_PAGE_SIZE = 20`). El loader de
-YAML traga `pagination:` sin error ni efecto.
+`SourceConfig` (`scrapers/models/source.py`) tiene el campo plano `page_size`, y
+`run_pipeline.py` lo pasa al `ApiAdapter` cuando está seteado; si se omite, el
+adapter usa su default interno (`_DEFAULT_PAGE_SIZE = 20`). No existe un bloque
+anidado `pagination:`: usá los campos planos (`page_size`, `probe_limit`,
+`max_concurrent_pages`, `max_concurrent_posts`).
 
-**Impacto real medido:** `encuentralos_tecnosoft` tiene ~98.830 registros (no
-los ~290 que dice la nota del YAML — esa nota quedó desactualizada cuando la
-fuente escaló). Con `page_size=20` son ~4.941 páginas. El job de `ingest.yml`
-tiene `timeout-minutes: 15` — insuficiente para ese volumen.
-
-**Si te piden resolver esto:** el fix son dos cosas separadas, no confundirlas:
-1. Agregar `page_size` a `SourceConfig` y pasarlo en `_get_adapter` (reduce
-   el número de fetches HTTP).
-2. El cuello de botella más grande solía ser el **POST**, pero desde #212 el
-   exporter envía batches concurrentemente si `max_concurrent_posts > 1`
-   en el YAML de la fuente. Usa `ThreadPoolExecutor` internamente y preserva
-   la semántica at-least-once (el watermark solo avanza si todos los batches
-   terminaron en 200/201). Subir `page_size` ya no es prioritario.
+**Volúmenes grandes:** `encuentralos_tecnosoft` tiene ~98.830 registros (no los
+~290 que decía una nota vieja del YAML). El fetch de ese volumen se maneja con
+streaming por página (#218) y export en batches concurrentes (`bulk_size` /
+`max_concurrent_posts`, `ThreadPoolExecutor` interno), preservando la semántica
+at-least-once: el watermark solo avanza si **todos** los batches de la fuente
+terminaron en 200/201.
 
 ### Variables de entorno reales — no confiar en README.md
 

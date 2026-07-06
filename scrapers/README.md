@@ -107,9 +107,10 @@ En producción, el pipeline corre vía `.github/workflows/ingest.yml` (cron`*/10
 export PII_HMAC_SECRET="valor-secreto"
 export PII_SALT="$PII_HMAC_SECRET"   # alias legacy, mismo valor — no son dos secrets distintos
 
-# Credenciales de dataVenezuela (staging exporter)
-export STAGING_API_KEY="x-api-key del scraper"
-export STAGING_BASE_URL="https://..."
+# Staging exporter (escritura directa a Supabase vía PostgREST)
+export SUPABASE_URL="https://<proyecto>.supabase.co"
+export SUPABASE_PUBLISHABLE_KEY="clave publishable (header apikey)"
+export SUPABASE_INGEST_JWT="JWT firmado con rol scraper_ingest"
 
 # Opcional: solo para fuentes type=x_recent_search habilitadas
 export X_BEARER_CREDENTIAL="credencial Bearer de X API"
@@ -129,7 +130,7 @@ export X_BEARER_CREDENTIAL="credencial Bearer de X API"
      trust_tier: C
      enabled: true
    ```
-   `SourceConfig` no soporta hoy un bloque `pagination:` ni `page_size` aunque `docs/source_config.md` lo muestre como ejemplo, ver `AGENTS.md` §2.1 antes de asumir que ese campo tiene efecto.
+   `SourceConfig` soporta los campos planos `page_size`, `probe_limit`, `max_concurrent_pages` y `max_concurrent_posts` (no un bloque anidado `pagination:`); ver `docs/source_config.md`.
 
 2. Escribir el parser en `scrapers/parsers/mi_parser.py` implementando `ParserProtocol`.
 

@@ -1,945 +1,217 @@
-# VZLA_DEDUP — Schema
+# VZLA_DEDUP — Esquema de base de datos
 
-Este documento define las entidades, campos, tipos y enums usados por VZLA_DEDUP.
+Este documento refleja el esquema real del plano interno (Supabase/Postgres) como
+referencia de contexto del modelo de datos completo (bronze, silver y gold).
 
-La especificación actual está pensada para ser compatible con:
+La fuente de verdad ejecutable son las migraciones del repo
+`DataVenezuela/dataVenezuela` (`supabase/migrations/*.sql`). El bloque de abajo es
+solo para contexto: no refleja necesariamente el orden de creacion ni todas las
+constraints ejecutables.
 
-```text
-PostgreSQL 14+
-MySQL 8.0+
-JSONL
+```sql
+-- WARNING: This schema is for context only and is not meant to be run.
+-- Table order and constraints may not be valid for execution.
+CREATE TABLE public.sources (
+  source_id uuid NOT NULL DEFAULT gen_random_uuid(),
+  slug text NOT NULL UNIQUE,
+  display_name text NOT NULL,
+  governed_tier USER-DEFINED NOT NULL DEFAULT 'D'::trust_tier,
+  tier_set_by uuid,
+  tier_set_at timestamp with time zone,
+  active boolean NOT NULL DEFAULT true,
+  created_at timestamp with time zone NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT sources_pkey PRIMARY KEY (source_id)
+);
+CREATE TABLE public.scrape_runs (
+  run_id uuid NOT NULL DEFAULT gen_random_uuid(),
+  source_id uuid NOT NULL,
+  started_at timestamp with time zone NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  finished_at timestamp with time zone,
+  stats jsonb,
+  CONSTRAINT scrape_runs_pkey PRIMARY KEY (run_id),
+  CONSTRAINT scrape_runs_source_fk FOREIGN KEY (source_id) REFERENCES public.sources(source_id)
+);
+CREATE TABLE public.raw_artifacts (
+  artifact_id uuid NOT NULL DEFAULT gen_random_uuid(),
+  run_id uuid NOT NULL,
+  source_url text,
+  http_status smallint,
+  fetched_at timestamp with time zone NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  raw_text text,
+  body_hash character varying NOT NULL,
+  page integer,
+  pii_status USER-DEFINED NOT NULL DEFAULT 'unscanned'::pii_scan_status,
+  CONSTRAINT raw_artifacts_pkey PRIMARY KEY (artifact_id),
+  CONSTRAINT raw_artifacts_run_id_foreign FOREIGN KEY (run_id) REFERENCES public.scrape_runs(run_id)
+);
+CREATE TABLE public.aportes (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  entity_type USER-DEFINED NOT NULL,
+  raw_json jsonb NOT NULL,
+  artifact_id uuid NOT NULL,
+  source_record_id text,
+  external_id text NOT NULL,
+  dedup_hash character varying NOT NULL,
+  dedup_version text NOT NULL,
+  block_keys jsonb NOT NULL DEFAULT '[]'::jsonb,
+  content_hash character varying NOT NULL,
+  normalizer_version text,
+  created_at timestamp with time zone NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  source_id uuid NOT NULL,
+  CONSTRAINT aportes_pkey PRIMARY KEY (id),
+  CONSTRAINT aportes_source_fk FOREIGN KEY (source_id) REFERENCES public.sources(source_id),
+  CONSTRAINT aportes_artifact_id_foreign FOREIGN KEY (artifact_id) REFERENCES public.raw_artifacts(artifact_id)
+);
+CREATE TABLE public.events (
+  event_id uuid NOT NULL DEFAULT gen_random_uuid(),
+  event_type integer NOT NULL,
+  description text,
+  occurred_at timestamp with time zone,
+  location_text text,
+  affected_states jsonb,
+  magnitude numeric,
+  depth_km numeric,
+  status USER-DEFINED NOT NULL DEFAULT 'active'::event_status,
+  created_at timestamp with time zone NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT events_pkey PRIMARY KEY (event_id)
+);
+CREATE TABLE public.persons (
+  person_record_id uuid NOT NULL,
+  entity_type USER-DEFINED NOT NULL,
+  event_id uuid,
+  full_name text NOT NULL,
+  alternate_names jsonb,
+  cedula_hmac character varying,
+  cedula_masked character varying,
+  cedula_partial character varying,
+  cedula_partial_pattern USER-DEFINED,
+  identity_kind USER-DEFINED NOT NULL DEFAULT 'none'::identity_kind,
+  pii_provenance USER-DEFINED NOT NULL DEFAULT 'cleartext'::pii_provenance,
+  name_truncated boolean NOT NULL DEFAULT false,
+  age_range jsonb,
+  sex integer,
+  is_minor boolean,
+  last_known_location jsonb,
+  status USER-DEFINED NOT NULL DEFAULT 'missing'::person_status,
+  trust_tier USER-DEFINED NOT NULL DEFAULT 'D'::trust_tier,
+  dedup_confidence USER-DEFINED NOT NULL DEFAULT 'low'::dedup_confidence,
+  confidence_score numeric NOT NULL DEFAULT 0.0,
+  CONSTRAINT persons_pkey PRIMARY KEY (person_record_id),
+  CONSTRAINT persons_event_id_foreign FOREIGN KEY (event_id) REFERENCES public.events(event_id),
+  CONSTRAINT persons_person_record_id_foreign FOREIGN KEY (person_record_id) REFERENCES public.aportes(id)
+);
+CREATE TABLE public.acopio_centers (
+  acopio_id uuid NOT NULL,
+  entity_type USER-DEFINED NOT NULL,
+  event_id uuid,
+  name text NOT NULL,
+  location_text text NOT NULL,
+  coordinates jsonb,
+  status USER-DEFINED NOT NULL DEFAULT 'unverified'::acopio_status,
+  trust_tier USER-DEFINED NOT NULL DEFAULT 'D'::trust_tier,
+  confidence_score numeric NOT NULL DEFAULT 0.0,
+  managing_org text,
+  contact_public text,
+  current_load integer,
+  CONSTRAINT acopio_centers_pkey PRIMARY KEY (acopio_id),
+  CONSTRAINT acopio_centers_event_id_foreign FOREIGN KEY (event_id) REFERENCES public.events(event_id),
+  CONSTRAINT acopio_centers_acopio_id_foreign FOREIGN KEY (acopio_id) REFERENCES public.aportes(id)
+);
+CREATE TABLE public.acopio_needs (
+  need_id uuid NOT NULL DEFAULT gen_random_uuid(),
+  acopio_id uuid NOT NULL,
+  type text NOT NULL,
+  amount jsonb,
+  received numeric,
+  created_at timestamp with time zone NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT acopio_needs_pkey PRIMARY KEY (need_id),
+  CONSTRAINT acopio_needs_acopio_id_foreign FOREIGN KEY (acopio_id) REFERENCES public.acopio_centers(acopio_id)
+);
+CREATE TABLE public.dedup_candidates (
+  candidate_id uuid NOT NULL DEFAULT gen_random_uuid(),
+  left_aporte_id uuid NOT NULL,
+  right_aporte_id uuid NOT NULL,
+  blocking_key text NOT NULL,
+  score numeric NOT NULL,
+  reasons jsonb,
+  priority integer NOT NULL,
+  touches_gold boolean NOT NULL,
+  decision USER-DEFINED NOT NULL DEFAULT 'pending'::dedup_decision,
+  resolved_by uuid,
+  second_reviewer uuid,
+  created_at timestamp with time zone NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  resolved_at timestamp with time zone,
+  CONSTRAINT dedup_candidates_pkey PRIMARY KEY (candidate_id),
+  CONSTRAINT dedup_candidates_left_aporte_id_foreign FOREIGN KEY (left_aporte_id) REFERENCES public.aportes(id),
+  CONSTRAINT dedup_candidates_right_aporte_id_foreign FOREIGN KEY (right_aporte_id) REFERENCES public.aportes(id)
+);
+CREATE TABLE public.gold_entities (
+  gold_id uuid NOT NULL DEFAULT gen_random_uuid(),
+  entity_type USER-DEFINED NOT NULL,
+  canonical_aporte_id uuid NOT NULL,
+  verification_status USER-DEFINED NOT NULL DEFAULT 'unverified'::verification_status,
+  verified_by uuid,
+  verified_at timestamp with time zone,
+  confidence_score numeric NOT NULL,
+  superseded_by uuid,
+  created_at timestamp with time zone NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at timestamp with time zone NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  last_deduplicated_at timestamp with time zone,
+  CONSTRAINT gold_entities_pkey PRIMARY KEY (gold_id),
+  CONSTRAINT gold_entities_superseded_by_foreign FOREIGN KEY (superseded_by) REFERENCES public.gold_entities(gold_id)
+);
+CREATE TABLE public.gold_members (
+  gold_id uuid NOT NULL,
+  aporte_id uuid NOT NULL,
+  via_candidate uuid,
+  added_at timestamp with time zone NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT gold_members_pkey PRIMARY KEY (gold_id, aporte_id),
+  CONSTRAINT gold_members_gold_id_foreign FOREIGN KEY (gold_id) REFERENCES public.gold_entities(gold_id),
+  CONSTRAINT gold_members_aporte_id_foreign FOREIGN KEY (aporte_id) REFERENCES public.aportes(id),
+  CONSTRAINT gold_members_via_candidate_foreign FOREIGN KEY (via_candidate) REFERENCES public.dedup_candidates(candidate_id)
+);
+CREATE TABLE public.gold_history (
+  history_id bigint NOT NULL DEFAULT nextval('gold_history_history_id_seq'::regclass),
+  gold_id uuid NOT NULL,
+  action USER-DEFINED NOT NULL,
+  detail jsonb,
+  actor_kind USER-DEFINED NOT NULL,
+  actor_id uuid,
+  via_candidate uuid,
+  at timestamp with time zone NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT gold_history_pkey PRIMARY KEY (history_id),
+  CONSTRAINT gold_history_gold_id_foreign FOREIGN KEY (gold_id) REFERENCES public.gold_entities(gold_id),
+  CONSTRAINT gold_history_via_candidate_foreign FOREIGN KEY (via_candidate) REFERENCES public.dedup_candidates(candidate_id)
+);
+CREATE TABLE public.quarantined_records (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  run_id uuid,
+  source_slug text NOT NULL,
+  source_url text,
+  reason_code USER-DEFINED NOT NULL,
+  reason_detail text,
+  risk_level USER-DEFINED NOT NULL,
+  payload_preview_redacted text,
+  payload_hash character varying,
+  pii_findings_summary jsonb,
+  review_status USER-DEFINED NOT NULL DEFAULT 'pending'::review_status,
+  review_decision text,
+  retention_until timestamp with time zone,
+  approved_at timestamp with time zone,
+  quarantined_at timestamp with time zone NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT quarantined_records_pkey PRIMARY KEY (id),
+  CONSTRAINT quarantined_records_run_id_foreign FOREIGN KEY (run_id) REFERENCES public.scrape_runs(run_id)
+);
+CREATE TABLE public.reporter_contacts (
+  reporter_contact_id uuid NOT NULL DEFAULT gen_random_uuid(),
+  person_record_id uuid NOT NULL,
+  name_hmac character varying,
+  phone_hmac character varying,
+  email_hmac character varying,
+  cedula_hmac character varying,
+  retention_until timestamp with time zone NOT NULL,
+  created_at timestamp with time zone NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT reporter_contacts_pkey PRIMARY KEY (reporter_contact_id),
+  CONSTRAINT reporter_person_fk FOREIGN KEY (person_record_id) REFERENCES public.persons(person_record_id)
+);
 ```
-
----
-
-## 1. Convenciones globales
-
-| Decisión             | Valor                                                                       |
-| -------------------- | --------------------------------------------------------------------------- |
-| Zona horaria         | UTC siempre                                                                 |
-| Fechas               | `TIMESTAMPTZ` en PostgreSQL / `DATETIME` en MySQL, asumido UTC en app layer |
-| Fechas en JSONL      | `string` en formato ISO 8601                                                |
-| Booleanos            | `BOOLEAN` nativo. En JSONL: `true` / `false`                                |
-| Nulos                | `null` explícito                                                            |
-| Strings cortos       | `VARCHAR(n)` con límite razonable                                           |
-| Texto libre / listas | `TEXT` o `JSONB` en PostgreSQL / `JSON` en MySQL 8+                         |
-| IDs internos         | UUID v4 como string `VARCHAR(36)`                                           |
-| Enums                | String con valores controlados                                              |
-| HMAC                 | `VARCHAR(64)` — SHA-256 en hex                                              |
-| Confianza / scores   | `NUMERIC(4,3)` — rango `0.000` a `1.000`                                    |
-
----
-
-## 2. Reglas globales JSONL
-
-### Fechas
-
-Todas las fechas deben estar en UTC.
-
-Ejemplo:
-
-```json
-"2026-06-24T14:32:00Z"
-```
-
----
-
-### Booleanos
-
-Correcto:
-
-```json
-true
-```
-
-```json
-false
-```
-
-Incorrecto:
-
-```json
-1
-```
-
-```json
-0
-```
-
-```json
-"Si"
-```
-
-```json
-"No"
-```
-
----
-
-### Nulos
-
-Correcto:
-
-```json
-null
-```
-
-Incorrecto:
-
-```json
-""
-```
-
-```json
-"N/A"
-```
-
-```json
-0
-```
-
----
-
-### IDs internos
-
-Los IDs internos deben ser UUID v4 como string.
-
-Ejemplo:
-
-```json
-"a1b2c3d4-e5f6-7890-abcd-ef1234567890"
-```
-
-No usar autoincrement entero para IDs que salgan del sistema.
-
----
-
-### Enums
-
-Los enums deben representarse como strings controlados.
-
-No usar `ENUM` nativo de MySQL.
-
----
-
-### HMAC
-
-Los HMAC deben ser SHA-256 en hexadecimal.
-
-Tipo:
-
-```text
-VARCHAR(64)
-```
-
----
-
-### Scores
-
-Los scores deben estar entre:
-
-```text
-0.000 y 1.000
-```
-
----
-
-# Entidades
-
----
-
-## 3. Entidad: `EVENT`
-
-Tabla:
-
-```text
-events
-```
-
-### Campos
-
-| Campo             | Tipo SQL          | Tipo JSONL        | Nullable | Valores / Notas                        |
-| ----------------- | ----------------- | ----------------- | -------: | -------------------------------------- |
-| `event_id`        | `VARCHAR(36)` PK  | `string`          |       no | UUID v4 generado por el sistema        |
-| `name`            | `VARCHAR(255)`    | `string`          |       no | Nombre legible del evento              |
-| `event_type`      | `VARCHAR(50)`     | `string`          |       no | Enum definido                          |
-| `occurred_at`     | `TIMESTAMPTZ`     | `string` ISO 8601 |       no | Fecha/hora del evento                  |
-| `affected_states` | `TEXT[]` / `JSON` | `array<string>`   |       sí | Lista de estados venezolanos afectados |
-| `magnitude`       | `NUMERIC(4,2)`    | `number`          |       sí | Magnitud                               |
-| `depth_km`        | `NUMERIC(6,2)`    | `number`          |       sí | Profundidad en kilómetros              |
-| `status`          | `VARCHAR(30)`     | `string`          |       no | Enum definido                          |
-| `external_ids`    | `JSONB` / `JSON`  | `object`          |       sí | IDs externos asociados                 |
-| `dedup_hash`      | `VARCHAR(64)`     | `string`          |       sí | Hash estable para auto-merge exacto    |
-
-### Enums
-
-`events.event_type`:
-
-```text
-earthquake
-flood
-landslide
-other
-```
-
-`events.status`:
-
-```text
-active
-monitoring
-closed
-```
-
-### Ejemplo JSONL
-
-```json
-{
-  "event_id": "f0e1d2c3-b4a5-6789-0fed-cba987654321",
-  "name": "Terremoto Yaracuy 24-06-2026",
-  "event_type": "earthquake",
-  "occurred_at": "2026-06-24T14:32:00Z",
-  "affected_states": ["Yaracuy", "Lara", "Portuguesa"],
-  "magnitude": 7.30,
-  "depth_km": 12.50,
-  "status": "active",
-  "external_ids": {
-    "usgs": "us7000n4xy",
-    "funvisis": "VEN-2026-001"
-  }
-}
-```
-
----
-
-## 4. Entidad: `PERSON` — Identidad
-
-Tabla:
-
-```text
-persons
-```
-
-### Campos
-
-| Campo                 | Tipo SQL         | Tipo JSONL      | Nullable | Valores / Notas                                           |
-| --------------------- | ---------------- | --------------- | -------: | --------------------------------------------------------- |
-| `person_record_id`    | `VARCHAR(36)` PK | `string`        |       no | UUID v4                                                   |
-| `event_id`            | `VARCHAR(36)` FK | `string`        |       no | Referencia a `events.event_id`                            |
-| `full_name`           | `VARCHAR(300)`   | `string`        |       sí | Nombre normalizado                                        |
-| `alternate_names`     | `JSONB` / `JSON` | `array<string>` |       sí | Nombres alternativos encontrados                          |
-| `cedula_hmac`         | `VARCHAR(64)`    | `string`        |       sí | HMAC SHA-256 de la cédula                                 |
-| `cedula_masked`       | `VARCHAR(15)`    | `string`        |       sí | Cédula parcialmente enmascarada                           |
-| `age_range`           | `JSONB` / `JSON` | `object`        |       sí | Rango de edad                                             |
-| `sex`                 | `VARCHAR(10)`    | `string`        |       sí | Enum definido                                             |
-| `is_minor`            | `BOOLEAN`        | `boolean`       |       sí | `true` si es menor de 18; `null` si no puede determinarse |
-| `last_known_location` | `JSONB` / `JSON` | `object`        |       sí | `location_object`                                         |
-| `status`              | `VARCHAR(30)`    | `string`        |       no | Enum definido                                             |
-| `verification_status` | `VARCHAR(30)`    | `string`        |       no | Enum definido                                             |
-| `confidence_score`    | `NUMERIC(4,3)`   | `number`        |       no | Default `0.000` si no hay datos                           |
-| `source_url`          | `TEXT`           | `string`        |       sí | URL primaria del registro                                 |
-| `deterministic_id`    | `VARCHAR(16)`    | `string`        |       sí | ID determinístico basado en hash fonético y ubicación     |
-
-### Enums
-
-`persons.sex`:
-
-```text
-M
-F
-unknown
-```
-
-`persons.status`:
-
-```text
-missing
-found
-injured
-deceased
-unknown
-```
-
-`persons.verification_status`:
-
-```text
-unverified
-pending
-verified
-conflicting
-```
-
-### `age_range`
-
-Ejemplo:
-
-```json
-{
-  "min": 30,
-  "max": 40
-}
-```
-
-Se usa `age_range` en lugar de edad exacta.
-
-### Ejemplo JSONL
-
-```json
-{
-  "person_record_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-  "event_id": "f0e1d2c3-b4a5-6789-0fed-cba987654321",
-  "full_name": "JOSE LUIS PEREZ MARIN",
-  "alternate_names": ["JOSE PEREZ", "JOSELO PEREZ MARIN"],
-  "cedula_hmac": "3b4c9e2a1fd82f6a0bc347e1a9f2c8d5e047b3a12f9c6d71e8b405a3c2d1f9e0",
-  "cedula_masked": "V-****5821",
-  "age_range": {
-    "min": 30,
-    "max": 40
-  },
-  "sex": "M",
-  "is_minor": false,
-  "last_known_location": {
-    "raw": "El Tocuyo, Lara",
-    "estado": "Lara",
-    "municipio": "Morán",
-    "parroquia": null,
-    "lat": 9.7834,
-    "lng": -69.7921
-  },
-  "status": "missing",
-  "verification_status": "unverified",
-  "confidence_score": 0.420,
-  "source_url": "https://encuentralos.org/registro/12345"
-}
-```
-
----
-
-## 5. Estructura: `location_object`
-
-Estructura usada por campos de ubicación.
-
-```json
-{
-  "raw": "El Tocuyo, Lara",
-  "estado": "Lara",
-  "municipio": "Morán",
-  "parroquia": null,
-  "lat": 9.7834,
-  "lng": -69.7921
-}
-```
-
-### Campos
-
-| Campo       | Tipo JSONL | Nullable | Descripción                                  |
-| ----------- | ---------- | -------: | -------------------------------------------- |
-| `raw`       | `string`   |       sí | Valor original o descriptivo de la ubicación |
-| `estado`    | `string`   |       sí | Estado                                       |
-| `municipio` | `string`   |       sí | Municipio                                    |
-| `parroquia` | `string`   |       sí | Parroquia                                    |
-| `lat`       | `number`   |       sí | Latitud                                      |
-| `lng`       | `number`   |       sí | Longitud                                     |
-
-Si la geocodificación falla, `lat` y `lng` deben quedar como `null`.
-
-El registro no debe descartarse por no tener coordenadas.
-
----
-
-## 6. Entidad: `PERSON_NOTE` — Nota / Información adicional
-
-Tabla:
-
-```text
-person_notes
-```
-
-### Campos base
-
-| Campo                 | Tipo SQL         | Tipo JSONL        | Nullable | Valores / Notas                                  |
-| --------------------- | ---------------- | ----------------- | -------: | ------------------------------------------------ |
-| `note_record_id`      | `VARCHAR(36)` PK | `string`          |       no | UUID v4                                          |
-| `person_record_id`    | `VARCHAR(36)` FK | `string`          |       no | Referencia a `persons.person_record_id`          |
-| `note_type`           | `VARCHAR(30)`    | `string`          |       no | Enum definido                                    |
-| `found_by`            | `VARCHAR(300)`   | `string`          |       sí | Nombre de quien encontró                         |
-| `status`              | `VARCHAR(30)`    | `string`          |       no | Enum definido                                    |
-| `source_date`         | `TIMESTAMPTZ`    | `string` ISO 8601 |       sí | Fecha en que ocurrió o fue publicado el hecho    |
-| `entry_date`          | `TIMESTAMPTZ`    | `string` ISO 8601 |       no | Fecha en que entra el registro                   |
-| `found`               | `BOOLEAN`        | `boolean`         |       sí | `true` si fue localizada; `null` si se desconoce |
-| `last_known_location` | `JSONB` / `JSON` | `object`          |       sí | Mismo `location_object` que en `persons`         |
-
-### Enums
-
-`person_notes.note_type`:
-
-```text
-missing
-injured
-found
-deceased
-```
-
-`person_notes.status`:
-
-```text
-active
-superseded
-retracted
-```
-
----
-
-## 7. Sub-campos de `person_notes` por `note_type`
-
-Estos campos viven en la misma tabla con columnas sparse nullable.
-
-La especificación recomienda columnas sparse en una sola tabla para simplificar consultas.
-
----
-
-### 7.1 Si `note_type = "missing"`
-
-| Campo                | Tipo SQL         | Tipo JSONL                 | Nullable |
-| -------------------- | ---------------- | -------------------------- | -------: |
-| `last_seen_at`       | `TIMESTAMPTZ`    | `string` ISO 8601          |       sí |
-| `last_seen_location` | `JSONB` / `JSON` | `object` `location_object` |       sí |
-
----
-
-### 7.2 Si `note_type = "injured"`
-
-| Campo                | Tipo SQL       | Tipo JSONL        | Nullable |
-| -------------------- | -------------- | ----------------- | -------: |
-| `hospital_name`      | `VARCHAR(255)` | `string`          |       sí |
-| `hospital_municipio` | `VARCHAR(100)` | `string`          |       sí |
-| `severity`           | `VARCHAR(20)`  | `string`          |       sí |
-| `admitted_time`      | `TIMESTAMPTZ`  | `string` ISO 8601 |       sí |
-
-`person_notes.severity`:
-
-```text
-leve
-moderado
-grave
-critico
-unknown
-```
-
----
-
-### 7.3 Si `note_type = "found"`
-
-| Campo      | Tipo SQL      | Tipo JSONL        | Nullable |
-| ---------- | ------------- | ----------------- | -------: |
-| `found_at` | `TIMESTAMPTZ` | `string` ISO 8601 |       sí |
-
----
-
-### 7.4 Si `note_type = "deceased"`
-
-| Campo                   | Tipo SQL         | Tipo JSONL                 | Nullable |
-| ----------------------- | ---------------- | -------------------------- | -------: |
-| `deceased_at`           | `TIMESTAMPTZ`    | `string` ISO 8601          |       sí |
-| `recovery_location`     | `JSONB` / `JSON` | `object` `location_object` |       sí |
-| `identification_status` | `VARCHAR(30)`    | `string`                   |       sí |
-| `confirmed_by`          | `VARCHAR(300)`   | `string`                   |       sí |
-
-`person_notes.identification_status`:
-
-```text
-identified
-unidentified
-pending
-```
-
----
-
-## 8. Entidad: `PERSON_PHOTO`
-
-Tabla:
-
-```text
-person_photos
-```
-
-### Campos
-
-| Campo              | Tipo SQL         | Tipo JSONL        | Nullable | Valores / Notas                                |
-| ------------------ | ---------------- | ----------------- | -------: | ---------------------------------------------- |
-| `photo_id`         | `VARCHAR(36)` PK | `string`          |       no | UUID v4                                        |
-| `person_record_id` | `VARCHAR(36)` FK | `string`          |       no | Referencia a persona                           |
-| `url`              | `TEXT`           | `string`          |       no | URL de la imagen                               |
-| `caption`          | `TEXT`           | `string`          |       sí | Texto asociado a la foto en la fuente original |
-| `source_id`        | `VARCHAR(36)` FK | `string`          |       sí | Referencia a `person_sources.source_id`        |
-| `uploaded_at`      | `TIMESTAMPTZ`    | `string` ISO 8601 |       no | Cuándo fue ingestada en el sistema             |
-
----
-
-## 9. Entidad: `PERSON_SOURCE` — Fuente / Corroboración
-
-Tabla:
-
-```text
-person_sources
-```
-
-### Campos
-
-| Campo              | Tipo SQL         | Tipo JSONL        | Nullable | Valores / Notas                         |
-| ------------------ | ---------------- | ----------------- | -------: | --------------------------------------- |
-| `source_id`        | `VARCHAR(36)` PK | `string`          |       no | UUID v4                                 |
-| `person_record_id` | `VARCHAR(36)` FK | `string`          |       no | Referencia a `persons.person_record_id` |
-| `source_url`       | `TEXT`           | `string`          |       no | URL donde se encontró el dato           |
-| `ext_id`           | `VARCHAR(255)`   | `string`          |       sí | ID del registro en la fuente externa    |
-| `trust_tier`       | `SMALLINT`       | `number` integer  |       no | Nivel de confianza                      |
-| `fetched_at`       | `TIMESTAMPTZ`    | `string` ISO 8601 |       no | Cuándo fue scrapeado este dato          |
-
-### `trust_tier`
-
-```text
-1 = oficial
-2 = ONG
-3 = social/anónimo
-```
-
-### Protección de menores
-
-`person_sources` no tiene hoy un campo `is_minor` propio ni modelo Python
-implementado en este repo (lo construye Stage 1, #81). Cuando se
-implemente: cualquier exposición/export de `person_sources` para un
-`person_record_id` cuyo `persons.is_minor=true` debe respetar la misma
-reducción de campos que aplica el scraper a `persons.jsonl` (ver
-`docs/pipeline.md`, sección "Protección de menores") — en particular,
-`source_url` no debe filtrar información más identificable que la que ya
-fue reducida en el `Person` asociado.
-
----
-
-## 10. Entidad: `ACOPIO_CENTER`
-
-Tabla:
-
-```text
-acopio_centers
-```
-
-### Campos
-
-Campos producidos por el parser (modelo Pydantic en `scrapers/models/acopio_center.py`):
-
-| Campo              | Tipo SQL         | Tipo JSONL                 | Nullable | Valores / Notas                   |
-| ------------------ | ---------------- | -------------------------- | -------: | --------------------------------- |
-| `name`             | `VARCHAR(300)`   | `string`                   |       no | Nombre del centro                 |
-| `event_id`         | `VARCHAR(36)` FK | `string`                   |       no | Referencia a `events.event_id`    |
-| `location_text`    | `TEXT`           | `string`                   |       no | Ubicación en texto libre          |
-| `coordinates`      | `JSONB`          | `object` `{lat, lon}`      |       sí | Coordenadas geográficas           |
-| `needs`            | `JSONB`          | `array<string>`            |       sí | Array de `need_keyword`           |
-| `status`           | `VARCHAR(30)`    | `string`                   |       no | Enum definido, default `unverified` |
-| `trust_tier`       | `VARCHAR(1)`     | `string`                   |       no | `A` / `B` / `C` / `D`, default `D` |
-| `confidence_score` | `NUMERIC(4,3)`   | `number`                   |       no | Default `0.000`                   |
-| `fuente`           | `VARCHAR(100)`   | `string`                   |       no | Slug de la fuente de origen       |
-| `nota`             | `TEXT`           | `string`                   |       sí | Nota informativa                  |
-
-Campos agregados por el consolidation job (no forman parte del modelo Pydantic):
-
-| Campo              | Tipo SQL         | Tipo JSONL                 | Nullable | Valores / Notas                   |
-| ------------------ | ---------------- | -------------------------- | -------: | --------------------------------- |
-| `dedup_hash`       | `VARCHAR(64)`    | `string`                   |       sí | Hash estable para auto-merge exacto |
-
-### Enums
-
-`acopio_centers.status`:
-
-```text
-active
-full
-closed
-unverified
-```
-
-`acopio_centers.needs[]`:
-
-```text
-agua
-alimentos
-medicamentos
-colchonetas
-ropa
-calzado
-higiene
-pañales
-leche_formula
-generador
-combustible
-herramientas
-voluntarios
-transporte
-otro
-```
-
-### Ejemplo JSONL
-
-```json
-{
-  "event_id": "f0e1d2c3-b4a5-6789-0fed-cba987654321",
-  "name": "Centro de Acopio Polideportivo Municipal San Felipe",
-  "location_text": "Polideportivo Municipal, San Felipe, Yaracuy",
-  "coordinates": {"lat": 10.3401, "lon": -68.7456},
-  "confidence_score": 0.850,
-  "status": "active",
-  "needs": ["agua", "alimentos", "medicamentos", "colchonetas", "pañales"],
-  "trust_tier": "B",
-  "fuente": "acopio_ve",
-  "nota": null
-}
-```
-
----
-
-## 11. Consolidation / dedup SQL — Paso 1 (#90)
-
-El Paso 1 agrega soporte mínimo de consolidation sobre tablas existentes sin
-tocar todavía la ingesta a staging de #81.
-
-SQL versionado en el repo:
-
-```text
-tools/sql/issue_90_step1_consolidation.sql
-tools/sql/issue_90_step1_consolidation_rollback.sql
-```
-
-### Cambios implementados
-
-- `events.dedup_hash varchar(64)` para auto-merge exacto de eventos.
-- Índice único `events_dedup_uniq` sobre `events(dedup_hash)`.
-- `acopio_centers.dedup_hash varchar(64)` para auto-merge exacto de centros de acopio.
-- Índice único `acopio_centers_dedup_uniq` sobre `acopio_centers(dedup_hash)`.
-- Tabla `dedup_candidates` para candidatos de deduplicación de personas,
-  alineada con la salida documentada del pipeline.
-
-PostgreSQL permite múltiples `NULL` en índices `UNIQUE`, por lo que agregar
-`dedup_hash` nullable no rompe filas históricas ni bloquea migraciones aunque
-los hashes aún no estén backfilleados.
-
-### Tabla `dedup_candidates`
-
-| Campo                    | Tipo SQL       | Nullable | Valores / Notas                                      |
-| ------------------------ | -------------- | -------: | ---------------------------------------------------- |
-| `candidate_id`           | `uuid`         |       no | PK, `DEFAULT gen_random_uuid()`                      |
-| `event_id`               | `VARCHAR(36)`  |       no | FK a `public.events(event_id)`                       |
-| `left_person_record_id`  | `VARCHAR(36)`  |       no | FK a `public.persons(person_record_id)`              |
-| `right_person_record_id` | `VARCHAR(36)`  |       no | FK a `public.persons(person_record_id)`              |
-| `blocking_key`           | `text`         |       sí | Clave emitida por `person_block_keys`                |
-| `score`                  | `numeric(4,3)` |       no | Score de similitud candidato, `CHECK 0..1`           |
-| `reasons`                | `jsonb`        |       sí | Señales explicables usadas para generar el candidato |
-| `priority`               | `text`         |       no | Prioridad operativa del candidato                    |
-| `decision`               | `text`         |       no | Default `pending`                                    |
-| `created_at`             | `timestamptz`  |       no | Default `now()`                                      |
-
-`blocking_key` queda nullable para no bloquear migraciones con candidatos
-históricos o backfills parciales. La salida esperada del pipeline debe
-popularla con una de las claves devueltas por
-`scrapers/dedup/specs.py::person_block_keys`, por ejemplo
-`ced:{event_id}:{cedula_hmac}` o `phon:{event_id}:{estado}:{phonetic_hash}`.
-
-Restricción:
-
-```text
-CHECK (left_person_record_id <> right_person_record_id)
-UNIQUE INDEX dedup_candidates_pair_blocking_uniq
-  ON (
-    LEAST(left_person_record_id, right_person_record_id),
-    GREATEST(left_person_record_id, right_person_record_id),
-    blocking_key
-  )
-```
-
-El índice canónico evita insertar el mismo par invertido para la misma
-`blocking_key` como dos candidatos distintos (`A/B` y `B/A`). No bloquea que
-el mismo par aparezca por claves de bloqueo distintas, porque `person_block_keys`
-puede devolver más de una clave para la misma persona.
-
-### Pendiente
-
-Paso 2 queda pendiente hasta que #81 cree `aportes`. Esta PR no crea ni modifica
-`aportes`, no crea `dedup_decisions` y no implementa el job de consolidation.
-
-### Rollback
-
-El rollback documentado elimina solamente lo creado por Paso 1:
-
-- `public.dedup_candidates`
-- índice `events_dedup_uniq`
-- índice `acopio_centers_dedup_uniq`
-- columna `public.events.dedup_hash`
-- columna `public.acopio_centers.dedup_hash`
-
-No toca `aportes`, `dedup_decisions` ni jobs de consolidation.
-
----
-
-# Resumen de enums
-
-## `events.event_type`
-
-```text
-earthquake
-flood
-landslide
-other
-```
-
-## `events.status`
-
-```text
-active
-monitoring
-closed
-```
-
-## `persons.sex`
-
-```text
-M
-F
-unknown
-```
-
-## `persons.status`
-
-```text
-missing
-found
-injured
-deceased
-unknown
-```
-
-## `persons.verification_status`
-
-```text
-unverified
-pending
-verified
-conflicting
-```
-
-## `person_notes.note_type`
-
-```text
-missing
-injured
-found
-deceased
-```
-
-## `person_notes.status`
-
-```text
-active
-superseded
-retracted
-```
-
-## `person_notes.severity`
-
-```text
-leve
-moderado
-grave
-critico
-unknown
-```
-
-## `person_notes.identification_status`
-
-```text
-identified
-unidentified
-pending
-```
-
-## `person_sources.trust_tier`
-
-```text
-1 = oficial
-2 = ONG
-3 = social/anónimo
-```
-
-## `acopio_centers.status`
-
-```text
-active
-full
-closed
-unverified
-```
-
-## `acopio_centers.needs[]`
-
-```text
-agua
-alimentos
-medicamentos
-colchonetas
-ropa
-calzado
-higiene
-pañales
-leche_formula
-generador
-combustible
-herramientas
-voluntarios
-transporte
-otro
-```
-
----
-
-# Notas de implementación
-
-## UUIDs vs autoincrement
-
-Los UUIDs permiten generar IDs en el scraper sin necesidad de consultar la DB.
-
-Esto es importante para JSONL que se ingesta en batch.
-
----
-
-## `age_range` en lugar de `age`
-
-Se usa `age_range` porque las fuentes de crisis no siempre dan edades exactas confiables.
-
-Guardar un rango es más honesto y evita falsos matches en deduplicación.
-
----
-
-## `trust_tier` como entero
-
-`trust_tier` se guarda como entero porque es más fácil de indexar y comparar que un string.
-
-El mapeo semántico vive en documentación y en app layer.
-
----
-
-## `needs` en acopio como array de keywords
-
-`needs` se mantiene como array porque un centro de acopio puede tener múltiples necesidades.
-
-Sin embargo, los valores deben ser keywords controladas por el enum `need_keyword`.
-
-El parser es responsable de mapear texto libre al keyword antes de exportar.
-
-Ejemplos:
-
-```text
-"H2O" -> "agua"
-"agua potable" -> "agua"
-"AGUA" -> "agua"
-```
-
-Para necesidades que no tengan keyword, se usa:
-
-```text
-otro
-```
-
-El enum es extensible: agregar un keyword nuevo no rompe registros existentes.
-
----
-
-## `contact_hmac` / `contact_masked` en acopio
-
-El contacto de un centro de acopio puede ser el teléfono personal de un voluntario, no necesariamente un número institucional.
-
-Por defecto se aplica el mismo patrón que `cedula_hmac`:
-
-```text
-contact_hmac   -> HMAC para lookup
-contact_masked -> versión enmascarada para display
-```
-
-Si el equipo de Validation confirma que un contacto es genuinamente público, se puede exponer desde app layer.
-
-El default es protegerlo.
-
----
-
-## Campos sparse en `person_notes`
-
-La especificación recomienda una sola tabla con columnas nullable por tipo, en lugar de cuatro tablas separadas.
-
-Esto simplifica consultas del tipo:
-
-```text
-dame todas las notas de esta persona
-```
-
----
-
-# Vista pública (ADR 0001 §5)
-
-El artefacto D1 (plano público de serving) contiene **únicamente** los campos
-listados aquí. Ningún otro campo es exportado al plano público, por diseño.
-
-La proyección se aplica en la base de datos mediante vistas de solo-lectura
-(`tools/sql/public_views.sql`), no en el código del build job, para que sea
-imposible filtrar un campo sensible por descuido.
-
-**Campos prohibidos en D1:** cédula en claro, teléfono en claro, contacto
-familiar, fotos reales, datos médicos identificables, `raw_content`, y cualquier
-campo marcado sensible en `base-standards.md §10`.
-
-## Vista pública: `persons`
-
-Vista SQL: `public_persons`
-
-| Campo | Tipo JSONL | Notas |
-|-------|-----------|-------|
-| `person_record_id` | `string` UUID v4 | PK |
-| `event_id` | `string` UUID v4 | FK → events |
-| `full_name` | `string` | normalizado (mayúsculas) |
-| `alternate_names` | `array<string>` | |
-| `cedula_hmac` | `string` HEX 64 | sin prefijo — solo para lookup |
-| `cedula_masked` | `string` | últimos 4 dígitos |
-| `age_range` | `object` `{min, max}` | |
-| `sex` | `string` enum | |
-| `last_known_location` | `object` `location_object` | solo estado/municipio/parroquia/lat/lng |
-| `status` | `string` enum | |
-| `verification_status` | `string` enum | |
-| `confidence_score` | `number` | 0.000–1.000 |
-| `source_url` | `string` | trazabilidad |
-| `deterministic_id` | `string` | ID fonético precomputado para FTS5 blocking |
-
-## Vista pública: `acopio_centers`
-
-Vista SQL: `public_acopio`
-
-| Campo | Tipo JSONL | Notas |
-|-------|-----------|-------|
-| `name` | `string` | |
-| `event_id` | `string` UUID v4 | FK → events |
-| `location_text` | `string` | |
-| `coordinates` | `object` `{lat, lon}` | nullable |
-| `confidence_score` | `number` | |
-| `status` | `string` enum | |
-| `needs` | `array<string>` | keywords normalizadas |
-| `trust_tier` | `string` | A/B/C/D |
-
-## Vista pública: `events`
-
-Vista SQL: `public_events`
-
-| Campo | Tipo JSONL | Notas |
-|-------|-----------|-------|
-| `event_id` | `string` UUID v4 | PK |
-| `name` | `string` | |
-| `event_type` | `string` enum | |
-| `occurred_at` | `string` ISO 8601 | |
-| `affected_states` | `array<string>` | |
-| `magnitude` | `number` | nullable |
-| `depth_km` | `number` | nullable |
-| `status` | `string` enum | |
-| `external_ids` | `object` | nullable |

@@ -10,7 +10,7 @@ estado coherente.
 
 > **Nota (jun 2026):** El diseño de `tools/ingest_supabase/` descrito en este plan
 > fue reemplazado en #81. La ingesta a Supabase ahora vive en
-> `scrapers/exporters/staging_exporter.py` via `POST /api/aportes`. Las Fases 2–5
+> `scrapers/exporters/staging_exporter.py` via `POST /rest/v1/aportes`. Las Fases 2–5
 > siguen siendo válidas como referencia de arquitectura objetivo.
 
 ---

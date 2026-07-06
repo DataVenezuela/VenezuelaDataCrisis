@@ -28,7 +28,7 @@ Fuentes → Adapters → Parsers → Modelos tipados → Limpieza → Deduplicac
 
 ---
 
-### `scraper_contract.md`
+### `scrapper_contract.md`
 
 Define el contrato de salida que deben cumplir los scrapers.
 
@@ -64,19 +64,9 @@ Incluye:
 
 ### `schema.md`
 
-Define las entidades principales del proyecto.
-
-Incluye:
-
-* `events`
-* `persons`
-* `person_notes`
-* `person_sources`
-* `person_photos`
-* `acopio_centers`
-* `dedup_candidates`
-
-Este documento debe mantenerse alineado con los modelos de base de datos y los JSONL exportados.
+Esquema real de la base de datos del plano interno (Supabase/Postgres), como
+referencia de contexto. La fuente de verdad ejecutable son las migraciones del
+repo `DataVenezuela/dataVenezuela`.
 
 ---
 
@@ -104,18 +94,17 @@ Para colaboradores nuevos:
 2. `../CONTRIBUTING.md`
 3. `docs/README.md`
 4. `docs/pipeline.md`
-5. `docs/scraper_contract.md`
+5. `docs/scrapper_contract.md`
 
 Para quienes agregan una nueva fuente:
 
 1. `docs/source_config.md`
 2. `docs/pipeline.md`
-3. `docs/scraper_contract.md`
+3. `docs/scrapper_contract.md`
 
 Para quienes trabajan en base de datos o API:
 
-1. `docs/schema.md`
-2. `docs/scraper_contract.md`
+1. `docs/scrapper_contract.md`
 
 ---
 

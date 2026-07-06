@@ -44,7 +44,7 @@ Canonical (persons / events / acopio_centers)
 Cloudflare Worker + D1  →  Public API
 ```
 
-**The pipeline does not write JSONL to disk.** Output goes to staging via `POST /api/v1/dedup/*`.
+**The pipeline does not write JSONL to disk.** Output goes to the `aportes` staging table via direct PostgREST `POST /rest/v1/aportes`.
 
 **Records without a parser go to quarantine, not to a generic fallback.**
 
