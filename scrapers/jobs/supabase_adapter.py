@@ -133,9 +133,9 @@ _APORTE_FIELD_MAP: dict[str, str] = {
     "raw_json": "payload",
 }
 
-# Marcador para "aportes.trust_tier ausente en la respuesta" (columna no migrada
-# aun). pick_winner lo trata como tier desconocido (rango 0, el mas bajo), asi que
-# el desempate por fetched_at / confidence_score sigue siendo determinista.
+# Marcador para trust_tier ausente/invalido. pick_winner lo trata como tier
+# desconocido (rango 0, el mas bajo), dejando el desempate por fetched_at /
+# confidence_score determinista.
 _MISSING_TRUST_TIER = ""
 
 # Status HTTP transitorios que ameritan reintento (espeja staging_exporter).
@@ -214,25 +214,30 @@ def _aporte_to_record(row: dict[str, object]) -> Record:
     """Proyecta una fila de aportes al Record que consume la logica pura.
 
     Mapea las columnas reales (ver ``_APORTE_FIELD_MAP``) y adjunta los campos de
-    desempate que la decision del equipo pide (trust_tier / fetched_at /
-    confidence_score). Esos tres NO son columnas garantizadas de aportes; si la
-    respuesta no los trae, se degrada de forma segura (trust_tier vacio => rango
-    0; fetched_at / confidence_score None => desempate neutro). ``row.get`` ya
-    devuelve None si la columna esta ausente o es null.
+    desempate:
+
+    - ``trust_tier``: viene de ``sources.governed_tier`` (embedding PostgREST via
+      ``aportes.source_id``). Degrada a ``_MISSING_TRUST_TIER`` si la fila embedida
+      no llega (tier desconocido => rango peor, desempate por fetched_at/score).
+    - ``fetched_at``: viene de ``raw_artifacts.fetched_at`` (embedding via
+      ``aportes.artifact_id``). None si la fila embedida no llega.
+    - ``confidence_score``: None hasta que el camino de consolidacion lo popule en
+      la tabla de entidad; pick_winner degrada de forma segura.
     """
     record: Record = {}
     for column, key in _APORTE_FIELD_MAP.items():
         if column in row:
             record[key] = row[column]
-    # trust_tier: columna de aportes segun la decision del equipo (A=1..D=4). NO
-    # existe todavia en el schema real (depende de migracion pendiente); si falta,
-    # cae a _MISSING_TRUST_TIER y pick_winner lo trata como tier desconocido.
-    trust_tier = row.get("trust_tier")
-    record["trust_tier"] = trust_tier if trust_tier is not None else _MISSING_TRUST_TIER
-    # Desempates de la decision del equipo. En el schema real fetched_at vive en
-    # person_sources/raw_artifacts y confidence_score en persons/acopio_centers,
-    # no en aportes; se leen de forma opcional para no romper si estan ausentes.
-    record["fetched_at"] = row.get("fetched_at")
+    # trust_tier: sources.governed_tier embebido via PostgREST (source_id FK).
+    sources_row = row.get("sources")
+    if isinstance(sources_row, dict):
+        trust_tier_raw = sources_row.get("governed_tier")
+    else:
+        trust_tier_raw = None
+    record["trust_tier"] = trust_tier_raw if trust_tier_raw is not None else _MISSING_TRUST_TIER
+    # fetched_at: raw_artifacts.fetched_at embebido via PostgREST (artifact_id FK).
+    artifact_row = row.get("raw_artifacts")
+    record["fetched_at"] = artifact_row.get("fetched_at") if isinstance(artifact_row, dict) else None
     record["confidence_score"] = row.get("confidence_score")
     return record
 
@@ -334,7 +339,9 @@ class SupabaseConsolidationAdapter:
             "GET",
             _APORTES_PATH,
             params={
-                "select": "*",
+                # sources(governed_tier): trust_tier via FK aportes.source_id
+                # raw_artifacts(fetched_at): fetched_at via FK aportes.artifact_id
+                "select": "*,sources(governed_tier),raw_artifacts(fetched_at)",
                 "consolidated_at": "is.null",
                 "entity_type": f"eq.{slug}",
                 "order": "created_at.asc,id.asc",

@@ -508,6 +508,8 @@ def _apply_pii(
                 d["_entity_type"] = type(entity).__name__
                 if source_url:
                     d["_source_url"] = source_url
+                if fetched_at is not None:
+                    d["_fetched_at"] = fetched_at
                 d["_parser_version"] = _PIPELINE_VERSION
                 result.append(d)
             except Exception as rescue_exc:

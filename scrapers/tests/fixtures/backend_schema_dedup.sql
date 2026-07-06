@@ -17,6 +17,19 @@
 -- If the backend schema changes, re-fetch and update this file + the adapter.
 
 -- ---------------------------------------------------------------------------
+-- sources : trust_tier de la fuente (governed_tier); FK target de aportes.
+-- El adapter lee governed_tier via PostgREST embedding (source_id FK).
+-- ---------------------------------------------------------------------------
+create table public.sources (
+  id            uuid primary key default gen_random_uuid(),
+  slug          text not null unique,
+  display_name  text not null,
+  governed_tier text not null default 'D',
+  active        boolean not null default true,
+  created_at    timestamptz not null default now()
+);
+
+-- ---------------------------------------------------------------------------
 -- 0001_init.sql : aportes base
 -- ---------------------------------------------------------------------------
 create table public.aportes (

@@ -236,20 +236,20 @@ implementar. No asumas que un campo "no importa". Lee `CONTRIBUTING.MD`
 completo — cubre el flujo de PR, las reglas de seguridad y el checklist
 de Definition of Done.
 
-## Campos de winner-selection en `aportes` (issue #214)
+## Campos de winner-selection en `pick_winner` (issue #214)
 
-Desde #214 el staging_exporter popula tres columnas en `aportes` que el
-consolidation_job usa para `pick_winner`:
+`pick_winner` usa tres campos para elegir el aporte ganador dentro de un grupo
+de duplicados. Ninguno vive como columna en `aportes`; llegan via PostgREST
+embedding al momento de la consolidación:
 
-| Campo | Origen en el pipeline | Formato |
+| Campo | Origen en el schema | Formato |
 |---|---|---|
-| `trust_tier` | `rec["trust_tier"]` (de `model_dump()`, etapa PII) | letra A/B/C/D |
-| `confidence_score` | `rec["confidence_score"]` (etapa `_apply_confidence`) | float [0..1] |
-| `fetched_at` | `rec["_fetched_at"]` (meta-campo de `_apply_pii`, viene de `page.fetched_at`) | ISO-8601 UTC |
+| `trust_tier` | `sources.governed_tier` (FK `aportes.source_id`) | letra A/B/C/D |
+| `fetched_at` | `raw_artifacts.fetched_at` (FK `aportes.artifact_id`) | ISO-8601 UTC |
+| `confidence_score` | calculado en consolidación, escrito en `persons`/`acopio_centers` | float [0..1] |
 
-`_fetched_at` lleva prefijo `_` para no colarse en `raw_json`. Si la página no
-tiene `fetched_at` (raro pero posible en adapters legacy), el campo se omite del
-payload y el adapter degrada a `_UNKNOWN_TIER_RANK` / `-inf`.
+El adapter degrada de forma segura si algún campo falta: tier vacío → rango peor
+(`_UNKNOWN_TIER_RANK`); `fetched_at`/`confidence_score` ausentes → desempate neutro.
 
 ---
 

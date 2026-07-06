@@ -132,7 +132,7 @@ def test_fetch_envia_filtros_correctos() -> None:
     assert query["entity_type"] == ["eq.event"]  # slug del enum del backend
     assert query["order"] == ["created_at.asc,id.asc"]
     assert query["limit"] == ["250"]
-    assert query["select"] == ["*"]
+    assert query["select"] == ["*,sources(governed_tier),raw_artifacts(fetched_at)"]
 
 
 def test_fetch_acopio_usa_slug_acopio() -> None:
@@ -149,6 +149,8 @@ def test_fetch_acopio_usa_slug_acopio() -> None:
 
 
 def test_fetch_mapea_columnas_reales_a_record() -> None:
+    # trust_tier llega via PostgREST embedding sources(governed_tier) (#214).
+    # fetched_at llega via embedding raw_artifacts(fetched_at).
     row = {
         "id": "ap-1",
         "created_at": "2026-06-24T10:00:00Z",
@@ -156,8 +158,8 @@ def test_fetch_mapea_columnas_reales_a_record() -> None:
         "entity_type": "event",
         "dedup_hash": "h1",
         "raw_json": {"name": "Sismo", "event_type": "earthquake"},
-        "trust_tier": "A",
-        "fetched_at": "2026-06-24T09:59:00Z",
+        "sources": {"governed_tier": "A"},
+        "raw_artifacts": {"fetched_at": "2026-06-24T09:59:00Z"},
         "confidence_score": 0.8,
     }
 
@@ -179,8 +181,8 @@ def test_fetch_mapea_columnas_reales_a_record() -> None:
 
 
 def test_fetch_trust_tier_ausente_degrada_seguro() -> None:
-    # aportes.trust_tier NO existe todavia en el schema real; si la respuesta no
-    # lo trae, el Record queda con trust_tier vacio (rango peor en pick_winner).
+    # Si PostgREST no devuelve el embedding sources/raw_artifacts (fuente sin tier
+    # o migration pendiente), el Record queda con trust_tier vacio (rango peor).
     row = {
         "id": "ap-1",
         "created_at": "2026-06-24T10:00:00Z",

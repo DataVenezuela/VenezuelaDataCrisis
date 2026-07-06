@@ -478,6 +478,29 @@ class TestApplyPiiSourceUrl:
         assert "_source_url" not in recs[0]
         assert recs[0]["_parser_version"] == rp._PIPELINE_VERSION
 
+    def test_fetched_at_set_when_provided(self) -> None:
+        recs = rp._apply_pii(
+            [self._person()], [], self._source(), [],
+            fetched_at="2026-06-24T15:00:00Z",
+        )
+        assert recs[0]["_fetched_at"] == "2026-06-24T15:00:00Z"
+
+    def test_fetched_at_omitted_when_none(self) -> None:
+        recs = rp._apply_pii([self._person()], [], self._source(), [])
+        assert "_fetched_at" not in recs[0]
+
+    def test_fetched_at_set_on_rescue_path(self) -> None:
+        errors: list[str] = []
+        with patch.dict(os.environ, {"PII_SALT": "test-salt"}), \
+             patch.object(rp, "tokenize_pii_fields", side_effect=RuntimeError("boom")):
+            recs = rp._apply_pii(
+                [self._person()], errors, self._source(), [],
+                fetched_at="2026-06-24T15:00:00Z",
+            )
+        assert recs, "el registro debe rescatarse"
+        assert recs[0]["_fetched_at"] == "2026-06-24T15:00:00Z"
+        assert errors  # el error se registró, no se descartó en silencio
+
     def test_enrich_sets_normalizer_version(self) -> None:
         recs = rp._apply_pii([self._person()], [], self._source(), [])
         enriched = rp._enrich_records(recs, [])

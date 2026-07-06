@@ -18,9 +18,9 @@ Un "aporte no consolidado" es un ``dict[str, object]`` con al menos:
   - ``created_at``:  timestamp ISO-8601 (str), para desempate secundario.
   - ``payload``:     dict con el contenido canonico a materializar (dict).
 
-Los campos ``trust_tier`` (letras A/B/C/D), ``fetched_at`` (ISO-8601) y
-``confidence_score`` (float [0..1]) son columnas de ``aportes`` populadas por
-el staging_exporter desde #214; ver docstring de ``pick_winner``.
+``trust_tier`` (letras A/B/C/D) proviene de ``sources.governed_tier`` via
+PostgREST embedding (#214); ``fetched_at`` de ``raw_artifacts.fetched_at``.
+Ambos los inyecta el consolidation adapter, no el staging_exporter.
 """
 
 from __future__ import annotations

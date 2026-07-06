@@ -100,16 +100,20 @@ def test_aportes_tiene_columnas_que_el_adapter_lee() -> None:
     assert "id" in aportes_cols
 
 
-def test_aportes_trust_tier_ausente_en_schema_real() -> None:
-    # DOCUMENTADO: la decision del equipo (#82) trata trust_tier como columna de
-    # aportes, pero NO existe en el schema real publicado. Este test fija ese hecho
-    # explicitamente: si una migracion futura la agrega y se actualiza el fixture,
-    # este test rompe y avisa que ya no es un supuesto pendiente.
-    aportes_cols = _columns_of_table(_read_schema(), "aportes")
+def test_trust_tier_viene_de_sources_governed_tier() -> None:
+    # trust_tier/fetched_at/confidence_score NO son columnas de aportes.
+    # trust_tier llega via PostgREST embedding de sources.governed_tier (#214).
+    sql = _read_schema()
+    aportes_cols = _columns_of_table(sql, "aportes")
     assert "trust_tier" not in aportes_cols
-    # fetched_at y confidence_score tampoco viven en aportes en el schema real.
     assert "fetched_at" not in aportes_cols
     assert "confidence_score" not in aportes_cols
+    # La columna que el adapter embebe debe existir en sources.
+    sources_cols = _columns_of_table(sql, "sources")
+    assert "governed_tier" in sources_cols, (
+        "sources.governed_tier no existe en el fixture; el adapter usa esta columna "
+        "via PostgREST embedding para poblar trust_tier en los Records"
+    )
 
 
 def test_columnas_canonicas_de_events_existen() -> None:

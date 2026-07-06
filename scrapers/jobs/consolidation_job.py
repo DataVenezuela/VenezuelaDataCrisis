@@ -152,11 +152,10 @@ def pick_winner(group: list[Record], tier_rank: TierRankFn = default_tier_rank) 
 
     Nota sobre tier: los modelos Python usan letras A/B/C/D (AGENTS.md non-
     negotiable). La decision del equipo las mapea a 1/2/3/4 y hace ganar al
-    MENOR. ``aportes.trust_tier``, ``aportes.fetched_at`` y
-    ``aportes.confidence_score`` son columnas populadas por el staging_exporter
-    desde el issue #214. El adapter degrada de forma segura si la columna falta
-    (tier vacio => rango peor), y los desempates por fetched_at/confidence_score
-    mantienen el determinismo aun sin tier.
+    MENOR. ``trust_tier`` llega desde ``sources.governed_tier`` via PostgREST
+    embedding (#214); ``fetched_at`` desde ``raw_artifacts.fetched_at``. El
+    adapter degrada de forma segura si alguno falta (tier vacio => rango peor),
+    manteniendo el determinismo aun sin tier.
     """
     if not group:
         raise ValueError("pick_winner requiere un grupo no vacio")

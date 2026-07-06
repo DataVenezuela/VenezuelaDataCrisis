@@ -266,14 +266,9 @@ class StagingExporter:
             ("source_url", _opt_str(rec.get("_source_url"))),
             ("parser_version", _opt_str(rec.get("_parser_version"))),
             ("normalizer_version", _opt_str(rec.get("_normalizer_version"))),
-            ("trust_tier", _opt_str(rec.get("trust_tier"))),
-            ("fetched_at", _opt_str(rec.get("_fetched_at"))),
         ):
             if value is not None:
                 payload[key] = value
-        raw_score = rec.get("confidence_score")
-        if isinstance(raw_score, (int, float)) and not isinstance(raw_score, bool):
-            payload["confidence_score"] = float(raw_score)
         return payload
 
     # -- watermark ------------------------------------------------------------
