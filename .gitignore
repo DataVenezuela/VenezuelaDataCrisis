@@ -249,6 +249,9 @@ repomix-output.xml
 repomix-output.md
 .repomix/
 
+# graphify knowledge-graph output (regenerate with /graphify)
+graphify-out/
+
 # AI assistant instruction files
 .agents
 CLAUDE.md
