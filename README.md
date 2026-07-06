@@ -3,7 +3,7 @@
 
 Tras los terremotos del 24 de junio, miles de familias buscan a sus seres queridos en decenas de páginas distintas. La misma persona aparece en cuatro lugares con cuatro nombres distintos.  Este proyecto recolecta esos registros, los unifica en una base de datos limpia y deduplicada, y los expone via API para que cualquier dev pueda construir encima.
 
-→ [Contribuir](CONTRIBUTING.md) · [Scraping](./scrapers/README.md) · [Pipeline de Limpieza](scrapers/PIPELINE.md) · [Reportar un problema](../../issues)
+→ [Contribuir](CONTRIBUTING.md) · [Scraping](./scrapers/README.md) · [Pipeline de Limpieza](docs/pipeline.md) · [Reportar un problema](../../issues)
 
 ---
 
@@ -58,12 +58,16 @@ Fuentes externas
       ↓
 Adapters + Parsers + PII masking + Normalización
       ↓
-Raw DB (R2 + Supabase)    ←── Quarantine DB        [en desarrollo]
+raw_artifacts (bronze, Supabase)   ←── Quarantine DB   [en desarrollo]
       ↓
-Staging (aportes)              ← inbox cross-source  [✅ en producción]
-      ↓  consolidation job                            [en desarrollo]
-Canonical (persons / events / acopio_centers)
-      ↓  build job
+aportes (silver / staging)     ← inbox cross-source  [✅ en producción]
+      ├─ materializer → persons / acopio_centers (silver 1:1) + events (catálogo)  [en desarrollo]
+      │
+      ↓  consolidation job: similaridad sobre aportes → aristas   [en desarrollo]
+dedup_candidates (edges: ced: fuertes / phon: difusas)
+      ↓  gold clustering (agrupa por relación, no por tiempo)
+gold_entities / gold_members / gold_history (gold, fusión canónica)
+      ↓  build job: gold publicado + aportes huérfanos (datos tipados de silver)
 Cloudflare Worker + D1         ← API pública          [en desarrollo]
 ```
 
@@ -97,9 +101,10 @@ Para ver progreso real del pipeline (no solo el resultado final), agregá `--ver
 export PII_HMAC_SECRET="valor-secreto"
 export PII_SALT="mismo-valor"
 
-# Credenciales de dataVenezuela (staging exporter)
-export DATAVZLA_API_KEY="x-api-key del scraper"
-export DATAVZLA_BASE_URL="https://..."
+# Staging exporter (escritura directa a Supabase vía PostgREST)
+export SUPABASE_URL="https://<proyecto>.supabase.co"
+export SUPABASE_PUBLISHABLE_KEY="clave publishable (header apikey)"
+export SUPABASE_INGEST_JWT="JWT firmado con rol scraper_ingest"
 
 # Cuarentena (quarantine exporter, Issue #88) — POST /api/v1/quarantine
 export QUARANTINE_API_KEY="x-api-key del scraper"
@@ -141,17 +146,9 @@ Si la fuente no tiene parser todavía, declararla con `enabled: false`. Los regi
 
 Este proyecto maneja datos de personas desaparecidas. Las reglas no son negociables:
 - No commitear datos reales bajo ninguna circunstancia
-- Cédulas y teléfonos se HMAC antes de cualquier persistencia, nunca en claro
-- `cedula_hmac` = hex puro de 64 chars, sin prefijo
-- La API pública nunca expone PII directa
-- `trust_tier` = letras A/B/C/D en código de scrapers, nunca enteros
-
----
-
-## Reglas de seguridad
-
-- No commitear datos reales bajo ninguna circunstancia
 - No commitear nada de `scrapers/runtime_output/` (está en `.gitignore`)
-- `cedula_hmac` = hex puro 64 chars, nunca con prefijo `hmac_sha256:`
-- `trust_tier` = letras A/B/C/D, nunca enteros en este módulo
+- Cédulas y teléfonos se HMAC antes de cualquier persistencia, nunca en claro
+- `cedula_hmac` = hex puro de 64 chars, sin prefijo (nunca `hmac_sha256:`)
+- `trust_tier` = letras A/B/C/D en código de scrapers, nunca enteros
+- La API pública nunca expone PII directa
 - Los logs no incluyen PII

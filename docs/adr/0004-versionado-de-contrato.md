@@ -7,7 +7,7 @@
 | Decisores | Mantenedores (mathiasaiva, mayerlim), equipo de pipeline |
 | Reemplaza a | (ninguno) |
 | Complementa | ADR 0003 (reestructuración de repos) |
-| Relacionado con | spec #231 (PR #232, `docs/specs/db-scraper-contract.md`), `docs/scrapper_contract.md`, `docs/specs/contracts/TEMPLATE.md` |
+| Relacionado con | spec #231 (PR #232, `docs/specs/db-scraper-contract.md`) |
 
 ---
 
@@ -44,21 +44,19 @@ Se versiona el contrato entidad->DB de forma explícita.
   **cuarentena**, nunca a descarte silencioso.
 - Las versiones estables se etiquetan en git como **`contract-v*`** (por ejemplo
   `contract-v1.0`); `vzla-deployment` fija ese tag como dependencia (ADR 0003).
-- **Proceso de cambio**: toda spec de contrato vive en `docs/specs/contracts/`,
-  sigue `docs/specs/contracts/TEMPLATE.md` y declara su `CONTRACT_VERSION` en el
-  encabezado. Los cambios entran por PR contra esa spec; el PR sube la versión
-  según la regla semver de arriba. Un cambio breaking exige un nuevo major y su
-  tag antes de que `vzla-deployment` lo adopte.
+- **Proceso de cambio**: cada spec de contrato vive en `docs/specs/` y declara su
+  `CONTRACT_VERSION` en el encabezado. Los cambios entran por PR contra esa spec;
+  el PR sube la versión según la regla semver de arriba. Un cambio breaking exige
+  un nuevo major y su tag antes de que `vzla-deployment` lo adopte.
 
 Esta ADR define la **política y el proceso** de versionado, no un schema. El
 schema concreto de cada contrato es su spec.
 
 **Alcance.** La política aplica al contrato entidad->DB, que es el que tiene
-filas y el que importa el repo privado. El contrato parser->entidad
-(`docs/scrapper_contract.md`) es el contrato complementario aguas arriba: produce
-entidades, no filas, así que no carga un `contract_version` por fila, pero su
-forma se versiona bajo el mismo proceso (spec en `docs/specs/contracts/`, semver,
-tag).
+filas y el que importa el repo privado. El contrato parser->entidad, aguas
+arriba, produce entidades, no filas, así que no carga un `contract_version` por
+fila, pero su forma se versiona bajo el mismo proceso (spec en `docs/specs/`,
+semver, tag).
 
 ---
 
@@ -110,6 +108,4 @@ y añadir la columna; recién entonces `vzla-deployment` puede fijar el tag.
 
 - ADR 0003 (reestructuración de repos), §8 y §12.
 - Issue #231, PR #232: `docs/specs/db-scraper-contract.md` (contrato entidad->DB).
-- `docs/scrapper_contract.md` (contrato parser->entidad, complementario).
-- `docs/specs/contracts/TEMPLATE.md` (plantilla de spec de contrato).
 - `docs/adr/PROPOSALS.md` (telemetría de cuarentena, futura). <!-- pendiente PR 238 -->

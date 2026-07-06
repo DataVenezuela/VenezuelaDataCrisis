@@ -12,10 +12,9 @@
 
 Este documento define el contrato entre un scraper del pipeline (`VZLA_DEDUP`)
 y la capa de staging en Supabase, tal como lo implementa
-`scrapers/exporters/staging_exporter.py`. Es el contrato que sigue al de
-`docs/scrapper_contract.md`: ese documento cubre `RawContent → list[Person |
-AcopioCenter | Event]`; este cubre `list[Person | AcopioCenter | Event] →
-aportes` (staging en Supabase).
+`scrapers/exporters/staging_exporter.py`. Cubre el tramo
+`list[Person | AcopioCenter | Event] → aportes` (staging en Supabase), aguas
+abajo del contrato parser -> entidad.
 
 No cubre:
 
@@ -25,8 +24,8 @@ No cubre:
   Ver `docs/specs/person-dedup.md` para el caso de `Person`.
 - Verificación humana.
 - Endpoints de la API pública. Ver `docs/adr/0001-arquitectura-serving-publico.md`
-  §5-6 y la sección "Vista pública" de `docs/schema.md`.
-- Contrato parser → entidad (campos, enums, PII). Ver `docs/scrapper_contract.md`.
+  §5-6.
+- Contrato parser → entidad (campos, enums, PII), aguas arriba de este documento.
 
 ---
 
@@ -38,7 +37,7 @@ Antes de que un scraper pueda exportar registros a staging:
    YAML de la fuente (`docs/source_config.md`). El exporter la resuelve con:
 
    ```text
-   GET /rest/v1/sources?slug=eq.<slug>&select=id
+   GET /rest/v1/sources?slug=eq.<slug>&select=source_id
    ```
 
    Resultado cacheado en memoria por corrida (`_resolve_source_id`). Si no
@@ -85,7 +84,7 @@ Rutas usadas:
 
 | Método | Ruta | Uso |
 |---|---|---|
-| `GET` | `/rest/v1/sources?slug=eq.<slug>&select=id` | Resolver `source_slug → source_id` |
+| `GET` | `/rest/v1/sources?slug=eq.<slug>&select=source_id` | Resolver `source_slug → source_id` |
 | `GET` | `/rest/v1/source_watermarks?slug=eq.<slug>&select=watermark_at` | Leer el watermark actual de la fuente |
 | `POST` | `/rest/v1/aportes?on_conflict=source_id,external_id` | Upsert de registros a staging |
 | `POST` | `/rest/v1/source_watermarks?on_conflict=slug` | Upsert del watermark tras exportar |
@@ -98,43 +97,66 @@ conflicto de `on_conflict` como update-o-insert sin devolver `409`.
 
 ## 4. Payload de `aportes`
 
-Columnas que produce `_build_payload`, según sean siempre presentes u
-omitidas cuando no aplican (nunca enviadas como `null`):
+### 4.1 Columnas canónicas de `aportes`
 
-| Columna | Obligatoria | Origen |
-|---|---|---|
-| `run_id` | sí | UUID de la corrida del exporter (`self.run_id`) |
-| `entity_type` | sí | slug en minúscula, ver §5 |
-| `external_id` | sí | ver §6 |
-| `dedup_version` | sí | `spec.version`, ver §7 |
-| `block_keys` | sí | `scrapers/dedup/specs.py::block_keys` |
-| `content_hash` | sí | sha256 del record limpio (sin claves `_*`), JSON canónico ordenado |
-| `source_id` | sí | resuelto de `sources.slug`, §2 |
-| `scraper_id` | sí | constante fija `_SCRAPER_ID` (UUID) |
-| `raw_json` | sí | el record limpio (sin claves internas `_*`) |
-| `dedup_hash` | no | omitida si no hay valor (ver §6) |
-| `source_record_id` | no | omitida si `rec["_source_record_id"]` es `None`/vacío |
-| `source_url` | no | omitida si `rec["_source_url"]` es `None`/vacío |
-| `parser_version` | no | omitida si `rec["_parser_version"]` es `None`/vacío |
-| `normalizer_version` | no | omitida si `rec["_normalizer_version"]` es `None`/vacío |
+La fuente de verdad del esquema es `docs/schema.md`. El `aportes` canónico tiene
+estas columnas: `id`, `entity_type`, `raw_json`, `artifact_id`, `source_record_id`,
+`external_id`, `dedup_hash`, `dedup_version`, `block_keys`, `content_hash`,
+`normalizer_version`, `created_at`, `source_id`. `id` y `created_at` los genera la
+DB; `artifact_id` es **NOT NULL** y referencia `raw_artifacts` (ver nota de hueco
+abajo).
 
-`source_slug` (string) **nunca** viaja en el payload: la DB espera
-`source_id` (uuid), no el slug legible del YAML.
+### 4.2 Claves que emite `_build_payload` hoy
 
-**Cableado muerto (hoy):** `_source_url`, `_parser_version` y
-`_normalizer_version` se leen aquí, pero el pipeline nunca los asigna, así que las
-columnas `source_url`/`parser_version`/`normalizer_version` **siempre** se omiten
-(viajan como ausentes, nunca con valor). Es un bug de trazabilidad, no del
-contrato: ver el issue de seguimiento (#236). Solo `_entity_type` y
-`_source_record_id` se pueblan de verdad. La columna `contract_version` por fila
-(ADR 0004) tampoco existe aún: se añade al implementar `contract-v1.0`.
+El exporter produce estas claves (presentes siempre u omitidas cuando no aplican,
+nunca enviadas como `null`). La última columna marca si la clave corresponde a una
+columna del `aportes` canónico:
+
+| Clave enviada | Obligatoria | Origen | ¿Columna canónica de `aportes`? |
+|---|---|---|---|
+| `entity_type` | sí | slug en minúscula, ver §5 | sí |
+| `external_id` | sí | ver §6 | sí |
+| `dedup_version` | sí | `spec.version`, ver §7 | sí |
+| `block_keys` | sí | `scrapers/dedup/specs.py::block_keys` | sí |
+| `content_hash` | sí | sha256 del record limpio (sin claves `_*`), JSON canónico ordenado | sí |
+| `source_id` | sí | resuelto de `sources.slug`, §2 | sí |
+| `raw_json` | sí | el record limpio (sin claves internas `_*`) | sí |
+| `dedup_hash` | no (el código la omite, ver §6) | omitida si no hay valor (ver §6) | sí, **`NOT NULL`** en canon (ver §4.3) |
+| `source_record_id` | no | omitida si `rec["_source_record_id"]` es `None`/vacío | sí |
+| `normalizer_version` | no | omitida si `rec["_normalizer_version"]` es `None`/vacío | sí |
+| `run_id` | sí | UUID de la corrida (`self.run_id`) | **no** (la corrida vive en `raw_artifacts.run_id` vía `artifact_id`) |
+| `scraper_id` | sí | constante fija `_SCRAPER_ID` (UUID) | **no** (no existe en el `aportes` canónico) |
+| `source_url` | no | omitida si `rec["_source_url"]` es `None`/vacío | **no** (es columna de `raw_artifacts`) |
+| `parser_version` | no | omitida si `rec["_parser_version"]` es `None`/vacío | **no** (el `aportes` canónico usa `normalizer_version`) |
+
+`source_slug` (string) **nunca** viaja en el payload: la DB espera `source_id`
+(uuid), no el slug legible del YAML.
+
+### 4.3 Divergencias código vs canon (huecos conocidos)
+
+Estas divergencias son huecos de un diseño nuevo, no del contrato canónico. Se
+cierran fuera de este pase de docs (ver el Apéndice del plan de limpieza / issue
+de seguimiento #236):
+
+- El exporter emite `run_id`/`scraper_id`/`source_url`/`parser_version`, que **no**
+  son columnas del `aportes` canónico. La provenance de corrida y URL vive en
+  `raw_artifacts` (referenciada por `aportes.artifact_id`).
+- El exporter **no** envía `artifact_id` ni (para `Person` sin `deterministic_id`)
+  `dedup_hash`, aunque el canon (`docs/schema.md`) marca ambas `NOT NULL`. Aun así
+  producción inserta OK: señal de que la tabla `aportes` viva todavía es la legacy
+  (nullability laxa), no el `aportes` canónico. La migración de `aportes` a
+  `schema.md` reconcilia esto; hasta entonces `schema.md` describe el destino, no
+  el estado vivo de esas dos columnas.
+- **Cableado muerto (hoy):** `_source_url`, `_parser_version` y
+  `_normalizer_version` se leen pero el pipeline nunca los asigna, así que esas
+  claves siempre se omiten. Solo `_entity_type` y `_source_record_id` se pueblan
+  de verdad. La columna `contract_version` por fila (ADR 0004) tampoco existe aún.
 
 ---
 
 ## 5. Enum `entity_type` (PascalCase del parser → slug de la DB)
 
-El parser produce entidades con `_entity_type` en PascalCase
-(`docs/scrapper_contract.md`). El exporter las traduce a un slug en
+El parser produce entidades con `_entity_type` en PascalCase. El exporter las traduce a un slug en
 minúscula para la columna `aportes.entity_type`:
 
 | `_entity_type` (parser) | `entity_type` (DB) |
@@ -155,7 +177,7 @@ de este documento.
   valor, un fingerprint determinístico (`specs.event_dedup_key` /
   `specs.acopio_dedup_key`, versión `FINGERPRINT_VERSION`).
 - **`Person`**:
-  - Si el record trae `deterministic_id` (`docs/scrapper_contract.md`), se
+  - Si el record trae `deterministic_id`, se
     usa ese valor como `external_id` (versión `PERSON_ID_VERSION =
     "person-detid-v1"`).
   - Si no, y hay `_source_record_id`, `external_id` es
@@ -164,8 +186,10 @@ de este documento.
     limpio combinado con `event_id` y `cedula_hmac` (o solo `event_id` +
     hash de contenido si no hay cédula).
   - `dedup_hash` viene de `specs.dedup_key(rec, "Person")`; si no hay
-    `deterministic_id`, la columna se **omite** (no se envía `null`), es
-    nullable en la DB justamente para este caso.
+    `deterministic_id`, el código la **omite** (no se envía `null`). Ojo: el
+    `aportes` canónico marca `dedup_hash` como `NOT NULL` (`docs/schema.md`), así
+    que esta omisión es un hueco código-vs-canon (ver §4.3), no un caso soportado
+    por el esquema.
 
 ---
 
@@ -209,10 +233,15 @@ de este documento.
 
 ## 8. Downstream (contexto, fuera de este repo)
 
-El consolidation job (no vive en este repo) lee `aportes` cada ~20 minutos y
-escribe en las tablas canónicas `persons` / `events` / `acopio_centers`. Ver
-`CONTRIBUTING.md` ("Dónde aterriza cada cosa") y `docs/specs/person-dedup.md`
-para el detalle de cómo se procesa `Person` específicamente.
+Modelo downstream previsto (fuera de este repo), en capas: a partir de `aportes`
+un materializer proyecta filas tipadas 1:1 en `persons` / `acopio_centers`
+(silver, un registro por aporte, PK = `aportes.id`), mientras `events` es un
+catálogo compartido (no una proyección 1:1); el consolidation job genera aristas
+de candidatos en `dedup_candidates`; y un proceso de clustering por relación
+consolida entidades canónicas en `gold_entities` / `gold_members` /
+`gold_history`, que es lo que lee el plano público. Silver nunca colapsa; la
+fusión vive solo en gold. Ver `CONTRIBUTING.md` ("Dónde aterriza cada cosa") y
+`docs/specs/person-dedup.md` para el detalle de cómo se procesa `Person`.
 
 ---
 
@@ -238,10 +267,11 @@ para el detalle de cómo se procesa `Person` específicamente.
 }
 ```
 
-> Nota: `source_url` se muestra con el esquema completo, pero hoy viaja ausente
-> (cableado muerto, ver §4 e issue #236). El ejemplo documenta la forma objetivo,
-> no lo que un consumidor recibe hoy. Lo mismo aplica a `parser_version` y
-> `normalizer_version` cuando se pueblen.
+> Nota: el ejemplo muestra lo que emite el exporter **hoy**. `run_id`,
+> `scraper_id` y `source_url` **no** son columnas del `aportes` canónico (ver §4.3
+> y `docs/schema.md`); `source_url` además viaja ausente por cableado muerto
+> (issue #236). El ejemplo no representa el `aportes` canónico, sino la salida
+> actual del código a cerrar contra el schema.
 
 ---
 
@@ -250,10 +280,10 @@ para el detalle de cómo se procesa `Person` específicamente.
 - No garantiza acceso de lectura a las tablas canónicas (`persons`,
   `events`, `acopio_centers`), solo a `aportes`, `source_watermarks` y
   `sources`.
-- No garantiza el schema de producción completo ni las migraciones reales.
-  La fuente de verdad de esas sigue siendo el repo de BD/API
-  (`CONTRIBUTING.md` "PRs que tocan contrato exporter -> DB"), no una copia
-  en este repo.
+- No garantiza acceso de lectura al schema de producción completo desde el rol
+  de ingest. La fuente de verdad del esquema es `docs/schema.md` (mirror completo
+  y autoritativo), no una copia paralela en este repo (ver `CONTRIBUTING.md`
+  "PRs que tocan contrato exporter -> DB").
 - No garantiza que un watermark avanzado implica cero pérdida de registros
   en ese ciclo (ver §7).
 
@@ -266,6 +296,5 @@ para el detalle de cómo se procesa `Person` específicamente.
 - `scrapers/pipelines/run_pipeline.py` (`_run_source`, líneas ~675-807)
 - `scrapers/tests/test_staging_contract.py`
 - issue #224 (punto 4), ADR 0003 §8 y §12
-- `docs/scrapper_contract.md`
 - `docs/specs/person-dedup.md`
 - `docs/source_config.md`

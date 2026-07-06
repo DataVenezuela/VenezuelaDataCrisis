@@ -59,7 +59,7 @@ Subcomandos: `run`, `ingest`, `validate`, `list-enabled`, `consolidate`.
 
 **Pipeline stages (orden fijo):** Adapter → Parser → PII tokenization →
 Enrichment (deterministic_id, location normalisation) → Confidence score →
-Minor protection → Staging exporter (POST /api/aportes).
+Minor protection → Staging exporter (POST /rest/v1/aportes).
 
 **Solo 1 parser implementado:** `encuentralos` en
 `scrapers/parsers/encuentralos_parser.py`. Parser nuevo necesita: implementar
@@ -70,8 +70,7 @@ Minor protection → Staging exporter (POST /api/aportes).
 **Paquetes:**
 - `scrapers/` — pipeline principal. Su `requirements.txt` es la única
   dependencia runtime.
-- `shared/` — `hashing.py` (HMAC), `helpers.py`. `config.py` está **vacío**.
-- `api/` — esqueleto local, no usado en producción.
+- `shared/` — `hashing.py` (HMAC), `helpers.py`.
 - `verification/` — `__init__.py` solamente, no implementado.
 - `docs/` — diseño aspiracional. El código manda.
 
@@ -86,7 +85,7 @@ Minor protection → Staging exporter (POST /api/aportes).
 ## Testing patterns
 
 Tests 100% offline, sin red real:
-- Staging (`/api/aportes`) se intercepta con `httpx.BaseTransport`
+- Staging (`/rest/v1/aportes`) se intercepta con `httpx.BaseTransport`
   inyectado en `StagingExporter` via `_patch_exporter` (ver
   `test_run_pipeline.py:_StagingTransport`).
 - Adapters/parsers se mockean con `unittest.mock.patch` sobre
@@ -102,8 +101,8 @@ Tests 100% offline, sin red real:
 ## Estado real de producción
 
 El pipeline corre en producción con `encuentralos_tecnosoft` conectado de punta
-a punta: fetch → parse → PII → normalización → POST a dataVenezuela → tabla
-`aportes` en Supabase. El watermark filtering (`updated_after`) está activo
+a punta: fetch → parse → PII → normalización → POST a Supabase (PostgREST) → tabla
+`aportes`. El watermark filtering (`updated_after`) está activo
 — confirmado en logs de producción con `#57/#130/#131` mergeados.
 `ingest.yml` ya invoca `python -m scrapers.cli --verbose ingest` y el progreso
 del fetch (páginas descargadas, entidades parseadas) se ve en los logs de
@@ -113,28 +112,20 @@ GitHub Actions.
 
 ## Operational gotchas
 
-### `page_size` está hardcodeado, el YAML lo ignora silenciosamente
+### `page_size` es configurable por fuente (campo plano, no `pagination:`)
 
-`docs/source_config.md` documenta un bloque `pagination.page_size` en el YAML.
-**Ese campo no existe en el código.** `SourceConfig` en
-`scrapers/models/source.py` no tiene el campo, y `_get_adapter` en
-`run_pipeline.py` instancia `ApiAdapter` sin pasar `page_size`, así que siempre
-usa el default de `api_adapter.py` (`_DEFAULT_PAGE_SIZE = 20`). El loader de
-YAML traga `pagination:` sin error ni efecto.
+`SourceConfig` (`scrapers/models/source.py`) tiene el campo plano `page_size`, y
+`run_pipeline.py` lo pasa al `ApiAdapter` cuando está seteado; si se omite, el
+adapter usa su default interno (`_DEFAULT_PAGE_SIZE = 20`). No existe un bloque
+anidado `pagination:`: usá los campos planos (`page_size`, `probe_limit`,
+`max_concurrent_pages`, `max_concurrent_posts`).
 
-**Impacto real medido:** `encuentralos_tecnosoft` tiene ~98.830 registros (no
-los ~290 que dice la nota del YAML — esa nota quedó desactualizada cuando la
-fuente escaló). Con `page_size=20` son ~4.941 páginas. El job de `ingest.yml`
-tiene `timeout-minutes: 15` — insuficiente para ese volumen.
-
-**Si te piden resolver esto:** el fix son dos cosas separadas, no confundirlas:
-1. Agregar `page_size` a `SourceConfig` y pasarlo en `_get_adapter` (reduce
-   el número de fetches HTTP).
-2. El cuello de botella más grande solía ser el **POST**, pero desde #212 el
-   exporter envía batches concurrentemente si `max_concurrent_posts > 1`
-   en el YAML de la fuente. Usa `ThreadPoolExecutor` internamente y preserva
-   la semántica at-least-once (el watermark solo avanza si todos los batches
-   terminaron en 200/201). Subir `page_size` ya no es prioritario.
+**Volúmenes grandes:** `encuentralos_tecnosoft` tiene ~98.830 registros (no los
+~290 que decía una nota vieja del YAML). El fetch de ese volumen se maneja con
+streaming por página (#218) y export en batches concurrentes (`bulk_size` /
+`max_concurrent_posts`, `ThreadPoolExecutor` interno), preservando la semántica
+at-least-once: el watermark solo avanza si **todos** los batches de la fuente
+terminaron en 200/201.
 
 ### Variables de entorno reales — no confiar en README.md
 
@@ -159,7 +150,7 @@ Auth via custom JWT firmado con `role: scraper_ingest` (`SUPABASE_INGEST_JWT`)
 El rol `scraper_ingest` se crea con `NOLOGIN NOINHERIT NOBYPASSRLS` y se
 concede a `authenticator` para que PostgREST pueda hacer SET ROLE.
 Además necesita RLS policies en `aportes` y `source_watermarks` del lado
-de dataVenezuela (issue cross-repo).
+de la BD (Supabase).
 
 `PII_SALT` y `PII_HMAC_SECRET` se cargan del **mismo único secret** de
 GitHub Actions (`secrets.PII_HMAC_SECRET`, ver `ingest.yml:82-83`). No existe
@@ -168,15 +159,11 @@ busques ni crees un segundo secret. Sin ellas en CI, `cedula_hmac` queda
 `None` y los campos PII crudos se eliminan antes de exportar — comportamiento
 esperado, el pipeline no falla.
 
-### `shared/config.py` está vacío
-
-No leerlo buscando configuración. La config de staging vive en
-`StagingConfig.from_env()` en `scrapers/exporters/staging_exporter.py`.
-
 ### Infraestructura: Supabase es el destino directo (Issue #200)
 
-El scraper escribe directo a Supabase via PostgREST, sin pasar por Vercel.
-`dataVenezuela` (Vercel) solo sirve el API público de lectura/búsqueda.
+El scraper escribe directo a Supabase via PostgREST, sin pasar por un backend
+intermedio. El API público de lectura/búsqueda lo sirve un Cloudflare Worker + D1
+(proyección sanitizada), separado del pipeline.
 
 `PARTNER_API_SALT` y `sources.owner_id` ya no afectan el path de ingest
 porque el scraper usa un JWT firmado con `role: scraper_ingest`, no las
@@ -202,12 +189,16 @@ recibimos no lo refleja, pero el `fetched_at` que persistimos como watermark
 es *posterior* a esa actualización. La siguiente corrida pediría
 `updated_after=<ese watermark>` y el servidor excluiría ese registro — quedaría
 perdido permanentemente. El margen de 5 minutos crea una ventana de overlap; la
-idempotencia por `external_id` en dataVenezuela absorbe los re-envíos sin
+idempotencia por `external_id` en la BD absorbe los re-envíos sin
 duplicar.
 
-El watermark solo avanza si **todos** los POST de la fuente fueron 200/201 **y**
-no hubo errores previos (parse, PII, enriquecimiento, minor protection). Esto
-garantiza at-least-once delivery.
+El watermark avanza si no hubo errores previos al export (parse, PII,
+enriquecimiento, minor protection) **y** se envió al menos un registro
+(`sent > 0`): puede avanzar aunque algún POST a `aportes` haya fallado. La
+entrega at-least-once la sostienen el margen de seguridad de 5 minutos y la
+idempotencia por `external_id`, no el bloqueo del watermark. Un watermark
+avanzado no implica cero pérdida en ese ciclo (ver
+`docs/specs/db-scraper-contract.md` §7).
 
 ---
 
@@ -216,7 +207,6 @@ garantiza at-least-once delivery.
 Estas partes de `docs/` están verificadas y no hace falta cuestionarlas:
 - `docs/pipeline.md` — el flujo de capas (adapters → parsers → PII →
   normalización → dedup keys → staging exporter) es preciso.
-- `docs/scrapper_contract.md` — el contrato de parsers es correcto.
 - La política de `cedula_hmac` (preserva el prefijo V/E, nunca usa prefijo
   `hmac_sha256:`) está implementada exactamente como se documenta.
 - La protección de menores (`is_minor=true` → anula foto, cedula_masked,
