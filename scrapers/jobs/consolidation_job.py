@@ -65,10 +65,9 @@ AUTOMERGE_ENTITY_TYPES: tuple[str, ...] = tuple(
 )
 
 # Mapeo de tier -> rango numerico. Decision del equipo (#82): trust_tier es una
-# columna de aportes con letras A/B/C/D mapeadas a 1/2/3/4, y GANA EL MENOR numero
-# (A=1 es la fuente mas confiable). Ver docstring de `pick_winner` para el criterio
-# completo y para la nota de schema (aportes.trust_tier depende de una migracion
-# de backend aun pendiente). El rango es inyectable para tests.
+# columna de aportes con letras A/B/C/D; GANA EL MENOR numero (A=1 es la fuente
+# mas confiable). Ver docstring de `pick_winner` para el criterio completo.
+# El rango es inyectable para tests.
 DEFAULT_TIER_RANK: dict[str, int] = {"A": 1, "B": 2, "C": 3, "D": 4}
 
 # Rango por defecto para un tier desconocido/ausente. Como GANA EL MENOR, un tier
@@ -151,11 +150,11 @@ def pick_winner(group: list[Record], tier_rank: TierRankFn = default_tier_rank) 
          menor lexicografico. Ambas claves siempre presentes => resultado
          independiente del orden de entrada.
 
-    Nota sobre tier: los modelos Python usan letras A/B/C/D. La decision del
-    equipo las mapea a 1/2/3/4 y hace ganar al MENOR. IMPORTANTE: la columna
-    ``aportes.trust_tier`` NO existe todavia en el schema real del backend
-    (supabase/migrations 0001/0008); el mapeo de la decision DEPENDE de una
-    migracion pendiente. El adapter degrada de forma segura si la columna falta
+    Nota sobre tier: los modelos Python usan letras A/B/C/D (AGENTS.md non-
+    negotiable). La decision del equipo las mapea a 1/2/3/4 y hace ganar al
+    MENOR. ``aportes.trust_tier``, ``aportes.fetched_at`` y
+    ``aportes.confidence_score`` son columnas populadas por el staging_exporter
+    desde el issue #214. El adapter degrada de forma segura si la columna falta
     (tier vacio => rango peor), y los desempates por fetched_at/confidence_score
     mantienen el determinismo aun sin tier.
     """

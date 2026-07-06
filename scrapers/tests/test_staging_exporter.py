@@ -927,6 +927,86 @@ class TestPartialWatermark:
         assert t.watermark_posts, "watermark debe avanzar: bulk 400 + fallback parcial"
 
 
+# --- trust_tier / confidence_score / fetched_at (issue #214) ----------------
+
+
+class TestWinnerSelectionFields:
+    """Los tres campos de winner-selection llegan al POST (issue #214)."""
+
+    def _export_one(self, rec: dict[str, Any]) -> dict[str, Any]:
+        t = _RecordingTransport()
+        _exporter(t).export_source([rec], source_slug="demo", source_fetched_ats=["2026-06-24T15:00:00Z"])
+        return t.batch_posts[0][0]
+
+    def test_trust_tier_in_payload(self) -> None:
+        rec = _person("Juan")
+        rec["trust_tier"] = "B"
+        body = self._export_one(rec)
+        assert body.get("trust_tier") == "B"
+
+    def test_trust_tier_default_d_in_payload(self) -> None:
+        """trust_tier D (default) también llega al POST."""
+        rec = _person("Juan")
+        rec["trust_tier"] = "D"
+        body = self._export_one(rec)
+        assert body.get("trust_tier") == "D"
+
+    def test_trust_tier_absent_when_not_in_rec(self) -> None:
+        """Si el rec no tiene trust_tier el campo se omite del payload."""
+        rec = _person("Juan")
+        rec.pop("trust_tier", None)
+        body = self._export_one(rec)
+        assert "trust_tier" not in body
+
+    def test_confidence_score_in_payload(self) -> None:
+        rec = _person("Juan")
+        rec["confidence_score"] = 0.75
+        body = self._export_one(rec)
+        assert body.get("confidence_score") == pytest.approx(0.75)
+
+    def test_confidence_score_zero_in_payload(self) -> None:
+        rec = _person("Juan")
+        rec["confidence_score"] = 0.0
+        body = self._export_one(rec)
+        assert "confidence_score" in body
+        assert body["confidence_score"] == pytest.approx(0.0)
+
+    def test_confidence_score_absent_when_not_in_rec(self) -> None:
+        rec = _person("Juan")
+        rec.pop("confidence_score", None)
+        body = self._export_one(rec)
+        assert "confidence_score" not in body
+
+    def test_fetched_at_in_payload_from_meta_field(self) -> None:
+        rec = _person("Juan")
+        rec["_fetched_at"] = "2026-06-24T14:00:00Z"
+        body = self._export_one(rec)
+        assert body.get("fetched_at") == "2026-06-24T14:00:00Z"
+
+    def test_fetched_at_absent_when_no_meta_field(self) -> None:
+        rec = _person("Juan")
+        rec.pop("_fetched_at", None)
+        body = self._export_one(rec)
+        assert "fetched_at" not in body
+
+    def test_fetched_at_not_in_raw_json(self) -> None:
+        """_fetched_at es meta-campo y no debe colarse en raw_json."""
+        rec = _person("Juan")
+        rec["_fetched_at"] = "2026-06-24T14:00:00Z"
+        body = self._export_one(rec)
+        assert "fetched_at" not in body.get("raw_json", {})
+        assert "_fetched_at" not in body.get("raw_json", {})
+
+    def test_trust_tier_is_letter_not_integer(self) -> None:
+        """trust_tier siempre viaja como letra (AGENTS.md non-negotiable)."""
+        for tier in ("A", "B", "C", "D"):
+            rec = _person("Juan", det=f"det-{tier}")
+            rec["trust_tier"] = tier
+            body = self._export_one(rec)
+            assert isinstance(body.get("trust_tier"), str)
+            assert body["trust_tier"] == tier
+
+
 # --- ciclo de vida ----------------------------------------------------------
 
 class TestLifecycle:

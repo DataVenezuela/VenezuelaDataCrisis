@@ -453,6 +453,7 @@ def _apply_pii(
     source: SourceConfig,
     quarantine_batch: list[QuarantineRecord],
     source_url: str | None = None,
+    fetched_at: str | None = None,
 ) -> list[dict]:
     """
     Convierte entidades tipadas a dicts y aplica tokenize_pii_fields.
@@ -489,6 +490,8 @@ def _apply_pii(
             # poblar source_url/parser_version en aportes.
             if source_url:
                 d["_source_url"] = source_url
+            if fetched_at:
+                d["_fetched_at"] = fetched_at
             d["_parser_version"] = _PIPELINE_VERSION
             # _source_record_id (prefijo _) es el meta-campo que _build_payload
             # lee para basar external_id en el UUID nativo; clean lo excluye de raw_json.
@@ -792,6 +795,7 @@ def _run_source(
                 records = _apply_pii(
                     page_entities, source_errors, source, quarantine_batch,
                     source_url=page.get("source_url"),
+                    fetched_at=str(page["fetched_at"]) if page.get("fetched_at") else None,
                 )
                 records = _enrich_records(records, source_errors)
                 records = _apply_confidence(records, source_errors)

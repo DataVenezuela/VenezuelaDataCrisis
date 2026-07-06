@@ -236,6 +236,23 @@ implementar. No asumas que un campo "no importa". Lee `CONTRIBUTING.MD`
 completo — cubre el flujo de PR, las reglas de seguridad y el checklist
 de Definition of Done.
 
+## Campos de winner-selection en `aportes` (issue #214)
+
+Desde #214 el staging_exporter popula tres columnas en `aportes` que el
+consolidation_job usa para `pick_winner`:
+
+| Campo | Origen en el pipeline | Formato |
+|---|---|---|
+| `trust_tier` | `rec["trust_tier"]` (de `model_dump()`, etapa PII) | letra A/B/C/D |
+| `confidence_score` | `rec["confidence_score"]` (etapa `_apply_confidence`) | float [0..1] |
+| `fetched_at` | `rec["_fetched_at"]` (meta-campo de `_apply_pii`, viene de `page.fetched_at`) | ISO-8601 UTC |
+
+`_fetched_at` lleva prefijo `_` para no colarse en `raw_json`. Si la página no
+tiene `fetched_at` (raro pero posible en adapters legacy), el campo se omite del
+payload y el adapter degrada a `_UNKNOWN_TIER_RANK` / `-inf`.
+
+---
+
 ## Non-negotiables (resumen — ver CONTRIBUTING.md para el completo)
 
 - `Person.status` enums en inglés: `missing/found/injured/deceased/unknown`
