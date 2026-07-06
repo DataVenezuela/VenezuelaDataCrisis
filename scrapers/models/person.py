@@ -29,6 +29,7 @@ class Person(BaseModel):
     deterministic_id: str | None = None
     source_record_id: str | None = None
     fuente: str
+    unmapped: dict[str, object] | None = None
 
     @field_validator("full_name", "fuente")
     @classmethod

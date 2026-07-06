@@ -1466,3 +1466,139 @@ sources:
         ]
         assert any("src_a" in msg for msg in quarantine_logs)
         assert not any("src_b" in msg for msg in quarantine_logs)
+
+
+# ---------------------------------------------------------------------------
+# Tests: escaneo de PII en campo `unmapped` (issue #245)
+# ---------------------------------------------------------------------------
+
+
+def _source_cfg() -> SourceConfig:
+    return SourceConfig(
+        id="demo_src",
+        name="Demo",
+        type="api_json",
+        enabled=True,
+        trust_tier="C",
+        refresh_minutes=30,
+        url="https://demo.example/api",
+        parser_asignado="encuentralos",
+    )
+
+
+class TestCheckUnmappedPii:
+    """Unit tests for _check_unmapped_pii."""
+
+    def _rec(self, unmapped: dict | None) -> dict:
+        return {
+            "full_name": "JUAN DEMO",
+            "event_id": _EVENT_ID,
+            "fuente": "demo_src",
+            "unmapped": unmapped,
+        }
+
+    def test_raw_pii_in_unmapped_quarantines_record(self) -> None:
+        rec = self._rec({"cedula_raw": "V-12345678"})
+        quarantine_batch: list = []
+        errors: list[str] = []
+        result = rp._check_unmapped_pii([rec], errors, _source_cfg(), quarantine_batch)
+        assert result == []
+        assert len(quarantine_batch) == 1
+        assert quarantine_batch[0].reason_code == "pii_in_unmapped"
+        assert quarantine_batch[0].risk_level == "high"
+        assert errors
+
+    def test_masked_value_in_unmapped_passes_through(self) -> None:
+        rec = self._rec({"cedula_source_masked": "V-****5678"})
+        quarantine_batch: list = []
+        errors: list[str] = []
+        result = rp._check_unmapped_pii([rec], errors, _source_cfg(), quarantine_batch)
+        assert result == [rec]
+        assert quarantine_batch == []
+        assert not errors
+
+    def test_empty_unmapped_passes_through(self) -> None:
+        rec = self._rec({})
+        quarantine_batch: list = []
+        result = rp._check_unmapped_pii([rec], [], _source_cfg(), quarantine_batch)
+        assert result == [rec]
+        assert quarantine_batch == []
+
+    def test_none_unmapped_passes_through(self) -> None:
+        rec = self._rec(None)
+        quarantine_batch: list = []
+        result = rp._check_unmapped_pii([rec], [], _source_cfg(), quarantine_batch)
+        assert result == [rec]
+        assert quarantine_batch == []
+
+    def test_pii_kinds_reported_in_detail(self) -> None:
+        rec = self._rec({"cedula_raw": "V-12345678"})
+        quarantine_batch: list = []
+        errors: list[str] = []
+        rp._check_unmapped_pii([rec], errors, _source_cfg(), quarantine_batch)
+        assert quarantine_batch[0].reason_code == "pii_in_unmapped"
+        assert "identity_document" in quarantine_batch[0].reason_detail
+
+    def test_mixed_batch_only_quarantines_pii_records(self) -> None:
+        clean_rec = self._rec({"cedula_source_masked": "V-****5678"})
+        pii_rec = self._rec({"cedula_raw": "V-99999999"})
+        quarantine_batch: list = []
+        errors: list[str] = []
+        result = rp._check_unmapped_pii(
+            [clean_rec, pii_rec], errors, _source_cfg(), quarantine_batch
+        )
+        assert result == [clean_rec]
+        assert len(quarantine_batch) == 1
+
+
+class TestUnmappedPiiEndToEnd:
+    """End-to-end: records with raw PII in unmapped must not reach staging."""
+
+    def test_record_with_raw_pii_in_unmapped_not_sent_to_staging(
+        self, tmp_path: Path, demo_config: Path
+    ) -> None:
+        persons = [
+            Person(
+                full_name="JUAN DEMO PEREZ",
+                event_id=_EVENT_ID,
+                fuente="encuentralos_tecnosoft",
+                unmapped={"cedula_raw": "V-12345678"},
+            ),
+        ]
+        transport = _StagingTransport()
+        qtransport = _QuarantineTransport()
+        with patch.dict(
+            os.environ, {**_SUPABASE_ENV, **_QUARANTINE_ENV}, clear=False
+        ), _patch_exporter(transport), _patch_quarantine_exporter(qtransport), patch(
+            "scrapers.pipelines.run_pipeline._get_adapter", return_value=_mock_adapter()
+        ), patch(
+            "scrapers.pipelines.run_pipeline._get_parser", return_value=_mock_parser(persons)
+        ):
+            summary = run_pipeline(config_path=demo_config, output_dir=tmp_path / "out")
+        assert transport.batch_posts == []
+        assert summary["staging_sent"] == 0
+        assert len(qtransport.posts) >= 1
+        assert qtransport.posts[0]["riskLevel"] == "high"
+        assert any("unmapped" in e for e in summary["errors"])
+
+    def test_record_with_masked_unmapped_reaches_staging(
+        self, tmp_path: Path, demo_config: Path
+    ) -> None:
+        persons = [
+            Person(
+                full_name="ANA DEMO GARCIA",
+                event_id=_EVENT_ID,
+                fuente="encuentralos_tecnosoft",
+                unmapped={"cedula_source_masked": "V-****5678"},
+            ),
+        ]
+        transport = _StagingTransport()
+        with patch.dict(os.environ, _SUPABASE_ENV, clear=False), _patch_exporter(transport), patch(
+            "scrapers.pipelines.run_pipeline._get_adapter", return_value=_mock_adapter()
+        ), patch(
+            "scrapers.pipelines.run_pipeline._get_parser", return_value=_mock_parser(persons)
+        ):
+            summary = run_pipeline(config_path=demo_config, output_dir=tmp_path / "out")
+        assert summary["staging_sent"] == 1
+        all_posts = [p for batch in transport.batch_posts for p in batch]
+        assert all_posts[0]["raw_json"]["full_name"] == "ANA DEMO GARCIA"

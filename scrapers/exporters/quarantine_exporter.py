@@ -49,6 +49,7 @@ _PREVIEW_MAX_CHARS = 500
 REASON_CODES = frozenset(
     {
         "pii_untreatable",  # PII no tratable/redactable automaticamente
+        "pii_in_unmapped",  # PII cruda detectada en campo unmapped del registro
         "invalid_schema",  # schema invalido o inesperado
         "parser_unavailable",  # parser inexistente o incompatible
         "pdf_no_text",  # PDF sin texto extraible

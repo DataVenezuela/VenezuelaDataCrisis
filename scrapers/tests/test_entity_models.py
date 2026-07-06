@@ -214,6 +214,7 @@ def test_serialization_round_trip():
         "deterministic_id",
         "source_record_id",
         "fuente",
+        "unmapped",
     }
     assert Person.model_validate(p.model_dump()) == p
     assert "Ana" in p.model_dump_json()
