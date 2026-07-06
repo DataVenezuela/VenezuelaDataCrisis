@@ -264,7 +264,7 @@ class EncuentralosParser:
         cedula_masked: str | None = None
         identity_kind = "none"
         pii_provenance = "cleartext"
-        unmapped: dict | None = None
+        unmapped: dict[str, Any] | None = None
         raw_cedula = rec.get("cedula")
         if raw_cedula:
             raw_cedula_str = str(raw_cedula).strip()
