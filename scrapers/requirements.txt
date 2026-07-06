@@ -14,5 +14,5 @@ pdfplumber>=0.11.10
 types-PyYAML>=6.0.12.20260518
 types-defusedxml>=0.7.0
 playwright>=1.40.0
-mypy>=1.13.0
+mypy>=2.1.0
 jellyfish>=1.2.1
