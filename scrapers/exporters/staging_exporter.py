@@ -44,6 +44,9 @@ _APORTES_UPSERT_PATH = "/rest/v1/aportes?on_conflict=source_id,external_id"
 _WATERMARKS_PATH = "/rest/v1/source_watermarks"
 _WATERMARKS_UPSERT_PATH = "/rest/v1/source_watermarks?on_conflict=slug"
 _SCRAPER_ID = "00000000-0000-0000-0000-000000000001"
+# Campos excluidos de raw_json: metadatos de calidad de la fuente que no son
+# contenido de la entidad y no deben re-hidratarse desde el snapshot de ingesta.
+_RAW_JSON_EXCLUDE: frozenset[str] = frozenset({"trust_tier", "confidence_score"})
 
 _WATERMARK_SAFETY_MARGIN = timedelta(minutes=5)
 _FETCHED_AT_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
@@ -222,7 +225,10 @@ class StagingExporter:
 
     def _build_payload(self, rec: dict[str, object], source_slug: str) -> dict[str, object]:
         entity_type = str(rec.get("_entity_type") or "Person")
-        clean = {k: v for k, v in rec.items() if not k.startswith("_")}
+        clean = {
+            k: v for k, v in rec.items()
+            if not k.startswith("_") and k not in _RAW_JSON_EXCLUDE
+        }
         spec = specs.spec_for_entity_type(entity_type)
 
         if entity_type == "Event":

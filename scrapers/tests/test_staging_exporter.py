@@ -133,6 +133,16 @@ class TestPayload:
         assert all(not k.startswith("_") for k in data)
         assert "full_name" in data
 
+    def test_quality_metadata_excluded_from_raw_json(self) -> None:
+        # trust_tier y confidence_score son metadatos de calidad de la fuente,
+        # no contenido de la entidad; no deben colarse en raw_json.
+        rec = _person("Juan")
+        rec["trust_tier"] = "B"
+        rec["confidence_score"] = 0.75
+        body = self._export_one(rec)
+        assert "trust_tier" not in body["raw_json"]
+        assert "confidence_score" not in body["raw_json"]
+
     def test_entity_type_is_slug(self) -> None:
         body = self._export_one(_person("Juan"))
         assert body["entity_type"] == "person"

@@ -379,7 +379,9 @@ class TestStagingSend:
             for post in batch:
                 assert "_entity_type" not in post["raw_json"]
 
-    def test_confidence_score_in_range(self, tmp_path: Path, demo_config: Path) -> None:
+    def test_confidence_score_absent_from_raw_json(self, tmp_path: Path, demo_config: Path) -> None:
+        # confidence_score es metadata de calidad, no contenido de entidad;
+        # no debe aparecer en raw_json.
         transport = _StagingTransport()
         with patch.dict(os.environ, _SUPABASE_ENV, clear=False), _patch_exporter(transport), patch(
             "scrapers.pipelines.run_pipeline._get_adapter", return_value=_mock_adapter()
@@ -389,8 +391,7 @@ class TestStagingSend:
             run_pipeline(config_path=demo_config, output_dir=tmp_path / "out")
         for batch in transport.batch_posts:
             for post in batch:
-                score = post["raw_json"].get("confidence_score", -1)
-                assert 0.0 <= score <= 1.0
+                assert "confidence_score" not in post["raw_json"]
 
 
 # ---------------------------------------------------------------------------
