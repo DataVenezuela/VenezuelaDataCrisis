@@ -264,3 +264,9 @@ repomix-output.txt
 .harness/harness.db-shm
 .harness/harness.db-wal
 .harness/current.md
+
+# Sandcastle (local-only AI issue-resolution tooling — Node/Docker)
+.sandcastle/
+node_modules/
+package.json
+package-lock.json
