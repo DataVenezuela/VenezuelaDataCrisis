@@ -126,7 +126,7 @@ jobs:
           echo "site_packages=$SITE_PACKAGES" >> "$GITHUB_OUTPUT"
 
       - name: Cache spaCy model
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ${{ steps.spacy-cache-path.outputs.site_packages }}/es_core_news_sm
