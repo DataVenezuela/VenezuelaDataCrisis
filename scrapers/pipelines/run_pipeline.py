@@ -24,7 +24,7 @@ Cuarentena (Issue #88)
 NINGUN registro se descarta en silencio. Cada punto donde el pipeline antes
 perdia datos (parser ausente, parseo fallido, PII no tratable, fail-closed de
 proteccion de menores) ahora enruta el registro a la Quarantine DB via
-``QuarantineExporter`` (POST /api/quarantine) para revision humana. El preview
+``QuarantineExporter`` (POST /rest/v1/quarantined_records, Supabase PostgREST) para revision humana. El preview
 va redactado; el run continua con las demas fuentes.
 
 La deduplicacion ya no ocurre por fuente: el dedup_hash/external_id deterministas
@@ -1005,7 +1005,7 @@ def run_pipeline(
     # Dos exporters HTTP independientes (cada uno con su httpx.Client y sus env
     # vars). Ambos hacen dry-run silencioso si faltan sus credenciales.
     exporter = StagingExporter(StagingConfig.from_env(), run_id=run_id)
-    quarantine_exporter = QuarantineExporter(QuarantineConfig.from_env(), run_id=run_id)
+    quarantine_exporter = QuarantineExporter(QuarantineConfig.from_env())
     # Bronze (issue #256): escribe scrape_runs + raw_artifacts. Reusa las mismas
     # SUPABASE_* que el staging exporter, asi que ambos entran/salen de dry-run
     # juntos. El run_id de scrape_runs lo genera la DB por fuente (no este uuid).
