@@ -42,7 +42,6 @@ log = logging.getLogger(__name__)
 
 _SCRAPE_RUNS_PATH = "/rest/v1/scrape_runs"
 _RAW_ARTIFACTS_PATH = "/rest/v1/raw_artifacts"
-_SOURCES_PATH = "/rest/v1/sources"
 
 # UUID placeholder para dry-run: nunca viaja a la red (en dry-run no se abre
 # cliente). Deja que el pipeline stampee un _artifact_id no vacio y siga.
@@ -85,7 +84,6 @@ class ProvenanceExporter:
         self.enabled = config is not None
         self._owns_client = client is None
         self._client: httpx.Client | None = client
-        self._source_id_cache: dict[str, str] = {}
         if self.enabled and config is not None and client is None:
             self._client = httpx.Client(
                 base_url=config.supabase_url,
@@ -99,39 +97,6 @@ class ProvenanceExporter:
                 timeout=httpx.Timeout(30.0),
                 follow_redirects=False,
             )
-
-    # -- source resolution ----------------------------------------------------
-
-    def _resolve_source_id(self, source_slug: str) -> str | None:
-        """Resuelve ``source_slug`` -> UUID de ``sources`` via PostgREST.
-
-        Cachea exitos y fallos (fallo = "") para no repetir el GET en la misma
-        corrida. Espeja ``StagingExporter._resolve_source_id`` pero con su propio
-        cache/cliente: los dos writers son independientes.
-        """
-        assert self._client is not None
-        cached = self._source_id_cache.get(source_slug)
-        if cached is not None:
-            return cached or None
-        try:
-            resp = self._client.get(
-                _SOURCES_PATH, params={"slug": f"eq.{source_slug}", "select": "id"}
-            )
-            if resp.status_code == 200:
-                rows = resp.json()
-                if isinstance(rows, list) and rows:
-                    sid = str(rows[0].get("id", ""))
-                    if sid:
-                        self._source_id_cache[source_slug] = sid
-                        return sid
-            log.warning(
-                "no se pudo resolver source_id para %s: status=%s",
-                source_slug, resp.status_code,
-            )
-        except (httpx.HTTPError, ValueError, AttributeError) as exc:
-            log.warning("error resolviendo source_id para %s: %s", source_slug, exc)
-        self._source_id_cache[source_slug] = ""
-        return None
 
     # -- POST con retry -------------------------------------------------------
 
@@ -191,22 +156,18 @@ class ProvenanceExporter:
 
     # -- scrape_runs ----------------------------------------------------------
 
-    def start_run(self, source_slug: str) -> str | None:
+    def start_run(self, source_id: str) -> str | None:
         """Crea la fila ``scrape_runs`` de esta fuente y devuelve su ``run_id``.
 
-        Dry-run: devuelve un placeholder (no abre red) para que el pipeline siga.
-        Enabled: resuelve source_id, POSTea con ``return=representation`` y lee el
-        run_id. Devuelve None si no se pudo resolver la fuente o crear la corrida
-        (el pipeline degrada fail-closed: sin run_id no hay artifact_id ni aporte).
+        ``source_id`` ES el UUID de la tabla sources (source.id): el config lo trae
+        resuelto, asi que ya no hay un GET slug -> id previo. Dry-run: devuelve un
+        placeholder (no abre red) para que el pipeline siga. Enabled: POSTea con
+        ``return=representation`` y lee el run_id. Devuelve None si no se pudo crear
+        la corrida (el pipeline degrada fail-closed: sin run_id no hay artifact_id
+        ni aporte).
         """
         if not self.enabled or self._client is None:
             return _DRYRUN_PLACEHOLDER
-        source_id = self._resolve_source_id(source_slug)
-        if source_id is None:
-            log.warning(
-                "start_run: sin source_id para %s; no se crea scrape_run", source_slug
-            )
-            return None
         resp = self._post_with_retry(
             _SCRAPE_RUNS_PATH,
             {"source_id": source_id},
@@ -219,18 +180,18 @@ class ProvenanceExporter:
             log.error(
                 "start_run %s: sin permiso (status %s); verificar SUPABASE_INGEST_JWT "
                 "y grants INSERT del rol scraper_ingest sobre scrape_runs",
-                source_slug, resp.status_code,
+                source_id, resp.status_code,
             )
             return None
         if resp is None or resp.status_code not in (200, 201):
             log.warning(
                 "start_run %s: no se pudo crear scrape_run (status=%s)",
-                source_slug, getattr(resp, "status_code", "n/a"),
+                source_id, getattr(resp, "status_code", "n/a"),
             )
             return None
         run_id = self._extract_id(resp, "run_id")
         if run_id is None:
-            log.warning("start_run %s: respuesta sin run_id", source_slug)
+            log.warning("start_run %s: respuesta sin run_id", source_id)
         return run_id
 
     def finish_run(self, run_id: str | None, stats: dict[str, object]) -> None:
