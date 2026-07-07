@@ -205,6 +205,13 @@ class TestConsolidate:
         result = _run_cli("consolidate", "--output-dir", str(tmp_path))
         assert result.returncode == 0
 
+    def test_materializer_runs_as_first_stage(self, tmp_path: Path) -> None:
+        # El materializer (etapa 1) corre siempre, antes de la generacion de
+        # aristas; en dry-run (sin SUPABASE_*) es un no-op silencioso.
+        result = _run_cli("consolidate", "--output-dir", str(tmp_path))
+        assert result.returncode == 0
+        assert "Materializer:" in result.stdout
+
 
 # ── existing commands still work ──────────────────────────────────
 
