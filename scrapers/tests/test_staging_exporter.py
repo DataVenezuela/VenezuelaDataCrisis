@@ -81,7 +81,8 @@ class _RecordingTransport(httpx.BaseTransport):
                 self.watermark_posts.append(
                     {"source_id": _source_id_from_url(request.url), **body}
                 )
-                return httpx.Response(204)
+                # return=representation: 200 con la fila actualizada (array no vacio).
+                return httpx.Response(200, json=[body])
             return httpx.Response(404)
         return httpx.Response(404)
 
@@ -432,6 +433,28 @@ class TestWatermark:
         _exporter(t).export_source([_person("Juan")], source_id="demo", source_fetched_ats=[])
         assert t.watermark_posts == []
 
+    def test_watermark_zero_rows_matched_reports_error(self) -> None:
+        """Un PATCH que no matchea ninguna fila (p.ej. source_id no-UUID) devuelve
+        200 con un array vacio; no debe tratarse como exito silencioso."""
+
+        class _NoRowsTransport(httpx.BaseTransport):
+            def handle_request(self, request: httpx.Request) -> httpx.Response:
+                if request.url.path == "/rest/v1/aportes":
+                    return httpx.Response(201, json={})
+                if request.url.path == "/rest/v1/sources":
+                    if request.method == "PATCH":
+                        # return=representation con 0 filas afectadas.
+                        return httpx.Response(200, json=[])
+                    return httpx.Response(200, json=[{"watermark_at": None}])
+                return httpx.Response(404)
+
+        res = _exporter(_NoRowsTransport()).export_source(
+            [_person("Juan")],
+            source_id="not-a-uuid",
+            source_fetched_ats=["2026-06-24T16:00:00Z"],
+        )
+        assert any("watermark" in e for e in res.errors)
+
     def test_watermark_advance_is_monotonic_across_runs(self) -> None:
         t = _RecordingTransport(aportes_status=201)
         exp = _exporter(t)
@@ -457,7 +480,7 @@ class TestWatermark:
                     captured["source_id"] = _source_id_from_url(request.url)
                     captured["body"] = json.loads(request.content)
                     captured["headers"] = dict(request.headers)
-                    return httpx.Response(204)
+                    return httpx.Response(200, json=[captured["body"]])
                 return httpx.Response(404)
 
         _exporter(_Transport()).export_source(
@@ -466,7 +489,8 @@ class TestWatermark:
         # El source_id va en el filtro de la URL; el body solo trae watermark_at.
         assert captured["source_id"] == "fuente-x"
         assert captured["body"] == {"watermark_at": "2026-06-24T15:55:00Z"}
-        assert "return=minimal" in captured["headers"].get("prefer", "")
+        # return=representation permite verificar que la fila realmente se actualizo.
+        assert "return=representation" in captured["headers"].get("prefer", "")
 
     def test_watermark_is_per_source_id(self) -> None:
         t = _RecordingTransport(aportes_status=201)
@@ -603,10 +627,11 @@ class _FlakyTransport(httpx.BaseTransport):
             return httpx.Response(status, json={})
         if path == "/rest/v1/sources":
             if request.method == "PATCH":
+                body = json.loads(request.content)
                 self.watermark_posts.append(
-                    {"source_id": _source_id_from_url(request.url), **json.loads(request.content)}
+                    {"source_id": _source_id_from_url(request.url), **body}
                 )
-                return httpx.Response(204)
+                return httpx.Response(200, json=[body])
             return httpx.Response(200, json=[{"watermark_at": None}])
         return httpx.Response(404)
 
@@ -769,7 +794,7 @@ class TestBatchExport:
                 if request.url.path == "/rest/v1/sources":
                     if request.method == "PATCH":
                         captured_query.append(str(request.url.query))
-                        return httpx.Response(204)
+                        return httpx.Response(200, json=[{"watermark_at": None}])
                     return httpx.Response(200, json=[{"watermark_at": None}])
                 return httpx.Response(404)
 
@@ -805,7 +830,7 @@ class TestBatchFallback:
             def handle_request(self, request: httpx.Request) -> httpx.Response:
                 if request.url.path == "/rest/v1/sources":
                     if request.method == "PATCH":
-                        return httpx.Response(204)
+                        return httpx.Response(200, json=[{"watermark_at": None}])
                     return httpx.Response(200, json=[{"watermark_at": None}])
                 if request.url.path == "/rest/v1/aportes":
                     body = json.loads(request.content)
@@ -835,7 +860,7 @@ class TestBatchFallback:
             def handle_request(self, request: httpx.Request) -> httpx.Response:
                 if request.url.path == "/rest/v1/sources":
                     if request.method == "PATCH":
-                        return httpx.Response(204)
+                        return httpx.Response(200, json=[{"watermark_at": None}])
                     return httpx.Response(200, json=[{"watermark_at": None}])
                 if request.url.path == "/rest/v1/aportes":
                     body = json.loads(request.content)
@@ -959,8 +984,9 @@ class _PartialInsertTransport(httpx.BaseTransport):
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         if request.url.path == "/rest/v1/sources":
             if request.method == "PATCH":
-                self.watermark_posts.append(json.loads(request.content))
-                return httpx.Response(204)
+                body = json.loads(request.content)
+                self.watermark_posts.append(body)
+                return httpx.Response(200, json=[body])
             return httpx.Response(200, json=[{"watermark_at": None}])
         if request.url.path == "/rest/v1/aportes":
             self._aportes_calls += 1
@@ -1019,8 +1045,9 @@ class TestPartialWatermark:
             def handle_request(self, request: httpx.Request) -> httpx.Response:
                 if request.url.path == "/rest/v1/sources":
                     if request.method == "PATCH":
-                        self.watermark_posts.append(json.loads(request.content))
-                        return httpx.Response(204)
+                        body = json.loads(request.content)
+                        self.watermark_posts.append(body)
+                        return httpx.Response(200, json=[body])
                     return httpx.Response(200, json=[{"watermark_at": None}])
                 if request.url.path == "/rest/v1/aportes":
                     body = json.loads(request.content)

@@ -308,13 +308,16 @@ class StagingExporter:
     def _set_watermark(self, source_id: str, watermark_at: str) -> bool:
         assert self._client is not None
         # PATCH sobre la fila existente de la fuente (no upsert): la fila de sources
-        # ya existe (la sembro el maintainer). return=minimal -> 204 en exito.
+        # ya existe (la sembro el maintainer). return=representation -> el body trae
+        # las filas afectadas. Un PATCH que no matchea ninguna fila (p.ej. un
+        # source_id que no es un UUID valido) devuelve 200 con un array vacio; ese
+        # caso NO es exito: el watermark no avanzo y debe reportarse, no tragarse.
         try:
             resp = self._post_with_retry(
                 f"{_SOURCES_PATH}?source_id=eq.{source_id}",
                 {"watermark_at": watermark_at},
                 method="PATCH",
-                headers={"Prefer": "return=minimal"},
+                headers={"Prefer": "return=representation"},
             )
         except httpx.HTTPError:
             return False
@@ -323,7 +326,14 @@ class StagingExporter:
                 f"_set_watermark {source_id}: sin permiso (status {resp.status_code}); "
                 "verificar SUPABASE_INGEST_JWT y grants del rol scraper_ingest"
             )
-        return resp.status_code in (200, 201, 204)
+        if resp.status_code not in (200, 201):
+            return False
+        try:
+            updated = resp.json()
+        except ValueError:
+            return False
+        # Exito solo si realmente se actualizo >=1 fila.
+        return isinstance(updated, list) and len(updated) > 0
 
     def _post_with_retry(
         self,
@@ -366,28 +376,15 @@ class StagingExporter:
         assert last_exc is not None
         raise last_exc
 
-    def _advance_watermark(
-        self, source_id: str, source_fetched_ats: list[str], source_errors: bool, sent: int
-    ) -> str | None:
-        """Avanza el watermark si se envió al menos un registro sin errores pre-export."""
-        if source_errors or not source_fetched_ats or sent == 0:
-            return None
-        new_watermark = _apply_safety_margin(max(source_fetched_ats))
-        try:
-            if not self._set_watermark(source_id, new_watermark):
-                return "no se pudo actualizar el watermark"
-        except PermissionError as exc:
-            return str(exc)
-        return None
-
     def advance_watermark(
         self, source_id: str, source_fetched_ats: list[str], source_errors: bool, sent: int
     ) -> str | None:
         """Avanza el watermark si se envió ≥1 registro sin errores pre-export.
 
-        A diferencia de ``_advance_watermark``, no bloquea en errores de insert:
-        solo bloquea si ``source_errors`` (parse/PII/enriquecimiento) están presentes
-        o si ``sent == 0``. Usado por el loop de streaming en ``_run_source``.
+        Bloquea solo si ``source_errors`` (parse/PII/enriquecimiento) están
+        presentes o si ``sent == 0``; un fallo del PATCH se reporta como error
+        pero no lanza. Usado tanto por ``export_source`` como por el loop de
+        streaming en ``_run_source``.
         """
         if source_errors or not source_fetched_ats or sent == 0:
             return None
@@ -575,7 +572,7 @@ class StagingExporter:
         )
         if not self.enabled:
             return result
-        watermark_err = self._advance_watermark(
+        watermark_err = self.advance_watermark(
             source_id, source_fetched_ats, bool(source_errors), result.sent
         )
         if watermark_err is not None:

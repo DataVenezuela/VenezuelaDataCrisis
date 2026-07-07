@@ -139,7 +139,8 @@ class TestWatermarkContract:
             if request.url.path == "/rest/v1/sources" and request.method == "PATCH":
                 captured["source_id"] = request.url.params.get("source_id")
                 captured["body"] = json.loads(request.content)
-                return httpx.Response(204)
+                # return=representation: fila actualizada (array no vacio).
+                return httpx.Response(200, json=[captured["body"]])
             return httpx.Response(200, json=[{"watermark_at": None}])
 
         cfg = StagingConfig(

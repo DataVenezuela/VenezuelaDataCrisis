@@ -91,10 +91,11 @@ class _StagingTransport(httpx.BaseTransport):
             if request.method == "GET":
                 return httpx.Response(200, json=[{"watermark_at": None}])
             if request.method == "PATCH":
+                body = json.loads(request.content)
                 self.watermark_posts.append(
-                    {"source_id": _source_id_from_url(request.url), **json.loads(request.content)}
+                    {"source_id": _source_id_from_url(request.url), **body}
                 )
-                return httpx.Response(204)
+                return httpx.Response(200, json=[body])
             return httpx.Response(404)
         return httpx.Response(404)
 
