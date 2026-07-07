@@ -415,8 +415,8 @@ class PersonCandidateWriteResult:
 
 
 def _candidate_key(row: dict[str, Any]) -> tuple[str, str, str]:
-    left = str(row["left_person_record_id"])
-    right = str(row["right_person_record_id"])
+    left = str(row["left_aporte_id"])
+    right = str(row["right_aporte_id"])
     first, second = sorted([left, right])
     return (first, second, str(row["blocking_key"]))
 
@@ -431,24 +431,24 @@ def _source_record_ids(candidate: dict[str, Any]) -> set[str]:
 def _candidate_payload(candidate: dict[str, Any]) -> dict[str, Any]:
     required = (
         "event_id",
-        "left_person_record_id",
-        "right_person_record_id",
+        "left_aporte_id",
+        "right_aporte_id",
         "blocking_key",
         "score",
         "reasons",
-        "priority",
     )
     missing = [key for key in required if not candidate.get(key)]
     if missing:
         raise ValueError(f"candidate payload missing required fields: {missing}")
     return {
         "event_id": candidate["event_id"],
-        "left_person_record_id": candidate["left_person_record_id"],
-        "right_person_record_id": candidate["right_person_record_id"],
+        "left_aporte_id": candidate["left_aporte_id"],
+        "right_aporte_id": candidate["right_aporte_id"],
         "blocking_key": candidate["blocking_key"],
         "score": candidate["score"],
         "reasons": candidate["reasons"],
-        "priority": candidate["priority"],
+        "priority": candidate.get("priority", 2),
+        "touches_gold": False,
         "decision": "pending",
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -515,8 +515,8 @@ class SupabasePersonDedupAdapter:
             for left_id, right_id in ((left, right), (right, left)):
                 clauses.append(
                     "and("
-                    f"left_person_record_id.eq.{left_id},"
-                    f"right_person_record_id.eq.{right_id},"
+                    f"left_aporte_id.eq.{left_id},"
+                    f"right_aporte_id.eq.{right_id},"
                     f"blocking_key.eq.{blocking_key}"
                     ")"
                 )
@@ -525,8 +525,8 @@ class SupabasePersonDedupAdapter:
             "/rest/v1/dedup_candidates",
             params={
                 "select": (
-                    "candidate_id,left_person_record_id,"
-                    "right_person_record_id,blocking_key"
+                    "candidate_id,left_aporte_id,"
+                    "right_aporte_id,blocking_key"
                 ),
                 "or": f"({','.join(clauses)})",
             },

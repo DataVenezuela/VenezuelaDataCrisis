@@ -270,7 +270,7 @@ class TestClustering:
         blocks = build_blocks([a, b])
         candidates = find_candidates(blocks, threshold=0.80)
         assert len(candidates) >= 1
-        assert candidates[0]["left_person_record_id"] != candidates[0]["right_person_record_id"]
+        assert candidates[0]["left_aporte_id"] != candidates[0]["right_aporte_id"]
         assert candidates[0]["event_id"] == _EVENT_ID
         assert "blocking_key" in candidates[0]
         assert candidates[0]["score"] >= 0.80
@@ -308,7 +308,7 @@ class TestClustering:
         assert len(candidates) == 0
 
     def test_priority_high_when_score_above_95(self) -> None:
-        """score >= 0.95 → priority='high'."""
+        """score >= 0.95 → priority=1 (high)."""
         # Use identical persons for high score
         a = _person("a", name="Juan Perez", cedula_hmac="same",
                      location="Caracas, Miranda", status="missing",
@@ -321,7 +321,7 @@ class TestClustering:
         assert len(candidates) >= 1
         # With identical everything, score should be very high
         assert candidates[0]["score"] >= 0.95
-        assert candidates[0]["priority"] == "high"
+        assert candidates[0]["priority"] == 1
 
     def test_candidate_has_expected_keys(self) -> None:
         """Candidates match dedup_candidates contract in master."""
@@ -334,12 +334,11 @@ class TestClustering:
         assert len(candidates) >= 1
         c = candidates[0]
         assert "event_id" in c
-        assert "left_person_record_id" in c
-        assert "right_person_record_id" in c
+        assert "left_aporte_id" in c
+        assert "right_aporte_id" in c
         assert "blocking_key" in c
         assert "score" in c
         assert "reasons" in c
-        assert "priority" in c
         assert isinstance(c["reasons"], dict)
 
     def test_empty_block_no_candidates(self) -> None:

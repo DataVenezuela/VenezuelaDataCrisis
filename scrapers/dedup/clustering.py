@@ -19,12 +19,12 @@ def find_candidates(
 
     Returns list of candidate dicts with keys:
         event_id: event UUID
-        left_person_record_id: left persons.person_record_id
-        right_person_record_id: right persons.person_record_id
+        left_aporte_id: left aporte.id
+        right_aporte_id: right aporte.id
         blocking_key: block key that produced the candidate
         score: float
         reasons: dict[str, float]
-        priority: str ("high"/"medium"/"low")
+        priority: int (1 = high, 2 = medium)
     """
     candidates: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str]] = set()
@@ -38,8 +38,8 @@ def find_candidates(
                 left = members[i]
                 right = members[j]
 
-                left_id = _person_record_id(left)
-                right_id = _person_record_id(right)
+                left_id = _aporte_id(left)
+                right_id = _aporte_id(right)
                 if not left_id or not right_id:
                     continue
 
@@ -55,14 +55,14 @@ def find_candidates(
                 if score < threshold:
                     continue
 
-                priority = "high" if score >= 0.95 else "medium"
+                priority = 1 if score >= 0.95 else 2
 
-                left_person_record_id, right_person_record_id = sorted([left_id, right_id])
+                left_aporte_id, right_aporte_id = sorted([left_id, right_id])
 
                 candidates.append({
                     "event_id": str(left.get("event_id") or right.get("event_id") or ""),
-                    "left_person_record_id": left_person_record_id,
-                    "right_person_record_id": right_person_record_id,
+                    "left_aporte_id": left_aporte_id,
+                    "right_aporte_id": right_aporte_id,
                     "blocking_key": block_key,
                     "source_record_ids": [
                         str(value)
@@ -77,15 +77,13 @@ def find_candidates(
     return candidates
 
 
-def _person_record_id(person: dict[str, Any]) -> str:
-    """Return the ID expected by dedup_candidates FK.
+def _aporte_id(person: dict[str, Any]) -> str:
+    """Return ``aportes.id`` expected by dedup_candidates FK.
 
-    ``aportes.id`` is the staging row id. The dedup candidate schema points to
-    ``persons.person_record_id``, so prefer the explicit projected FK. Current
-    staging uses Person ``external_id`` as the deterministic person identity;
-    accept that as a compatibility fallback when the backend exposes it instead.
+    ``aportes.id`` is the staging row PK. Falls back to ``external_id``
+    for backward compat during schema migration.
     """
-    for key in ("person_record_id", "external_id", "externalId"):
+    for key in ("id", "external_id"):
         value = person.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
