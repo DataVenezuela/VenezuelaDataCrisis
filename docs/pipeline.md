@@ -651,13 +651,16 @@ Responsabilidades del exporter:
   `scrapers/dedup/specs.py`: `entity_type`, `external_id`, `dedup_hash`,
   `dedup_version`, `block_keys`, `content_hash`, `source_id`, `artifact_id` y
   `raw_json` (el record de negocio sin claves internas con prefijo `_`). Keys en
-  snake_case. El exporter resuelve `source_id` (uuid) a partir del slug de la
-  fuente: `source_slug` no viaja al POST. Además emite algunas claves no
-  canónicas (`run_id`, `scraper_id`, `source_url`, `parser_version`) que hoy
-  no son columnas de `aportes`; ver `docs/specs/db-scraper-contract.md` §4.2.
+  snake_case. `source_id` (uuid) es `source.id` directo del config (ADR 0009: ya no
+  se resuelve desde un slug). Desde el cutover Bronze (#256) emite
+  `artifact_id` (FK NOT NULL, lo stampa el pipeline como `_artifact_id` tras
+  registrar la página en `raw_artifacts`) y **dejó de emitir**
+  `run_id`/`scraper_id`/`source_url`/`parser_version`: la procedencia de corrida y
+  la URL de origen viven en la capa Bronze. Ver
+  `docs/specs/db-scraper-contract.md` §4.2 y ADR 0008.
 - `external_id` es determinista y **por-registro-de-fuente** para todo tipo:
-  `sha256("<entity>|<source_slug>|<source_record_id>")` cuando la fuente da un
-  id de registro nativo, o `sha256("<entity>|<source_slug>|<content_hash>")`
+  `sha256("<entity>|<source_id>|<source_record_id>")` cuando la fuente da un
+  id de registro nativo, o `sha256("<entity>|<source_id>|<content_hash>")`
   cuando no. Ya no es el fingerprint ni el `deterministic_id`: dos registros
   distintos de una fuente que comparten cédula o fingerprint son dos aportes,
   no uno (la dedup vive en edges y gold, no en silver). PostgREST hace upsert
@@ -666,8 +669,9 @@ Responsabilidades del exporter:
 - Enviar en lotes (batch) configurables por fuente (`bulk_size` /
   `max_concurrent_posts` de `SourceConfig`). Cada batch exitoso (2xx) cuenta
   como enviado; un batch fallido se registra en `result.errors`.
-- Avanzar el watermark de la fuente (`POST /rest/v1/source_watermarks` con
-  `Prefer: resolution=merge-duplicates`, body `{"slug": "...", "watermark_at": "<ISO>"}`)
+- Avanzar el watermark de la fuente (`PATCH /rest/v1/sources?source_id=eq.<uuid>`
+  con `Prefer: return=minimal`, body `{"watermark_at": "<ISO>"}`; ADR 0009: el
+  watermark vive en `sources.watermark_at`, se retiró `source_watermarks`)
   a `max(fetched_at)` menos un margen de seguridad (`_WATERMARK_SAFETY_MARGIN`,
   ver más abajo). El watermark avanza si no hubo errores previos al export
   (parseo, PII, enriquecimiento, protección de menores) y se envió al menos un
@@ -723,15 +727,15 @@ de un fetch individual no exceda esa ventana. **Pendiente de confirmar con
 cada fuente:** si su API interpreta `updated_after` de forma inclusiva o
 exclusiva en el límite exacto.
 
-`source_slug` **no** vive en `StagingConfig`: una corrida del pipeline procesa
+El `source_id` **no** vive en `StagingConfig`: una corrida del pipeline procesa
 múltiples fuentes (`run_pipeline._run_source` itera todas las habilitadas), así
-que `source_slug` es siempre `source.id` y se pasa explícito en cada llamada a
-`StagingExporter.get_watermark(source_slug)` / `export_source(..., source_slug=...)`.
+que `source.id` (el UUID de la fuente) se pasa explícito en cada llamada a
+`StagingExporter.get_watermark(source_id)` / `export_source(..., source_id=...)`.
 Esto mantiene watermarks independientes por fuente dentro de la misma corrida.
-Como `source.id` viaja como valor `slug` hacia `/rest/v1/source_watermarks` (en
-el body del upsert y como filtro en las lecturas PostgREST),
-`validate_sources_config` exige que sea único entre fuentes y que solo contenga
-`[a-zA-Z0-9_-]`.
+Como `source.id` viaja como filtro `source_id=eq.<uuid>` hacia `/rest/v1/sources`
+(lectura y `PATCH` del `watermark_at`), `validate_sources_config` exige que sea
+único entre fuentes; en formato thin debe ser un UUID (el `source_id` de la tabla
+`sources`), en formato completo un slug `[a-zA-Z0-9_-]`.
 
 Antes de hacer el fetch, `_run_source` lee `exporter.get_watermark(source.id)`
 **dentro** del mismo `try/finally` que cierra el adapter, y lo pasa como
@@ -1077,7 +1081,7 @@ Ejemplo de payload (los registros se envían en batches PostgREST):
 {
   "run_id": "uuid-v4",
   "entity_type": "person",
-  "external_id": "sha256-hex (source_slug + source_record_id o content_hash)",
+  "external_id": "sha256-hex (source_id + source_record_id o content_hash)",
   "dedup_hash": "deterministico",
   "dedup_version": "person-detid-v1",
   "block_keys": ["ced:uuid-v4:hmac", "phon:uuid-v4:lara:JN"],
