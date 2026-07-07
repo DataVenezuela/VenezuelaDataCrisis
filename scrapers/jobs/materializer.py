@@ -105,6 +105,16 @@ _DEFAULT_BATCH_SIZE = 500
 _MAX_PAGES = 100_000  # backstop anti-loop; el cron real nunca se acerca.
 
 
+class _AportesFetchError(RuntimeError):
+    """Fallo al leer una pagina de ``aportes`` tras agotar reintentos.
+
+    Se levanta (en vez de devolver ``[]``) para que un fetch fallido NUNCA se
+    confunda con fin-de-datos: sin esto, un 503 transitorio a mitad del paginado
+    cortaria el scan en silencio y dejaria la cola de aportes sin proyectar sin
+    registrar error alguno.
+    """
+
+
 @dataclass
 class MaterializeResult:
     """Resumen de una corrida del materializer (conteos, sin PII)."""
@@ -210,34 +220,67 @@ class SilverMaterializer:
     # -- fetch aportes --------------------------------------------------------
 
     def _fetch_aportes_page(self, limit: int, offset: int) -> list[dict[str, object]]:
+        """Lee una pagina de aportes, reintentando status transitorios / errores de
+        red (el GET es idempotente). Tras agotar reintentos levanta
+        ``_AportesFetchError``: un fetch fallido NUNCA debe devolver ``[]``, que se
+        confundiria con fin-de-datos y cortaria el scan en silencio. Un 200 con
+        cuerpo vacio (fin-de-datos real) si devuelve ``[]``.
+        """
         assert self._client is not None
-        resp = self._client.get(
-            _APORTES_PATH,
-            params={
-                "select": "id,entity_type,raw_json",
-                # Desempate por id: created_at NO es unico (un batch de scrape
-                # commitea muchas filas con el mismo timestamp), y sin una clave
-                # estable el paginado offset podria saltar o repetir una fila en
-                # el borde de pagina. Repetir es inocuo (DO NOTHING); saltar se
-                # auto-cura en la proxima corrida (offset reinicia en 0).
-                "order": "created_at.asc,id.asc",
-                "limit": limit,
-                "offset": offset,
-            },
-        )
-        if resp.status_code in (401, 403):
-            raise PermissionError(
-                f"fetch aportes: sin permiso (status {resp.status_code}); verificar "
-                "SUPABASE_INGEST_JWT y el grant SELECT del rol scraper_ingest sobre aportes"
-            )
+        params: dict[str, str | int] = {
+            "select": "id,entity_type,raw_json",
+            # Desempate por id: created_at NO es unico (un batch de scrape
+            # commitea muchas filas con el mismo timestamp), y sin una clave
+            # estable el paginado offset podria saltar o repetir una fila en
+            # el borde de pagina. Repetir es inocuo (DO NOTHING); saltar se
+            # auto-cura en la proxima corrida (offset reinicia en 0).
+            "order": "created_at.asc,id.asc",
+            "limit": limit,
+            "offset": offset,
+        }
+        resp: httpx.Response | None = None
+        for attempt in range(1, _MAX_POST_RETRIES + 1):
+            try:
+                resp = self._client.get(_APORTES_PATH, params=params)
+            except (httpx.TimeoutException, httpx.NetworkError) as exc:
+                if attempt < _MAX_POST_RETRIES:
+                    delay = backoff_delay(attempt)
+                    log.warning(
+                        "%s en GET %s intento %d/%d — reintento en %.1fs",
+                        type(exc).__name__, _APORTES_PATH, attempt, _MAX_POST_RETRIES, delay,
+                    )
+                    time.sleep(delay)
+                    continue
+                raise _AportesFetchError(
+                    f"fetch aportes: error de red tras {_MAX_POST_RETRIES} intentos "
+                    f"(offset={offset}): {exc}"
+                ) from exc
+            if resp.status_code in (401, 403):
+                raise PermissionError(
+                    f"fetch aportes: sin permiso (status {resp.status_code}); verificar "
+                    "SUPABASE_INGEST_JWT y el grant SELECT del rol scraper_ingest sobre aportes"
+                )
+            if resp.status_code in _RETRYABLE_STATUS and attempt < _MAX_POST_RETRIES:
+                delay = backoff_delay(attempt)
+                log.warning(
+                    "HTTP %s en GET %s intento %d/%d — reintento en %.1fs",
+                    resp.status_code, _APORTES_PATH, attempt, _MAX_POST_RETRIES, delay,
+                )
+                time.sleep(delay)
+                continue
+            break
+        assert resp is not None
         if resp.status_code != 200:
-            log.warning("fetch aportes: status inesperado %s (offset=%s)", resp.status_code, offset)
-            return []
+            raise _AportesFetchError(
+                f"fetch aportes: status inesperado {resp.status_code} tras "
+                f"{_MAX_POST_RETRIES} intentos (offset={offset})"
+            )
         try:
             rows = resp.json()
-        except ValueError:
-            log.warning("fetch aportes: cuerpo 200 no es JSON valido (offset=%s)", offset)
-            return []
+        except ValueError as exc:
+            raise _AportesFetchError(
+                f"fetch aportes: cuerpo 200 no es JSON valido (offset={offset})"
+            ) from exc
         return rows if isinstance(rows, list) else []
 
     # -- seed events ----------------------------------------------------------
@@ -281,8 +324,17 @@ class SilverMaterializer:
             return result
 
         seeded: set[str] = set()
-        # La fila de catalogo de config debe existir antes que cualquier proyeccion.
-        self._seed_event(event_id, seeded, result)
+        # La fila de catalogo de config debe existir antes que cualquier proyeccion:
+        # es el fallback de event_id para los aportes que no lo traen. Si no se puede
+        # sembrar, proyectar apuntaria a una FK inexistente (23503) fila tras fila, asi
+        # que se aborta ANTES de escanear aportes y se deja el error en el result.
+        if not self._seed_event(event_id, seeded, result):
+            log.error(
+                "materializer: no se pudo sembrar el evento de catalogo %s; "
+                "se omite la proyeccion (fail-closed)",
+                event_id,
+            )
+            return result
 
         size = max(1, batch_size)
         offset = 0
@@ -301,7 +353,9 @@ class SilverMaterializer:
                         "puede quedar backlog sin proyectar (offset=%s)",
                         _MAX_PAGES, offset,
                     )
-        except PermissionError as exc:
+        except (PermissionError, _AportesFetchError) as exc:
+            # Fetch fallido (permiso o status/red tras reintentos): se corta el
+            # scan y se registra el error para que la corrida NO se reporte limpia.
             log.error("%s", exc)
             result.errors.append(str(exc))
         return result

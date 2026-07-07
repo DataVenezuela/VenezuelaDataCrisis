@@ -254,6 +254,31 @@ class TestEventCatalog:
         assert list(t.events.keys()) == [_EVENT_ID]
 
 
+class TestSeedFailure:
+    def test_seed_failure_aborts_projection(self) -> None:
+        # Si la fila de catalogo events NO se puede sembrar, proyectar persons/acopio
+        # con event_id apuntando a una fila inexistente rompe la FK. En vez de
+        # emitir proyecciones condenadas (batch 23503 -> reintento fila a fila que
+        # tambien falla), el materializer aborta ANTES de escanear aportes y registra
+        # el error, para no reportar la corrida como exitosa.
+        class _FailEvents(_FakeSupabase):
+            def _upsert(self, request, store, pk):  # type: ignore[no-untyped-def]
+                if request.url.path == "/rest/v1/events":
+                    return httpx.Response(500, json={"message": "boom"})
+                return super()._upsert(request, store, pk)
+
+        t = _FailEvents([_person_aporte("ap-1"), _acopio_aporte("ap-2")])
+        with patch("scrapers.jobs.materializer.time.sleep", lambda *_: None):
+            r = _materializer(t).materialize(event_id=_EVENT_ID)
+        assert r.persons_projected == 0
+        assert r.acopio_projected == 0
+        assert t.persons == {}
+        assert t.acopios == {}
+        # Aborto ANTES de escanear aportes: ni un GET a /aportes ni proyeccion.
+        assert t.aportes_gets == 0
+        assert any("event" in e for e in r.errors)
+
+
 # --- idempotencia -----------------------------------------------------------
 
 
@@ -322,6 +347,47 @@ class TestPagination:
         _materializer(t).materialize(event_id=_EVENT_ID, batch_size=100)
         assert len(t.persons) == 250
         assert t.aportes_gets >= 3  # 100 + 100 + 50 -> al menos 3 GETs
+
+    def test_empty_200_page_ends_cleanly(self) -> None:
+        # Fin-de-datos legitimo: la pagina extra tras un multiplo exacto del batch
+        # devuelve 200 con []. Eso corta el paginado SIN registrar error.
+        aportes = [_person_aporte("ap-0"), _person_aporte("ap-1")]
+        t = _FakeSupabase(aportes)
+        r = _materializer(t).materialize(event_id=_EVENT_ID, batch_size=1)
+        assert len(t.persons) == 2
+        assert r.errors == []
+
+
+# --- fetch transitorio: reintenta, y nunca reporta un scan truncado como limpio -
+
+
+class TestFetchRetry:
+    def test_transient_get_failure_is_retried_and_recorded(self) -> None:
+        # Un 503 transitorio a mitad del paginado NO puede confundirse con
+        # fin-de-datos (que tambien seria una lista vacia): se reintenta y, si
+        # persiste, se registra un error y se corta el scan (la corrida deja de
+        # reportarse limpia). Antes se devolvia [] silenciosamente y se perdia
+        # la cola de aportes sin senal alguna.
+        class _FlakyGet(_FakeSupabase):
+            def _get_aportes(self, request: httpx.Request) -> httpx.Response:
+                qs = parse_qs(urlparse(str(request.url)).query)
+                offset = int(qs.get("offset", ["0"])[0])
+                if offset > 0:
+                    self.aportes_gets += 1
+                    return httpx.Response(503, json={"message": "throttled"})
+                return super()._get_aportes(request)
+
+        t = _FlakyGet([_person_aporte("ap-0"), _person_aporte("ap-1")])
+        with patch("scrapers.jobs.materializer.time.sleep", lambda *_: None):
+            r = _materializer(t).materialize(event_id=_EVENT_ID, batch_size=1)
+        # La primera pagina si proyecto; la segunda fallo su fetch.
+        assert "ap-0" in t.persons
+        assert "ap-1" not in t.persons
+        # El fallo se refleja: la corrida no es "limpia".
+        assert r.errors
+        assert any("503" in e or "aportes" in e for e in r.errors)
+        # El offset que fallo se reintento (mas de un GET a ese offset).
+        assert t.aportes_gets >= 5
 
 
 # --- PII: nunca se loguea ---------------------------------------------------
