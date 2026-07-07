@@ -463,10 +463,12 @@ def test_person_candidate_payload_matches_master_schema() -> None:
     assert isinstance(transport.post_bodies[0], list)
     body = transport.post_bodies[0][0]
     assert body["event_id"] == _EVENT_ID
-    assert body["left_person_record_id"] == "person-1"
-    assert body["right_person_record_id"] == "person-2"
+    assert body["left_aporte_id"] == "person-1"
+    assert body["right_aporte_id"] == "person-2"
     assert body["blocking_key"] == f"ced:{_EVENT_ID}:same"
     assert body["decision"] == "pending"
+    assert body["priority"] == 0
+    assert body["touches_gold"] is False
     assert "left_person" not in body
     assert "right_person" not in body
 
@@ -526,8 +528,8 @@ def test_person_existing_candidate_is_idempotent_update() -> None:
         existing=[
             {
                 "candidate_id": "cand-1",
-                "left_person_record_id": "person-2",
-                "right_person_record_id": "person-1",
+                "left_aporte_id": "person-2",
+                "right_aporte_id": "person-1",
                 "blocking_key": f"ced:{_EVENT_ID}:same",
             }
         ],
@@ -566,24 +568,22 @@ def test_person_invalid_candidate_payload_is_nonfatal(
     ]
     invalid = {
         "event_id": _EVENT_ID,
-        "left_person_record_id": "person-1",
-        "right_person_record_id": "person-2",
+        "left_aporte_id": "person-1",
+        "right_aporte_id": "person-2",
         "blocking_key": "bad:block",
         "source_record_ids": ["bad-1", "bad-2"],
         "score": 0.95,
         "reasons": {"nombre": 0.4},
-        "priority": "high",
     }
     del invalid[missing_field]
     valid = {
         "event_id": _EVENT_ID,
-        "left_person_record_id": "person-3",
-        "right_person_record_id": "person-4",
+        "left_aporte_id": "person-3",
+        "right_aporte_id": "person-4",
         "blocking_key": "ok:block",
         "source_record_ids": ["ok-1", "ok-2"],
         "score": 0.95,
         "reasons": {"nombre": 0.4},
-        "priority": "high",
     }
 
     monkeypatch.setattr(consolidation_job, "find_candidates", lambda *_: [invalid, valid])
