@@ -87,7 +87,9 @@ CREATE TABLE public.aportes (
   artifact_id uuid NOT NULL,
   source_record_id text,
   external_id text NOT NULL,
-  dedup_hash character varying NOT NULL,
+  -- Nullable a proposito: Person sin deterministic_id manda NULL para que el
+  -- backend distinga ausencia de hash de un hash real (scrapers/dedup/specs.py).
+  dedup_hash character varying,
   dedup_version text NOT NULL,
   block_keys jsonb NOT NULL DEFAULT '[]'::jsonb,
   content_hash character varying NOT NULL,
