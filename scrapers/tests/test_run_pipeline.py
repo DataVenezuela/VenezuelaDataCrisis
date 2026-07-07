@@ -1667,6 +1667,51 @@ class TestBronzeProvenance:
         assert transport.watermark_posts == []  # watermark retenido
         assert summary["staging_sent"] == 0
         assert summary["staging_errors"] >= 1
+        # La fuente fallo CERRADO: se refleja en el contador dedicado, no se
+        # esconde como una fuente procesada-ok con 0 enviados (#256 observabilidad).
+        assert summary["sources_failed_closed"] == 1
+
+    def test_start_run_failure_marks_source_failed_closed(
+        self, tmp_path: Path, demo_config: Path
+    ) -> None:
+        # start_run falla (500 persistente) => sin run_id => la fuente falla cerrado:
+        # no se fetchea ninguna pagina, no se exporta y el watermark no avanza. La
+        # fuente corre a fin sin excepcion (sigue contando como procesada), pero un
+        # apagon total de Bronze no debe quedar enmascarado detras de
+        # sources_processed == len(enabled): se cuenta aparte en sources_failed_closed.
+        prov = _ProvenanceTransport(runs_status=500)
+        transport = _StagingTransport()
+        with patch.dict(os.environ, _SUPABASE_ENV, clear=False), _patch_exporter(
+            transport
+        ), _patch_provenance_exporter(prov), patch(
+            "scrapers.exporters.provenance_exporter.time.sleep", lambda *_: None
+        ), patch(
+            "scrapers.pipelines.run_pipeline._get_adapter", return_value=_mock_adapter()
+        ), patch(
+            "scrapers.pipelines.run_pipeline._get_parser", return_value=_mock_parser()
+        ):
+            summary = run_pipeline(config_path=demo_config, output_dir=tmp_path / "out")
+        assert summary["sources_failed_closed"] == 1
+        assert summary["sources_processed"] == 1  # corre a fin sin excepcion
+        assert transport.batch_posts == []
+        assert transport.watermark_posts == []
+        assert summary["staging_sent"] == 0
+
+    def test_healthy_run_reports_zero_failed_closed(
+        self, tmp_path: Path, demo_config: Path
+    ) -> None:
+        prov = _ProvenanceTransport()
+        transport = _StagingTransport()
+        with patch.dict(os.environ, _SUPABASE_ENV, clear=False), _patch_exporter(
+            transport
+        ), _patch_provenance_exporter(prov), patch(
+            "scrapers.pipelines.run_pipeline._get_adapter", return_value=_mock_adapter()
+        ), patch(
+            "scrapers.pipelines.run_pipeline._get_parser", return_value=_mock_parser()
+        ):
+            summary = run_pipeline(config_path=demo_config, output_dir=tmp_path / "out")
+        assert summary["sources_failed_closed"] == 0
+        assert summary["sources_processed"] == 1
 
     def test_multipage_artifact_failure_retains_whole_source_watermark(
         self, tmp_path: Path, demo_config: Path

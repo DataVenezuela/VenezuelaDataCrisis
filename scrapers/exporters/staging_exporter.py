@@ -132,6 +132,11 @@ class ExportResult:
     sent: int = 0
     duplicates: int = 0
     errors: list[str] = field(default_factory=list)
+    # True cuando la fuente NO exporto por un fallo de la capa Bronze
+    # (procedencia): sin scrape_run o sin raw_artifact no puede existir el aporte,
+    # asi que se falla cerrado. Se expone aparte del conteo de fuentes procesadas
+    # para que un apagon de Bronze no quede enmascarado (issue #256).
+    failed_closed: bool = False
 
 
 def _content_hash(body: dict[str, object]) -> str:

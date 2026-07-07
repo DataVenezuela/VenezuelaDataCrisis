@@ -153,7 +153,9 @@ class ProvenanceExporter:
         for attempt in range(1, _MAX_POST_RETRIES + 1):
             try:
                 resp = self._client.post(path, json=payload, headers=headers)
-            except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout) as exc:
+                # Errores PRE-envio: el request nunca llego al servidor, asi que
+                # reintentar no puede duplicar la fila append-only.
                 if attempt < _MAX_POST_RETRIES:
                     delay = backoff_delay(attempt)
                     log.warning(
@@ -162,7 +164,20 @@ class ProvenanceExporter:
                     )
                     time.sleep(delay)
                     continue
-                log.warning("POST %s agoto reintentos por error de red: %s", path, exc)
+                log.warning("POST %s agoto reintentos por error de conexion: %s", path, exc)
+                return None
+            except (httpx.TimeoutException, httpx.NetworkError) as exc:
+                # Errores POST-envio (ReadTimeout, WriteError, ...): el INSERT PUEDE
+                # haber commiteado antes de que se perdiera la respuesta. raw_artifacts
+                # no tiene on_conflict, asi que un reintento ciego crearia una segunda
+                # fila (raw_text = PII duplicado en reposo, ADR 0008). Se falla cerrado:
+                # la pagina se re-fetchea en la proxima corrida (at-least-once), sin
+                # duplicar. NUNCA se loguea el payload.
+                log.warning(
+                    "%s en POST %s: fallo de transporte post-envio, no se reintenta "
+                    "(evita duplicar la fila append-only): %s",
+                    type(exc).__name__, path, exc,
+                )
                 return None
             if resp.status_code in _RETRYABLE_STATUS and attempt < _MAX_POST_RETRIES:
                 delay = backoff_delay(attempt)

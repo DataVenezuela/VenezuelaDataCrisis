@@ -23,7 +23,7 @@ from unittest.mock import patch
 
 import httpx
 
-from scrapers.exporters.provenance_exporter import ProvenanceExporter
+from scrapers.exporters.provenance_exporter import _MAX_POST_RETRIES, ProvenanceExporter
 from scrapers.exporters.staging_exporter import StagingConfig
 
 _SOURCE_UUID = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
@@ -240,6 +240,41 @@ class TestRecordArtifact:
         t = _RecordingTransport(artifacts_status=500)
         with patch("scrapers.exporters.provenance_exporter.time.sleep", lambda *_: None):
             assert _exporter(t).record_artifact("run-1", _page()) is None
+
+    def test_read_timeout_not_retried(self) -> None:
+        # Un ReadTimeout puede llegar DESPUES de que el INSERT ya commiteo en el
+        # servidor: reintentar duplicaria la fila append-only (y su raw_text = PII
+        # en claro). raw_artifacts no tiene on_conflict, asi que un reintento ciego
+        # crea una segunda fila. Solo se reintentan errores pre-envio; ante un error
+        # de transporte post-envio se falla cerrado (None) sin reintentar.
+        class _ReadTimeout(httpx.BaseTransport):
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def handle_request(self, request: httpx.Request) -> httpx.Response:
+                self.calls += 1
+                raise httpx.ReadTimeout("simulado", request=request)
+
+        t = _ReadTimeout()
+        with patch("scrapers.exporters.provenance_exporter.time.sleep", lambda *_: None):
+            assert _exporter(t).record_artifact("run-1", _page()) is None
+        assert t.calls == 1  # un solo intento => no puede duplicar la fila
+
+    def test_connect_error_is_retried(self) -> None:
+        # Un ConnectError ocurre ANTES de enviar el request (no pudo haber commit),
+        # asi que reintentar es seguro: se agota el presupuesto de reintentos.
+        class _ConnErr(httpx.BaseTransport):
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def handle_request(self, request: httpx.Request) -> httpx.Response:
+                self.calls += 1
+                raise httpx.ConnectError("simulado", request=request)
+
+        t = _ConnErr()
+        with patch("scrapers.exporters.provenance_exporter.time.sleep", lambda *_: None):
+            assert _exporter(t).record_artifact("run-1", _page()) is None
+        assert t.calls == _MAX_POST_RETRIES  # pre-envio: reintentable
 
 
 # --- PII: raw_text NUNCA se loguea ------------------------------------------
