@@ -551,9 +551,9 @@ def test_thin_config_merges_db_definition(tmp_path, monkeypatch):
             json=[
                 {
                     "source_id": _UUID_A,
-                    "display_name": "Fuente Secreta",
+                    "display_name": "Fuente Reservada",
                     "source_type": "api_json",
-                    "url": "https://secreta.example/api",
+                    "url": "https://reservada.example/api",
                     "required_keywords": ["terremoto"],
                     "governed_tier": "B",
                     "refresh_minutes": 30,
@@ -570,7 +570,7 @@ def test_thin_config_merges_db_definition(tmp_path, monkeypatch):
     source = sources[0]
     assert source.id == _UUID_A
     assert source.parser_asignado == "encuentralos"  # del repo (el "shape")
-    assert source.url == "https://secreta.example/api"  # de la DB
+    assert source.url == "https://reservada.example/api"  # de la DB
     assert source.type == "api_json"
     assert source.trust_tier == "B"
     assert source.required_keywords == ["terremoto"]
