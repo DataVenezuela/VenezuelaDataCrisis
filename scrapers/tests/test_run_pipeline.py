@@ -112,21 +112,20 @@ def _patch_exporter(transport: httpx.BaseTransport) -> Any:
     return patch.object(rp, "StagingExporter", side_effect=_factory)
 
 
-_QUARANTINE_ENV = {
-    "QUARANTINE_API_KEY": "test-key",
-    "QUARANTINE_BASE_URL": "https://backend.test",
-}
+# Quarantine ahora usa las mismas SUPABASE_* que staging; _QUARANTINE_ENV
+# se conserva vacio para no romper los test que hacen {**_SUPABASE_ENV, **_QUARANTINE_ENV}.
+_QUARANTINE_ENV: dict[str, str] = {}
 
 
 class _QuarantineTransport(httpx.BaseTransport):
-    """Intercepta POSTs a /api/v1/quarantine y captura los bodies."""
+    """Intercepta POSTs a /rest/v1/quarantined_records y captura los bodies."""
 
     def __init__(self, status: int = 201) -> None:
         self.status = status
         self.posts: list[dict[str, Any]] = []
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/api/v1/quarantine":
+        if request.url.path == "/rest/v1/quarantined_records":
             self.posts.append(json.loads(request.content))
             return httpx.Response(self.status, json={"ok": True})
         return httpx.Response(404)
@@ -144,7 +143,7 @@ def _patch_quarantine_exporter(transport: httpx.BaseTransport) -> Any:
     ) -> QuarantineExporter:
         if config is None:
             return QuarantineExporter(None, run_id=run_id)
-        client = httpx.Client(base_url=config.base_url, transport=transport)
+        client = httpx.Client(base_url=config.supabase_url, transport=transport)
         return QuarantineExporter(config, client=client, run_id=run_id)
 
     return patch.object(rp, "QuarantineExporter", side_effect=_factory)
@@ -1205,7 +1204,7 @@ class TestMinorProtectionEndToEnd:
         assert transport.batch_posts == []
         assert any("registro omitido" in e for e in summary["errors"])
         assert len(qtransport.posts) >= 1
-        assert qtransport.posts[0]["riskLevel"] == "high"
+        assert qtransport.posts[0]["risk_level"] == "high"
 
 
 # ---------------------------------------------------------------------------

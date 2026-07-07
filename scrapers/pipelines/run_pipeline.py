@@ -24,7 +24,7 @@ Cuarentena (Issue #88)
 NINGUN registro se descarta en silencio. Cada punto donde el pipeline antes
 perdia datos (parser ausente, parseo fallido, PII no tratable, fail-closed de
 proteccion de menores) ahora enruta el registro a la Quarantine DB via
-``QuarantineExporter`` (POST /api/quarantine) para revision humana. El preview
+``QuarantineExporter`` (POST /rest/v1/quarantined_records, Supabase PostgREST) para revision humana. El preview
 va redactado; el run continua con las demas fuentes.
 
 La deduplicacion ya no ocurre por fuente: el dedup_hash/external_id deterministas
