@@ -33,6 +33,12 @@ _EVENT_ID = "8f14e45f-ceea-467e-bd5d-0a4f2e0c1a3a"
 
 _SOURCE_UUID = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
 
+# artifact_id (FK NOT NULL -> raw_artifacts). El pipeline lo stampa como
+# _artifact_id tras registrar la pagina en Bronze; los helpers lo incluyen para
+# reflejar el flujo real. Es meta-campo (_-prefijo): no entra en raw_json ni
+# altera content_hash / external_id.
+_ARTIFACT_UUID = "c1d2e3f4-a5b6-7890-cdef-1234567890ab"
+
 class _RecordingTransport(httpx.BaseTransport):
     """Captura POSTs a /rest/v1/aportes y /rest/v1/source_watermarks.
 
@@ -78,6 +84,7 @@ def _exporter(transport: httpx.BaseTransport) -> StagingExporter:
 def _person(name: str, hmac: str | None = None, det: str | None = "detid123") -> dict[str, Any]:
     return {
         "_entity_type": "Person",
+        "_artifact_id": _ARTIFACT_UUID,
         "full_name": name,
         "event_id": _EVENT_ID,
         "last_known_location": "Lara",
@@ -91,6 +98,7 @@ def _person(name: str, hmac: str | None = None, det: str | None = "detid123") ->
 def _event() -> dict[str, Any]:
     return {
         "_entity_type": "Event",
+        "_artifact_id": _ARTIFACT_UUID,
         "event_type": "earthquake",
         "location_text": "Ciudad Demo, Estado Demo",
         "date_iso": "2026-06-24T14:32:00Z",
@@ -102,6 +110,7 @@ def _event() -> dict[str, Any]:
 def _acopio() -> dict[str, Any]:
     return {
         "_entity_type": "AcopioCenter",
+        "_artifact_id": _ARTIFACT_UUID,
         "name": "Centro de Acopio Demo",
         "event_id": _EVENT_ID,
         "location_text": "Ciudad Demo, Estado Demo",
@@ -120,9 +129,10 @@ class TestPayload:
 
     def test_payload_has_all_required_keys(self) -> None:
         body = self._export_one(_person("Juan"))
+        # aportes canonico (issue #256): artifact_id presente, sin run_id/scraper_id.
         always_present = {
-            "run_id", "entity_type", "external_id", "dedup_version",
-            "block_keys", "content_hash", "source_id", "scraper_id", "raw_json",
+            "entity_type", "external_id", "dedup_version", "block_keys",
+            "content_hash", "source_id", "artifact_id", "raw_json",
         }
         assert always_present.issubset(body.keys())
 
@@ -136,9 +146,37 @@ class TestPayload:
         body = self._export_one(_person("Juan"))
         assert body["entity_type"] == "person"
 
-    def test_run_id_propagated(self) -> None:
+    def test_artifact_id_emitted_from_meta_field(self) -> None:
         body = self._export_one(_person("Juan"))
-        assert body["run_id"] == "run-1"
+        assert body["artifact_id"] == _ARTIFACT_UUID
+
+    def test_legacy_provenance_keys_dropped(self) -> None:
+        # issue #256: la corrida/URL viven en raw_artifacts (via artifact_id),
+        # ya no en el aporte. Estas claves NO deben aparecer en el payload.
+        body = self._export_one(_person("Juan"))
+        for legacy in ("run_id", "scraper_id", "source_url", "parser_version"):
+            assert legacy not in body
+
+    def test_artifact_id_not_leaked_into_raw_json(self) -> None:
+        body = self._export_one(_person("Juan"))
+        assert "_artifact_id" not in body["raw_json"]
+        assert "artifact_id" not in body["raw_json"]
+
+    def test_missing_artifact_id_fails_closed_when_enabled(self) -> None:
+        # Sin _artifact_id, un exporter enabled NO envia el registro (fail-closed:
+        # no puede existir un aporte sin su raw_artifact). El registro cuenta como
+        # error y el watermark no avanza (sent==0).
+        rec = _person("Juan")
+        del rec["_artifact_id"]
+        t = _RecordingTransport()
+        res = _exporter(t).export_source(
+            [rec], source_slug="demo", source_fetched_ats=["2026-06-24T16:00:00Z"]
+        )
+        assert res.sent == 0
+        assert res.errors
+        assert any("artifact_id" in e for e in res.errors)
+        assert t.batch_posts == []
+        assert t.watermark_posts == []
 
     def test_dedup_version_person(self) -> None:
         body = self._export_one(_person("Juan"))

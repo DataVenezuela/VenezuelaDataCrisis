@@ -649,8 +649,8 @@ upsert directo a Supabase via PostgREST.
 Responsabilidades del exporter:
 - Construir el payload del aporte usando los contratos de
   `scrapers/dedup/specs.py`: `entity_type`, `external_id`, `dedup_hash`,
-  `dedup_version`, `block_keys`, `content_hash`, `source_id` y `raw_json`
-  (el record de negocio sin claves internas con prefijo `_`). Keys en
+  `dedup_version`, `block_keys`, `content_hash`, `source_id`, `artifact_id` y
+  `raw_json` (el record de negocio sin claves internas con prefijo `_`). Keys en
   snake_case. El exporter resuelve `source_id` (uuid) a partir del slug de la
   fuente: `source_slug` no viaja al POST. Además emite algunas claves no
   canónicas (`run_id`, `scraper_id`, `source_url`, `parser_version`) que hoy
@@ -863,6 +863,17 @@ mapea `full_name`, `cedula_hmac`, `cedula_masked`, `identity_kind`,
 `pii_provenance`, `status`, `trust_tier`, `last_known_location`, `age_range`,
 etc., a columnas reales (ver `docs/schema.md`). No hay merge ni pérdida: las
 tablas tipadas son una vista 1:1 de `aportes` (ambas capas son silver).
+
+El materializer corre como **primera etapa del cron de consolidación**
+(`consolidate.yml`), antes de la generación de aristas (es independiente de ella,
+solo comparte la cadencia de 20 min). El upsert usa `resolution=ignore-duplicates`
+(ON CONFLICT DO NOTHING) sobre la PK compartida: re-correr no duplica ni reescribe
+filas ya proyectadas. Sin las variables `SUPABASE_*` el materializer entra en
+dry-run silencioso (no toca la red). Limitación conocida (follow-up): un aporte
+con `source_record_id` estable que se re-scrapea con contenido nuevo actualiza su
+`raw_json` in situ (mismo `id`), pero su fila tipada no se re-proyecta hasta que
+un paso gated por `content_hash` lo habilite; los aportes sin `source_record_id`
+no sufren esto (contenido nuevo produce un `aporte.id` nuevo, que sí se proyecta).
 
 ### 5.2 Consolidation job: aristas de candidatos (edges)
 
