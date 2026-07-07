@@ -6,7 +6,8 @@ Tests del ProvenanceExporter (Bronze: scrape_runs + raw_artifacts), 100% offline
 Ningun test hace red real: el httpx.Client se construye con un
 ``_RecordingTransport`` (subclase de httpx.BaseTransport) inyectado via el
 parametro ``client`` del constructor. El transport responde a
-/rest/v1/scrape_runs, /rest/v1/raw_artifacts y /rest/v1/sources.
+/rest/v1/scrape_runs y /rest/v1/raw_artifacts (start_run recibe el source_id
+UUID ya resuelto, sin GET a /rest/v1/sources).
 
 El invariante de seguridad mas importante (issue #256 / ADR 0008):
 ``raw_artifacts.raw_text`` es el UNICO PII en claro en reposo del sistema. El
@@ -23,7 +24,7 @@ from unittest.mock import patch
 
 import httpx
 
-from scrapers.exporters.provenance_exporter import ProvenanceExporter
+from scrapers.exporters.provenance_exporter import _MAX_POST_RETRIES, ProvenanceExporter
 from scrapers.exporters.staging_exporter import StagingConfig
 
 _SOURCE_UUID = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
@@ -53,8 +54,6 @@ class _RecordingTransport(httpx.BaseTransport):
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
-        if path == "/rest/v1/sources":
-            return httpx.Response(200, json=[{"id": _SOURCE_UUID}])
         if path == "/rest/v1/scrape_runs":
             if request.method == "PATCH":
                 self.run_patches.append((str(request.url), json.loads(request.content)))
@@ -107,44 +106,41 @@ def _page(
 
 
 class TestStartRun:
-    def test_posts_resolved_source_id(self) -> None:
+    def test_posts_source_id_directly(self) -> None:
+        # source_id ya viene resuelto (source.id = UUID de sources): start_run lo
+        # POSTea tal cual a scrape_runs, sin un GET slug -> id previo.
         t = _RecordingTransport()
-        _exporter(t).start_run("demo")
+        _exporter(t).start_run(_SOURCE_UUID)
         assert t.run_posts
         assert t.run_posts[0]["source_id"] == _SOURCE_UUID
 
     def test_returns_run_id_from_representation(self) -> None:
         t = _RecordingTransport()
-        assert _exporter(t).start_run("demo") == "run-1"
+        assert _exporter(t).start_run(_SOURCE_UUID) == "run-1"
 
     def test_uses_return_representation(self) -> None:
         captured: dict[str, Any] = {}
 
         class _T(httpx.BaseTransport):
             def handle_request(self, request: httpx.Request) -> httpx.Response:
-                if request.url.path == "/rest/v1/sources":
-                    return httpx.Response(200, json=[{"id": _SOURCE_UUID}])
                 if request.url.path == "/rest/v1/scrape_runs":
                     captured["prefer"] = request.headers.get("prefer", "")
                     return httpx.Response(201, json=[{"run_id": "run-x"}])
                 return httpx.Response(404)
 
-        _exporter(_T()).start_run("demo")
+        _exporter(_T()).start_run(_SOURCE_UUID)
         assert "return=representation" in captured["prefer"]
 
-    def test_returns_none_when_source_unresolved(self) -> None:
-        class _T(httpx.BaseTransport):
-            def handle_request(self, request: httpx.Request) -> httpx.Response:
-                if request.url.path == "/rest/v1/sources":
-                    return httpx.Response(200, json=[])
-                return httpx.Response(404)
-
-        assert _exporter(_T()).start_run("desconocida") is None
+    def test_returns_none_on_scrape_run_insert_error(self) -> None:
+        # source_id inexistente / FK violation: el INSERT a scrape_runs falla (400)
+        # y start_run degrada fail-closed (None), sin run_id no hay artifact ni aporte.
+        t = _RecordingTransport(runs_status=400)
+        assert _exporter(t).start_run(_SOURCE_UUID) is None
 
     def test_returns_none_on_persistent_500(self) -> None:
         t = _RecordingTransport(runs_status=500)
         with patch("scrapers.exporters.provenance_exporter.time.sleep", lambda *_: None):
-            assert _exporter(t).start_run("demo") is None
+            assert _exporter(t).start_run(_SOURCE_UUID) is None
 
     def test_retries_transient_then_succeeds(self) -> None:
         class _Flaky(httpx.BaseTransport):
@@ -152,8 +148,6 @@ class TestStartRun:
                 self.calls = 0
 
             def handle_request(self, request: httpx.Request) -> httpx.Response:
-                if request.url.path == "/rest/v1/sources":
-                    return httpx.Response(200, json=[{"id": _SOURCE_UUID}])
                 if request.url.path == "/rest/v1/scrape_runs":
                     self.calls += 1
                     if self.calls == 1:
@@ -163,7 +157,7 @@ class TestStartRun:
 
         t = _Flaky()
         with patch("scrapers.exporters.provenance_exporter.time.sleep", lambda *_: None):
-            assert _exporter(t).start_run("demo") == "run-ok"
+            assert _exporter(t).start_run(_SOURCE_UUID) == "run-ok"
         assert t.calls == 2
 
 
@@ -240,6 +234,41 @@ class TestRecordArtifact:
         t = _RecordingTransport(artifacts_status=500)
         with patch("scrapers.exporters.provenance_exporter.time.sleep", lambda *_: None):
             assert _exporter(t).record_artifact("run-1", _page()) is None
+
+    def test_read_timeout_not_retried(self) -> None:
+        # Un ReadTimeout puede llegar DESPUES de que el INSERT ya commiteo en el
+        # servidor: reintentar duplicaria la fila append-only (y su raw_text = PII
+        # en claro). raw_artifacts no tiene on_conflict, asi que un reintento ciego
+        # crea una segunda fila. Solo se reintentan errores pre-envio; ante un error
+        # de transporte post-envio se falla cerrado (None) sin reintentar.
+        class _ReadTimeout(httpx.BaseTransport):
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def handle_request(self, request: httpx.Request) -> httpx.Response:
+                self.calls += 1
+                raise httpx.ReadTimeout("simulado", request=request)
+
+        t = _ReadTimeout()
+        with patch("scrapers.exporters.provenance_exporter.time.sleep", lambda *_: None):
+            assert _exporter(t).record_artifact("run-1", _page()) is None
+        assert t.calls == 1  # un solo intento => no puede duplicar la fila
+
+    def test_connect_error_is_retried(self) -> None:
+        # Un ConnectError ocurre ANTES de enviar el request (no pudo haber commit),
+        # asi que reintentar es seguro: se agota el presupuesto de reintentos.
+        class _ConnErr(httpx.BaseTransport):
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def handle_request(self, request: httpx.Request) -> httpx.Response:
+                self.calls += 1
+                raise httpx.ConnectError("simulado", request=request)
+
+        t = _ConnErr()
+        with patch("scrapers.exporters.provenance_exporter.time.sleep", lambda *_: None):
+            assert _exporter(t).record_artifact("run-1", _page()) is None
+        assert t.calls == _MAX_POST_RETRIES  # pre-envio: reintentable
 
 
 # --- PII: raw_text NUNCA se loguea ------------------------------------------

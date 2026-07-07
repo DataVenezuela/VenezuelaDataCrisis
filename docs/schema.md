@@ -13,10 +13,28 @@ tal cual (ver WARNING).
 ```sql
 -- WARNING: Authoritative schema mirror, not meant to be run as-is.
 -- Table order and some constraints may not be valid for execution.
+-- ADR 0009: la definicion operativa de la fuente vive aca (no en el repo). El
+-- scraper resuelve cada fuente por source_id (UUID); el slug se elimino. El
+-- watermark de ingesta incremental vive en watermark_at (retiro source_watermarks).
 CREATE TABLE public.sources (
   source_id uuid NOT NULL DEFAULT gen_random_uuid(),
-  slug text NOT NULL UNIQUE,
   display_name text NOT NULL,
+  url text,
+  source_type text,
+  required_keywords text[] NOT NULL DEFAULT '{}',
+  refresh_minutes integer,
+  allowed_domains text[],
+  page_size integer,
+  cursor_field text,
+  full_scan boolean NOT NULL DEFAULT false,
+  rate_limit_per_minute integer,
+  timeout_seconds real,
+  max_retries integer,
+  probe_limit integer,
+  max_concurrent_pages integer,
+  max_concurrent_posts integer,
+  bulk_size integer,
+  watermark_at timestamp with time zone,
   governed_tier USER-DEFINED NOT NULL DEFAULT 'D'::trust_tier,
   tier_set_by uuid,
   tier_set_at timestamp with time zone,

@@ -12,7 +12,8 @@ from typing import Any
 import pytest
 
 _DEMO_CONFIG = Path("scrapers/config/sources.demo.yaml")
-_STARTER_CONFIG = Path("scrapers/config/sources.venezuela.starter.yaml")
+# Synthetic full-format fixture (no real source identity, ADR 0009).
+_SAMPLE_CONFIG = Path("scrapers/tests/fixtures/sources.sample.yaml")
 
 
 def _run_cli(*args: str) -> subprocess.CompletedProcess[str]:
@@ -40,16 +41,17 @@ class TestListEnabled:
         assert isinstance(ids, list)
         assert "demo_manual_synthetic" in ids
 
-    def test_starter_config_lists_enabled_only(self) -> None:
-        result = _run_cli("list-enabled", "--config", str(_STARTER_CONFIG), "--json")
+    def test_sample_config_lists_enabled_only(self) -> None:
+        result = _run_cli("list-enabled", "--config", str(_SAMPLE_CONFIG), "--json")
         assert result.returncode == 0
         ids = json.loads(result.stdout)
         # Only enabled sources appear
         for sid in ids:
             assert isinstance(sid, str)
+        assert "sample_enabled_api" in ids
         # Disabled sources must not appear
-        assert "gdacs_rss" not in ids
-        assert "copernicus_activation_page" not in ids
+        assert "sample_disabled_rss" not in ids
+        assert "sample_disabled_html" not in ids
 
 
 # ── ingest ────────────────────────────────────────────────────────
@@ -195,15 +197,33 @@ sources:
 
 
 class TestConsolidate:
+    # Anclado a un fixture full-format propio (_SAMPLE_CONFIG) en vez del config
+    # por defecto: el materializer solo necesita project.event_id, y una entrada
+    # completa evita que un futuro cambio a formato thin haga que load_sources
+    # lance ValueError (SUPABASE_* ausentes en CI), que _cmd_materialize traga
+    # antes de imprimir "Materializer:", rompiendo el test sin mensaje obvio.
     def test_consolidate_without_data(self, tmp_path: Path) -> None:
-        result = _run_cli("consolidate", "--output-dir", str(tmp_path))
+        result = _run_cli(
+            "consolidate", "--config", str(_SAMPLE_CONFIG), "--output-dir", str(tmp_path)
+        )
         assert result.returncode == 0
         assert "No hay" in result.stdout
 
     def test_consolidate_with_empty_events(self, tmp_path: Path) -> None:
         (tmp_path / "events.jsonl").write_text("")
-        result = _run_cli("consolidate", "--output-dir", str(tmp_path))
+        result = _run_cli(
+            "consolidate", "--config", str(_SAMPLE_CONFIG), "--output-dir", str(tmp_path)
+        )
         assert result.returncode == 0
+
+    def test_materializer_runs_as_first_stage(self, tmp_path: Path) -> None:
+        # El materializer (etapa 1) corre siempre, antes de la generacion de
+        # aristas; en dry-run (sin SUPABASE_*) es un no-op silencioso.
+        result = _run_cli(
+            "consolidate", "--config", str(_SAMPLE_CONFIG), "--output-dir", str(tmp_path)
+        )
+        assert result.returncode == 0
+        assert "Materializer:" in result.stdout
 
     def test_materializer_runs_as_first_stage(self, tmp_path: Path) -> None:
         # El materializer (etapa 1) corre siempre, antes de la generacion de

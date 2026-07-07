@@ -99,6 +99,7 @@ def _error_summary(message: str) -> dict[str, Any]:
     """Summary de salida temprana con las keys nuevas de staging y cuarentena."""
     return {
         "sources_processed": 0,
+        "sources_failed_closed": 0,
         "staging_sent": 0,
         "staging_duplicates": 0,
         "staging_errors": 0,
@@ -772,6 +773,10 @@ def _run_source(
     entities_seen = 0
     artifacts_written = 0
     run_id: str | None = None
+    # True si la fuente no exporto por un fallo de la capa Bronze (start_run o
+    # record_artifact): se propaga en el ExportResult para contarla aparte de las
+    # fuentes procesadas-ok y no enmascarar un apagon de Bronze (#256).
+    bronze_failed = False
 
     try:
         watermark_at = exporter.get_watermark(source.id)
@@ -786,6 +791,7 @@ def _run_source(
             )
             log.error("[%s] %s", source.id, msg)
             source_errors.append(msg)
+            bronze_failed = True
 
         for page in _fetch_pages(adapter, source, watermark_at) if run_id is not None else ():
             pages_seen += 1
@@ -801,6 +807,7 @@ def _run_source(
                 msg = f"no se pudo registrar raw_artifact (pagina {page.get('page')})"
                 log.warning("[%s] %s", source.id, msg)
                 source_errors.append(msg)
+                bronze_failed = True
                 continue
             artifacts_written += 1
 
@@ -840,7 +847,7 @@ def _run_source(
                     rec["_artifact_id"] = artifact_id
 
                 batch_result = exporter.export_batch(
-                    records, source_slug=source.id, batch_size=source.bulk_size,
+                    records, source_id=source.id, batch_size=source.bulk_size,
                     max_concurrent_posts=source.max_concurrent_posts,
                 )
                 combined.sent += batch_result.sent
@@ -873,7 +880,7 @@ def _run_source(
 
     if entities_seen == 0:
         all_errors.extend([f"[{source.id}] {e}" for e in source_errors])
-        return ExportResult(errors=list(source_errors))
+        return ExportResult(errors=list(source_errors), failed_closed=bronze_failed)
 
     # Watermark una sola vez al final: avanza si sent>0 y sin errores pre-export
     wm_err = exporter.advance_watermark(
@@ -890,6 +897,7 @@ def _run_source(
     )
     for err in combined.errors:
         log.warning("[%s] %s", source.id, err)
+    combined.failed_closed = bronze_failed
     return combined
 
 
@@ -996,6 +1004,7 @@ def run_pipeline(
     quarantined = 0
     quarantine_errors = 0
     sources_processed = 0
+    sources_failed_closed = 0
     quarantine_batch: list[QuarantineRecord] = []
     all_errors: list[str] = []
 
@@ -1021,6 +1030,7 @@ def run_pipeline(
                 staging_duplicates += result.duplicates
                 staging_errors += len(result.errors)
                 sources_processed += int(ok)
+                sources_failed_closed += int(result.failed_closed)
                 quarantine_batch.extend(thread_quarantine_batch)
         else:
             with ThreadPoolExecutor(max_workers=max_workers) as pool:
@@ -1035,6 +1045,7 @@ def run_pipeline(
                     staging_duplicates += result.duplicates
                     staging_errors += len(result.errors)
                     sources_processed += int(ok)
+                    sources_failed_closed += int(result.failed_closed)
                     quarantine_batch.extend(thread_quarantine_batch)
 
 
@@ -1063,6 +1074,7 @@ def run_pipeline(
 
     summary = {
         "sources_processed": sources_processed,
+        "sources_failed_closed": sources_failed_closed,
         "staging_sent": staging_sent,
         "staging_duplicates": staging_duplicates,
         "staging_errors": staging_errors,

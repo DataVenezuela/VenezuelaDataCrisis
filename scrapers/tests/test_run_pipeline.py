@@ -56,11 +56,21 @@ _SUPABASE_ENV = {
 }
 
 
+def _source_id_from_url(url: httpx.URL) -> str | None:
+    """Extrae X de un filtro PostgREST ``source_id=eq.X`` en la query."""
+    value = url.params.get("source_id")
+    if value and value.startswith("eq."):
+        return value[len("eq.") :]
+    return None
+
+
 class _StagingTransport(httpx.BaseTransport):
     """Intercepta POSTs a /rest/v1/aportes y el watermark via PostgREST.
 
     PostgREST batch devuelve 201 con body vacio (return=minimal). No hay
-    409 porque resolution=merge-duplicates absorbe duplicados.
+    409 porque resolution=merge-duplicates absorbe duplicados. El watermark vive
+    en sources.watermark_at: se lee con GET /sources?source_id=eq.X&select=watermark_at
+    y se escribe con PATCH /sources?source_id=eq.X {"watermark_at": ...}.
     """
 
     def __init__(self, aportes_status: int = 201) -> None:
@@ -77,14 +87,16 @@ class _StagingTransport(httpx.BaseTransport):
             else:
                 self.batch_posts.append([body])
             return httpx.Response(self.aportes_status, json={})
-        if path == "/rest/v1/source_watermarks":
-            if request.method == "GET":
-                return httpx.Response(200, json=[])
-            body = json.loads(request.content)
-            self.watermark_posts.append(body)
-            return httpx.Response(200, json={})
         if path == "/rest/v1/sources":
-            return httpx.Response(200, json=[{"id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"}])
+            if request.method == "GET":
+                return httpx.Response(200, json=[{"watermark_at": None}])
+            if request.method == "PATCH":
+                body = json.loads(request.content)
+                self.watermark_posts.append(
+                    {"source_id": _source_id_from_url(request.url), **body}
+                )
+                return httpx.Response(200, json=[body])
+            return httpx.Response(404)
         return httpx.Response(404)
 
 
@@ -174,8 +186,6 @@ class _ProvenanceTransport(httpx.BaseTransport):
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
-        if path == "/rest/v1/sources":
-            return httpx.Response(200, json=[{"id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"}])
         if path == "/rest/v1/scrape_runs":
             if request.method == "PATCH":
                 return httpx.Response(200, json=[])
@@ -707,7 +717,7 @@ class TestWatermarkEndToEnd:
 
         class _PersistedWatermarkTransport(_StagingTransport):
             def handle_request(self, request: httpx.Request) -> httpx.Response:
-                if request.url.path == "/rest/v1/source_watermarks" and request.method == "GET":
+                if request.url.path == "/rest/v1/sources" and request.method == "GET":
                     return httpx.Response(200, json=[{"watermark_at": "2026-06-01T00:00:00Z"}])
                 return super().handle_request(request)
 
@@ -752,8 +762,8 @@ sources:
             "scrapers.pipelines.run_pipeline._get_parser", side_effect=lambda *_: _mock_parser()
         ):
             run_pipeline(config_path=cfg, output_dir=tmp_path / "out")
-        slugs = {p["slug"] for p in transport.watermark_posts}
-        assert slugs == {"fuente_a", "fuente_b"}
+        source_ids = {p["source_id"] for p in transport.watermark_posts}
+        assert source_ids == {"fuente_a", "fuente_b"}
 
     def test_full_scan_omits_updated_after(self, tmp_path: Path) -> None:
         """full_scan=True → updated_after no llega al adapter."""
@@ -879,8 +889,8 @@ sources:
         assert summary["sources_processed"] == 5
         assert summary["staging_sent"] == 10  # 2 personas x 5 fuentes
         assert summary["errors"] == []
-        slugs = {p["slug"] for p in transport.watermark_posts}
-        assert slugs == {f"fuente_{i}" for i in range(5)}
+        source_ids = {p["source_id"] for p in transport.watermark_posts}
+        assert source_ids == {f"fuente_{i}" for i in range(5)}
 
     def test_max_workers_one_is_sequential_default(self, tmp_path: Path) -> None:
         cfg = self._make_n_sources_config(tmp_path, 5)
@@ -1362,7 +1372,7 @@ class _WatermarkTransport(_StagingTransport):
         self._initial_watermark = watermark_at
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/rest/v1/source_watermarks" and request.method == "GET":
+        if request.url.path == "/rest/v1/sources" and request.method == "GET":
             return httpx.Response(200, json=[{"watermark_at": self._initial_watermark}])
         return super().handle_request(request)
 
@@ -1638,12 +1648,13 @@ class TestBronzeProvenance:
         assert prov.artifact_posts[0]["body_hash"] == prov.artifact_posts[1]["body_hash"]
         assert all("on_conflict" not in q for q in prov.artifact_queries)
 
-    def test_scrape_run_posts_resolved_source_id(
+    def test_scrape_run_posts_source_id_directly(
         self, tmp_path: Path, demo_config: Path
     ) -> None:
+        # source.id (config) ES el source_id que va a scrape_runs, sin resolver slug.
         prov = _ProvenanceTransport()
         self._run(tmp_path, demo_config, prov)
-        assert prov.run_posts[0]["source_id"] == "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        assert prov.run_posts[0]["source_id"] == "encuentralos_tecnosoft"
 
     def test_provenance_failure_blocks_export_and_watermark(
         self, tmp_path: Path, demo_config: Path
@@ -1667,6 +1678,51 @@ class TestBronzeProvenance:
         assert transport.watermark_posts == []  # watermark retenido
         assert summary["staging_sent"] == 0
         assert summary["staging_errors"] >= 1
+        # La fuente fallo CERRADO: se refleja en el contador dedicado, no se
+        # esconde como una fuente procesada-ok con 0 enviados (#256 observabilidad).
+        assert summary["sources_failed_closed"] == 1
+
+    def test_start_run_failure_marks_source_failed_closed(
+        self, tmp_path: Path, demo_config: Path
+    ) -> None:
+        # start_run falla (500 persistente) => sin run_id => la fuente falla cerrado:
+        # no se fetchea ninguna pagina, no se exporta y el watermark no avanza. La
+        # fuente corre a fin sin excepcion (sigue contando como procesada), pero un
+        # apagon total de Bronze no debe quedar enmascarado detras de
+        # sources_processed == len(enabled): se cuenta aparte en sources_failed_closed.
+        prov = _ProvenanceTransport(runs_status=500)
+        transport = _StagingTransport()
+        with patch.dict(os.environ, _SUPABASE_ENV, clear=False), _patch_exporter(
+            transport
+        ), _patch_provenance_exporter(prov), patch(
+            "scrapers.exporters.provenance_exporter.time.sleep", lambda *_: None
+        ), patch(
+            "scrapers.pipelines.run_pipeline._get_adapter", return_value=_mock_adapter()
+        ), patch(
+            "scrapers.pipelines.run_pipeline._get_parser", return_value=_mock_parser()
+        ):
+            summary = run_pipeline(config_path=demo_config, output_dir=tmp_path / "out")
+        assert summary["sources_failed_closed"] == 1
+        assert summary["sources_processed"] == 1  # corre a fin sin excepcion
+        assert transport.batch_posts == []
+        assert transport.watermark_posts == []
+        assert summary["staging_sent"] == 0
+
+    def test_healthy_run_reports_zero_failed_closed(
+        self, tmp_path: Path, demo_config: Path
+    ) -> None:
+        prov = _ProvenanceTransport()
+        transport = _StagingTransport()
+        with patch.dict(os.environ, _SUPABASE_ENV, clear=False), _patch_exporter(
+            transport
+        ), _patch_provenance_exporter(prov), patch(
+            "scrapers.pipelines.run_pipeline._get_adapter", return_value=_mock_adapter()
+        ), patch(
+            "scrapers.pipelines.run_pipeline._get_parser", return_value=_mock_parser()
+        ):
+            summary = run_pipeline(config_path=demo_config, output_dir=tmp_path / "out")
+        assert summary["sources_failed_closed"] == 0
+        assert summary["sources_processed"] == 1
 
     def test_multipage_artifact_failure_retains_whole_source_watermark(
         self, tmp_path: Path, demo_config: Path
