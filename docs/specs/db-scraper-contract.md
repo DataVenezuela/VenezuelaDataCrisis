@@ -173,23 +173,34 @@ de este documento.
 
 ## 6. `external_id` y `dedup_hash` por tipo de entidad
 
-- **`Event`** y **`AcopioCenter`**: `external_id` y `dedup_hash` son el mismo
-  valor, un fingerprint determinístico (`specs.event_dedup_key` /
-  `specs.acopio_dedup_key`, versión `FINGERPRINT_VERSION`).
-- **`Person`**:
-  - Si el record trae `deterministic_id`, se
-    usa ese valor como `external_id` (versión `PERSON_ID_VERSION =
-    "person-detid-v1"`).
-  - Si no, y hay `_source_record_id`, `external_id` es
-    `sha256("person|<source_slug>|<source_record_id>")`.
-  - Si tampoco hay `_source_record_id`, se cae a un hash del contenido
-    limpio combinado con `event_id` y `cedula_hmac` (o solo `event_id` +
-    hash de contenido si no hay cédula).
-  - `dedup_hash` viene de `specs.dedup_key(rec, "Person")`; si no hay
-    `deterministic_id`, el código la **omite** (no se envía `null`). Ojo: el
-    `aportes` canónico marca `dedup_hash` como `NOT NULL` (`docs/schema.md`), así
-    que esta omisión es un hueco código-vs-canon (ver §4.3), no un caso soportado
-    por el esquema.
+La identidad del aporte es el **registro-fuente**, nunca su contenido ni su
+identidad real (`.agents/CONTEXT.md`: "silver nunca colapsa"). `external_id` se
+computa igual para **todos** los tipos de entidad (`_aporte_external_id`):
+
+- Si el record trae `_source_record_id` (id de registro nativo de la fuente),
+  `external_id` es `sha256("<entity>|<source_slug>|<source_record_id>")`.
+- Si no, `external_id` es `sha256("<entity>|<source_slug>|<content_hash>")`,
+  donde `content_hash` es el hash del `raw_json` limpio.
+
+Donde `<entity>` es el tipo en minúsculas (`person`, `event`, `acopiocenter`).
+Dos registros DISTINTOS de una misma fuente que compartan cédula, fingerprint o
+nombre producen así **dos** aportes, no uno: la deduplicación vive en los edges
+(`dedup_candidates`) y en gold, jamás en la ingesta a silver.
+
+`dedup_hash` sigue siendo la señal de linkeo por tipo (`specs.dedup_key`):
+
+- **`Event`** y **`AcopioCenter`**: fingerprint determinístico
+  (`specs.event_dedup_key` / `specs.acopio_dedup_key`, versión
+  `FINGERPRINT_VERSION`). Ya no coincide con `external_id`.
+- **`Person`**: el `deterministic_id` (versión `PERSON_ID_VERSION =
+  "person-detid-v1"`); si no hay `deterministic_id`, el código **omite**
+  `dedup_hash` (no se envía `null`). Ojo: el `aportes` canónico marca
+  `dedup_hash` como `NOT NULL` (`docs/schema.md`), así que esta omisión es un
+  hueco código-vs-canon (ver §4.3), no un caso soportado por el esquema.
+
+Las señales de dedup (`deterministic_id`, cédula, fonética, fingerprint) siguen
+viajando por `block_keys` y `raw_json`: alimentan el linkeo en gold, ya no la
+identidad del aporte.
 
 ---
 
