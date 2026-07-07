@@ -14,6 +14,7 @@ procedencia de corrida y la URL viven en ``raw_artifacts``).
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import httpx
@@ -31,8 +32,9 @@ _APORTES_COLUMNS = {
     "raw_json", "source_record_id", "normalizer_version",
 }
 
-# Columnas de public.source_watermarks
-_WATERMARK_COLUMNS = {"slug", "watermark_at"}
+# El watermark vive en public.sources (columna watermark_at), keyeado por
+# source_id (el filtro va en la URL, no en el body). ADR 0009.
+_WATERMARK_BODY_COLUMNS = {"watermark_at"}
 
 # Columnas que produce _build_payload (obligatorias + opcionales)
 _PAYLOAD_REQUIRED = {"entity_type", "external_id", "dedup_version", "block_keys",
@@ -62,13 +64,11 @@ def _exporter_for_payload() -> StagingExporter:
         publishable_key="k",
         ingest_jwt="jwt",
     )
+    # _build_payload ya no hace ningun GET (source_id llega resuelto); el
+    # transport nunca se invoca, se deja trivial.
     client = httpx.Client(
         base_url="https://project.supabase.co",
-        transport=httpx.MockTransport(lambda r: (
-            httpx.Response(200, json=[{"id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"}])
-            if r.url.path == "/rest/v1/sources"
-            else httpx.Response(404)
-        )),
+        transport=httpx.MockTransport(lambda r: httpx.Response(404)),
     )
     return StagingExporter(cfg, client=client, run_id="run-test")
 
@@ -122,12 +122,39 @@ class TestPayloadContract:
 
 
 class TestWatermarkContract:
-    """Valida columnas del watermark contra el schema de source_watermarks."""
+    """El watermark vive en sources.watermark_at, keyeado por source_id (ADR 0009)."""
 
-    def test_watermark_path_targets_source_watermarks(self) -> None:
-        """La PK de source_watermarks es slug (no source_slug)."""
-        from scrapers.exporters.staging_exporter import _WATERMARKS_PATH as wp
-        assert "source_watermarks" in wp
+    def test_watermark_targets_sources_table(self) -> None:
+        from scrapers.exporters.staging_exporter import _SOURCES_PATH
+        assert _SOURCES_PATH == "/rest/v1/sources"
+
+    def test_watermark_write_is_patch_with_only_watermark_at(self) -> None:
+        """El PATCH del watermark filtra por source_id (URL) y el body solo trae
+        watermark_at: ni slug ni source_id viajan en el cuerpo."""
+        captured: dict[str, Any] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/rest/v1/aportes":
+                return httpx.Response(201, json={})
+            if request.url.path == "/rest/v1/sources" and request.method == "PATCH":
+                captured["source_id"] = request.url.params.get("source_id")
+                captured["body"] = json.loads(request.content)
+                # return=representation: fila actualizada (array no vacio).
+                return httpx.Response(200, json=[captured["body"]])
+            return httpx.Response(200, json=[{"watermark_at": None}])
+
+        cfg = StagingConfig(
+            supabase_url="https://project.supabase.co", publishable_key="k", ingest_jwt="jwt"
+        )
+        client = httpx.Client(
+            base_url="https://project.supabase.co", transport=httpx.MockTransport(handler)
+        )
+        exp = StagingExporter(cfg, client=client, run_id="r")
+        exp.export_source(
+            [_person()], source_id="fuente-x", source_fetched_ats=["2026-06-24T16:00:00Z"]
+        )
+        assert captured["source_id"] == "eq.fuente-x"
+        assert set(captured["body"]) == _WATERMARK_BODY_COLUMNS
 
 
 class TestOnConflict:

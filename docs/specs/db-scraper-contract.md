@@ -39,16 +39,13 @@ No cubre:
 
 Antes de que un scraper pueda exportar registros a staging:
 
-1. Debe existir una fila en `sources` cuyo `slug` sea igual a `source.id` del
-   YAML de la fuente (`docs/source_config.md`). El exporter la resuelve con:
-
-   ```text
-   GET /rest/v1/sources?slug=eq.<slug>&select=source_id
-   ```
-
-   Resultado cacheado en memoria por corrida (`_resolve_source_id`). Si no
-   existe la fila, `_build_payload` lanza `ValueError` y el registro no se
-   envía.
+1. Debe existir una fila en `sources` cuyo `source_id` (UUID, PK) sea igual a
+   `source.id` del YAML de la fuente. Desde ADR 0009, `source.id` **ES** ese UUID:
+   el config lo trae resuelto (formato thin) o el loader lo tomó tal cual, así que
+   el exporter ya **no** hace un `GET` de resolución slug -> id (se eliminó
+   `_resolve_source_id` y el concepto de `slug`). El `source_id` va directo al
+   payload de `aportes` y de `scrape_runs`. Si el UUID no existe en `sources`, el
+   `INSERT` a `scrape_runs` falla (FK) y la fuente degrada fail-closed.
 
 2. Deben estar seteadas las tres variables de entorno `SUPABASE_URL`,
    `SUPABASE_PUBLISHABLE_KEY`, `SUPABASE_INGEST_JWT` (`StagingConfig.from_env`):
@@ -60,16 +57,18 @@ Antes de que un scraper pueda exportar registros a staging:
      (nunca se envían credenciales/PII en claro por http).
 
 3. El JWT (`SUPABASE_INGEST_JWT`) debe estar firmado para el rol
-   `scraper_ingest`, con permisos de `SELECT` sobre `sources` y
-   `source_watermarks`, e `INSERT`/`UPDATE` (upsert) sobre `aportes` y
-   `source_watermarks`. Desde el cutover Bronze (#256) también necesita `INSERT`
-   sobre `scrape_runs` y `raw_artifacts` (con `RETURNING`/`SELECT` para leer
-   `run_id`/`artifact_id`) y `UPDATE` sobre `scrape_runs` (cierre de corrida). Un
-   JWT sin estos grants produce `401`/`403`: en el path de watermark
-   `get_watermark`/`_set_watermark` lo propagan como `PermissionError`; en el path
-   de Bronze `start_run`/`record_artifact` lo loguean a `ERROR` (grant faltante,
-   distinto de un fallo transitorio) y devuelven `None`, lo que hace fallar cerrado
-   la fuente (no se exporta ningún aporte sin su `raw_artifact`).
+   `scraper_ingest`, con permisos de `SELECT` sobre `sources` (para leer la
+   definición de la fuente y su `watermark_at`) e `INSERT` (upsert) sobre `aportes`,
+   más `UPDATE` sobre `sources` (avance del `watermark_at`; desde ADR 0009 el
+   watermark vive en `sources`, se retiró `source_watermarks`). Desde el cutover
+   Bronze (#256) también necesita `INSERT` sobre `scrape_runs` y `raw_artifacts`
+   (con `RETURNING`/`SELECT` para leer `run_id`/`artifact_id`) y `UPDATE` sobre
+   `scrape_runs` (cierre de corrida). Un JWT sin estos grants produce `401`/`403`:
+   en el path de watermark `get_watermark`/`_set_watermark` lo propagan como
+   `PermissionError`; en el path de Bronze `start_run`/`record_artifact` lo loguean
+   a `ERROR` (grant faltante, distinto de un fallo transitorio) y devuelven `None`,
+   lo que hace fallar cerrado la fuente (no se exporta ningún aporte sin su
+   `raw_artifact`).
 
 Nada de esto lo garantiza el scraper: son condiciones de despliegue/config
 que el equipo de DB/API debe dejar satisfechas para que el contrato de este
@@ -95,19 +94,18 @@ Rutas usadas:
 
 | Método | Ruta | Uso |
 |---|---|---|
-| `GET` | `/rest/v1/sources?slug=eq.<slug>&select=id` | Resolver `source_slug → source_id` |
-| `GET` | `/rest/v1/source_watermarks?slug=eq.<slug>&select=watermark_at` | Leer el watermark actual de la fuente |
+| `GET` | `/rest/v1/sources?source_id=in.(<uuids>)&select=...` | Loader (thin): resolver la definición de las fuentes por UUID |
+| `GET` | `/rest/v1/sources?source_id=eq.<uuid>&select=watermark_at` | Leer el watermark actual de la fuente |
 | `POST` | `/rest/v1/scrape_runs` (Bronze, #256) | Abrir la corrida de la fuente (`Prefer: return=representation` para leer `run_id`) |
 | `PATCH` | `/rest/v1/scrape_runs?run_id=eq.<run_id>` (Bronze, #256) | Cerrar la corrida (`finished_at` + `stats`) |
 | `POST` | `/rest/v1/raw_artifacts` (Bronze, #256) | Registrar la página cruda append-only (`Prefer: return=representation` para leer `artifact_id`) |
 | `POST` | `/rest/v1/aportes?on_conflict=source_id,external_id` | Upsert de registros a staging |
-| `POST` | `/rest/v1/source_watermarks?on_conflict=slug` | Upsert del watermark tras exportar |
+| `PATCH` | `/rest/v1/sources?source_id=eq.<uuid>` | Avanzar el `watermark_at` de la fuente (`Prefer: return=minimal`) tras exportar |
 
-> **Nota (`select=id` vs `source_id`):** el exporter resuelve la fuente con
-> `select=id` y lee `rows[0]["id"]` (así lo implementan `StagingExporter` y
-> `ProvenanceExporter`). `docs/schema.md` nombra esa PK `source_id`. Si la Data API
-> real expone `source_id` en vez de `id`, hay que alinear ambos writers a la vez
-> (usan el mismo patrón); es una discrepancia preexistente, no introducida por #256.
+> **ADR 0009:** ya no hay un `GET` de resolución slug -> id. `source.id` es el
+> `source_id` (UUID) y viaja directo al payload. El watermark vive en
+> `sources.watermark_at` (se retiró `source_watermarks`): se lee filtrando por
+> `source_id` y se escribe con un `PATCH` a la fila existente (no un upsert).
 
 Los `POST` llevan `Prefer: resolution=merge-duplicates` (más
 `return=minimal` en el de `aportes`), para que PostgREST resuelva el
@@ -140,15 +138,15 @@ columna del `aportes` canónico:
 | `dedup_version` | sí | `spec.version`, ver §7 | sí |
 | `block_keys` | sí | `scrapers/dedup/specs.py::block_keys` | sí |
 | `content_hash` | sí | sha256 del record limpio (sin claves `_*`), JSON canónico ordenado | sí |
-| `source_id` | sí | resuelto de `sources.slug`, §2 | sí |
+| `source_id` | sí | `source.id` (UUID de `sources`), directo del config, §2 | sí |
 | `artifact_id` | sí | meta-campo `_artifact_id`, stampado por el pipeline tras registrar la página en Bronze (§4.3) | sí, **`NOT NULL`** (FK -> `raw_artifacts`) |
 | `raw_json` | sí | el record limpio (sin claves internas `_*`) | sí |
 | `dedup_hash` | no (el código la omite, ver §6) | omitida si no hay valor (ver §6) | sí, **`NOT NULL`** en canon (ver §4.3) |
 | `source_record_id` | no | omitida si `rec["_source_record_id"]` es `None`/vacío | sí |
 | `normalizer_version` | no | omitida si `rec["_normalizer_version"]` es `None`/vacío | sí |
 
-`source_slug` (string) **nunca** viaja en el payload: la DB espera `source_id`
-(uuid), no el slug legible del YAML.
+El payload lleva `source_id` (uuid). Desde ADR 0009 `source.id` ya es ese UUID (no
+hay slug legible ni resolución previa).
 
 Desde #256 el payload **ya no incluye** `run_id`, `scraper_id`, `source_url` ni
 `parser_version` (ver §4.3): son procedencia de corrida y URL, que ahora viven en
@@ -205,9 +203,10 @@ identidad real (`.agents/CONTEXT.md`: "silver nunca colapsa"). `external_id` se
 computa igual para **todos** los tipos de entidad (`_aporte_external_id`):
 
 - Si el record trae `_source_record_id` (id de registro nativo de la fuente),
-  `external_id` es `sha256("<entity>|<source_slug>|<source_record_id>")`.
-- Si no, `external_id` es `sha256("<entity>|<source_slug>|<content_hash>")`,
-  donde `content_hash` es el hash del `raw_json` limpio.
+  `external_id` es `sha256("<entity>|<source_id>|<source_record_id>")`.
+- Si no, `external_id` es `sha256("<entity>|<source_id>|<content_hash>")`,
+  donde `content_hash` es el hash del `raw_json` limpio y `<source_id>` es el UUID
+  de la fuente (ADR 0009; antes era el slug).
 
 Donde `<entity>` es el tipo en minúsculas (`person`, `event`, `acopiocenter`).
 Dos registros DISTINTOS de una misma fuente que compartan cédula, fingerprint o
@@ -322,8 +321,8 @@ fusión vive solo en gold. Ver `CONTRIBUTING.md` ("Dónde aterriza cada cosa") y
 ## 10. Lo que NO garantiza este contrato
 
 - No garantiza acceso de lectura a las tablas canónicas (`persons`,
-  `events`, `acopio_centers`), solo a `aportes`, `source_watermarks` y
-  `sources`.
+  `events`, `acopio_centers`), solo a `aportes` y `sources` (esta última incluye
+  el `watermark_at` de cada fuente).
 - No garantiza acceso de lectura al schema de producción completo desde el rol
   de ingest. La fuente de verdad del esquema es `docs/schema.md` (mirror completo
   y autoritativo), no una copia paralela en este repo (ver `CONTRIBUTING.md`

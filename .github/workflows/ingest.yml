@@ -7,7 +7,7 @@ on:
     inputs:
       config:
         description: "YAML config path"
-        default: "scrapers/config/sources.venezuela.starter.yaml"
+        default: "scrapers/config/sources.custom.yaml"
 
 concurrency:
   group: ingest
@@ -31,10 +31,12 @@ jobs:
         with:
           python-version: "3.12"
 
+      # El config thin (uuid -> parser) esta versionado: no expone identidad de
+      # fuente (url/name viven en la DB, ADR 0009), solo UUIDs opacos + parser.
       - name: List enabled sources
         id: list
         env:
-          CONFIG: ${{ inputs.config || 'scrapers/config/sources.venezuela.starter.yaml' }}
+          CONFIG: ${{ inputs.config || 'scrapers/config/sources.custom.yaml' }}
         run: |
           python -m pip install pyyaml --quiet
           python - <<'EOF'
@@ -148,7 +150,7 @@ jobs:
           # Las expresiones ${{ }} se inyectan en variables de entorno (NO en el
           # cuerpo del script) para evitar shell injection: un valor malicioso en
           # inputs.config o en matrix.source_id se trataría como dato, no como código.
-          CONFIG: ${{ inputs.config || 'scrapers/config/sources.venezuela.starter.yaml' }}
+          CONFIG: ${{ inputs.config || 'scrapers/config/sources.custom.yaml' }}
           SOURCE_ID: ${{ matrix.source_id }}
         run: |
           python -m scrapers.cli --verbose ingest \
