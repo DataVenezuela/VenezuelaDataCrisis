@@ -39,6 +39,12 @@ jobs:
         env:
           PII_SALT: ${{ secrets.PII_HMAC_SECRET }}
           PII_HMAC_SECRET: ${{ secrets.PII_HMAC_SECRET }}
+          # SUPABASE_* habilitan la etapa 1 (materializer: aportes -> silver
+          # tipado). Sin ellas el materializer entra en dry-run silencioso.
+          SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+          SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
+          SUPABASE_INGEST_JWT: ${{ secrets.SUPABASE_INGEST_JWT }}
         run: |
           python -m scrapers.cli consolidate \
-            --output-dir scrapers/runtime_output
+            --output-dir scrapers/runtime_output \
+            --config scrapers/config/sources.venezuela.starter.yaml
