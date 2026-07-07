@@ -17,9 +17,15 @@ SUPPORTED_TYPES = {
     "x_recent_search",
 }
 SUPPORTED_TRUST_TIERS = {"A", "B", "C", "D"}
-# id se usa como segmento de URL en /api/source-watermarks/{id} (staging_exporter);
+# id se usa como segmento de URL en filtros PostgREST (?source_id=eq.{id});
 # debe ser seguro para una ruta REST sin escapar.
 _SOURCE_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
+# Una entrada "thin" identifica la fuente solo por su source_id (UUID de la tabla
+# sources); url/name/type/keywords/tier/refresh viven en la DB y los resuelve el
+# loader. El repo no expone la identidad de la fuente, solo su "shape" (parser).
+_UUID_PATTERN = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
 REQUIRED_SOURCE_FIELDS = {
     "id",
     "name",
@@ -30,6 +36,9 @@ REQUIRED_SOURCE_FIELDS = {
     "refresh_minutes",
     "parser_asignado",
 }
+# Una entrada thin (sin ``url``) solo aporta el binding uuid -> parser + enabled;
+# el resto de los campos operativos los trae el loader desde la DB.
+THIN_REQUIRED_FIELDS = {"id", "enabled", "parser_asignado"}
 
 
 def _source_label(idx: int, source: dict[str, Any]) -> str:
@@ -173,6 +182,65 @@ def _validate_optional_fields(source: dict[str, Any], label: str) -> None:
             )
 
 
+def _validate_full_source(source: dict[str, Any], label: str) -> None:
+    """Valida una entrada completa (self-contained en el YAML, con ``url``)."""
+    missing = REQUIRED_SOURCE_FIELDS - set(source)
+    if missing:
+        raise ValueError(f"{label} tiene campos faltantes: {sorted(missing)}")
+
+    if source["type"] not in SUPPORTED_TYPES:
+        raise ValueError(
+            f"{label} usa type no soportado: {source['type']}. "
+            f"Valores validos: {sorted(SUPPORTED_TYPES)}"
+        )
+
+    if source["trust_tier"] not in SUPPORTED_TRUST_TIERS:
+        raise ValueError(
+            f"{label} usa trust_tier invalido: {source['trust_tier']}. "
+            f"Valores validos: {sorted(SUPPORTED_TRUST_TIERS)}"
+        )
+
+    for field in ["id", "name", "type", "trust_tier", "url", "parser_asignado"]:
+        _validate_non_empty_string(source, field, label)
+
+    if not _SOURCE_ID_PATTERN.match(source["id"]):
+        raise ValueError(
+            f"{label}: 'id' debe contener solo letras, numeros, '-' o '_' "
+            f"(se usa como segmento de filtro PostgREST)."
+        )
+
+    _validate_bool(source, "enabled", label)
+    _validate_positive_int(source, "refresh_minutes", label)
+    _validate_optional_fields(source, label)
+
+
+def _validate_thin_source(source: dict[str, Any], label: str) -> None:
+    """Valida una entrada thin (solo binding uuid -> parser; el resto vive en la DB).
+
+    El loader resuelve url/name/type/trust_tier/refresh_minutes desde la tabla
+    ``sources`` por ``source_id``, asi que el repo nunca expone la identidad de la
+    fuente. La entrada solo debe traer el UUID, el parser (shape) y enabled.
+    """
+    missing = THIN_REQUIRED_FIELDS - set(source)
+    if missing:
+        raise ValueError(
+            f"{label} (thin, sin 'url') tiene campos faltantes: {sorted(missing)}. "
+            f"El resto (url/name/type/trust_tier/refresh_minutes) lo resuelve el "
+            f"loader desde la DB."
+        )
+
+    for field in ["id", "parser_asignado"]:
+        _validate_non_empty_string(source, field, label)
+
+    if not _UUID_PATTERN.match(source["id"]):
+        raise ValueError(
+            f"{label}: el 'id' de una fuente thin debe ser el source_id (UUID) de la "
+            f"tabla sources; recibido {source['id']!r}."
+        )
+
+    _validate_bool(source, "enabled", label)
+
+
 def validate_sources_config(config_path: Path) -> dict[str, Any]:
     payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
 
@@ -190,37 +258,17 @@ def validate_sources_config(config_path: Path) -> dict[str, Any]:
         _normalize_legacy_parser(source)
         label = _source_label(idx, source)
 
-        missing = REQUIRED_SOURCE_FIELDS - set(source)
-        if missing:
-            raise ValueError(f"{label} tiene campos faltantes: {sorted(missing)}")
-
-        if source["type"] not in SUPPORTED_TYPES:
-            raise ValueError(
-                f"{label} usa type no soportado: {source['type']}. "
-                f"Valores validos: {sorted(SUPPORTED_TYPES)}"
-            )
-
-        if source["trust_tier"] not in SUPPORTED_TRUST_TIERS:
-            raise ValueError(
-                f"{label} usa trust_tier invalido: {source['trust_tier']}. "
-                f"Valores validos: {sorted(SUPPORTED_TRUST_TIERS)}"
-            )
-
-        for field in ["id", "name", "type", "trust_tier", "url", "parser_asignado"]:
-            _validate_non_empty_string(source, field, label)
+        # La presencia de 'url' distingue una entrada completa (offline/demo, se
+        # arma directo del YAML) de una thin (solo uuid+parser, el loader trae el
+        # resto desde la DB).
+        if "url" in source:
+            _validate_full_source(source, label)
+        else:
+            _validate_thin_source(source, label)
 
         source_id = source["id"]
-        if not _SOURCE_ID_PATTERN.match(source_id):
-            raise ValueError(
-                f"{label}: 'id' debe contener solo letras, numeros, '-' o '_' "
-                f"(se usa como segmento de URL en /api/source-watermarks/{{id}})."
-            )
         if source_id in seen_ids:
             raise ValueError(f"{label}: 'id' duplicado ({source_id!r}); debe ser unico.")
         seen_ids.add(source_id)
-
-        _validate_bool(source, "enabled", label)
-        _validate_positive_int(source, "refresh_minutes", label)
-        _validate_optional_fields(source, label)
 
     return payload

@@ -234,7 +234,9 @@ __marimo__/
 
 # Scrapers runtime state and local secret configs
 scrapers/runtime_output/
-scrapers/config/sources.custom.yaml
+# sources.custom.yaml is committed: it is a thin uuid -> parser map only, no
+# source identity (url/name/keywords live in the DB, ADR 0009). Use a
+# *.local.yaml / *.secret.yaml override for a truly private deployment config.
 scrapers/config/*.local.yaml
 scrapers/config/*.secret.yaml
 
