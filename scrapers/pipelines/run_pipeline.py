@@ -847,7 +847,7 @@ def _run_source(
                     rec["_artifact_id"] = artifact_id
 
                 batch_result = exporter.export_batch(
-                    records, source_slug=source.id, batch_size=source.bulk_size,
+                    records, source_id=source.id, batch_size=source.bulk_size,
                     max_concurrent_posts=source.max_concurrent_posts,
                 )
                 combined.sent += batch_result.sent

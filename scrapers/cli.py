@@ -239,6 +239,13 @@ def main() -> None:
     if args.verbose:
         logging.basicConfig(level=logging.DEBUG, format="%(name)s %(message)s")
 
+    # httpx/httpcore loguean la URL de cada request (httpx a INFO: "HTTP Request:
+    # GET https://...", httpcore a DEBUG con host=...). En --verbose eso filtraria
+    # la url de cada fuente, es decir su identidad, a stdout/CI logs. Se los sube a
+    # WARNING siempre: los fallos de transporte se siguen viendo, pero sin la URL.
+    for _noisy in ("httpx", "httpcore"):
+        logging.getLogger(_noisy).setLevel(logging.WARNING)
+
     commands = {
         "validate": _cmd_validate,
         "run": _cmd_run,
