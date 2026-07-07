@@ -867,6 +867,17 @@ mapea `full_name`, `cedula_hmac`, `cedula_masked`, `identity_kind`,
 etc., a columnas reales (ver `docs/schema.md`). No hay merge ni pérdida: las
 tablas tipadas son una vista 1:1 de `aportes` (ambas capas son silver).
 
+El materializer corre como **primera etapa del cron de consolidación**
+(`consolidate.yml`), antes de la generación de aristas (es independiente de ella,
+solo comparte la cadencia de 20 min). El upsert usa `resolution=ignore-duplicates`
+(ON CONFLICT DO NOTHING) sobre la PK compartida: re-correr no duplica ni reescribe
+filas ya proyectadas. Sin las variables `SUPABASE_*` el materializer entra en
+dry-run silencioso (no toca la red). Limitación conocida (follow-up): un aporte
+con `source_record_id` estable que se re-scrapea con contenido nuevo actualiza su
+`raw_json` in situ (mismo `id`), pero su fila tipada no se re-proyecta hasta que
+un paso gated por `content_hash` lo habilite; los aportes sin `source_record_id`
+no sufren esto (contenido nuevo produce un `aporte.id` nuevo, que sí se proyecta).
+
 ### 5.2 Consolidation job: aristas de candidatos (edges)
 
 Proceso independiente (cron cada 20 min) que compara aportes y **genera aristas
