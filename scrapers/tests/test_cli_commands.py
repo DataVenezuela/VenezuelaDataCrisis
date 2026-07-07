@@ -12,7 +12,8 @@ from typing import Any
 import pytest
 
 _DEMO_CONFIG = Path("scrapers/config/sources.demo.yaml")
-_STARTER_CONFIG = Path("scrapers/config/sources.venezuela.starter.yaml")
+# Synthetic full-format fixture (no real source identity, ADR 0009).
+_SAMPLE_CONFIG = Path("scrapers/tests/fixtures/sources.sample.yaml")
 
 
 def _run_cli(*args: str) -> subprocess.CompletedProcess[str]:
@@ -40,16 +41,17 @@ class TestListEnabled:
         assert isinstance(ids, list)
         assert "demo_manual_synthetic" in ids
 
-    def test_starter_config_lists_enabled_only(self) -> None:
-        result = _run_cli("list-enabled", "--config", str(_STARTER_CONFIG), "--json")
+    def test_sample_config_lists_enabled_only(self) -> None:
+        result = _run_cli("list-enabled", "--config", str(_SAMPLE_CONFIG), "--json")
         assert result.returncode == 0
         ids = json.loads(result.stdout)
         # Only enabled sources appear
         for sid in ids:
             assert isinstance(sid, str)
+        assert "sample_enabled_api" in ids
         # Disabled sources must not appear
-        assert "gdacs_rss" not in ids
-        assert "copernicus_activation_page" not in ids
+        assert "sample_disabled_rss" not in ids
+        assert "sample_disabled_html" not in ids
 
 
 # ── ingest ────────────────────────────────────────────────────────

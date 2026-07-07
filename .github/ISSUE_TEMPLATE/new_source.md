@@ -26,7 +26,8 @@ assignees: ''
 
 ## Checklist de integración
 
-- [ ] Declarada en `scrapers/config/sources.venezuela.starter.yaml` con `enabled: false` hasta tener parser
+- [ ] Fila sembrada en la tabla `sources` (identidad: url/name/keywords/tier) y `source_id` UUID compartido; nunca en el repo (ADR 0009)
+- [ ] Entrada thin `{id: <uuid>, parser_asignado, enabled: false}` en `sources.custom.yaml` (versionado) hasta tener parser
 - [ ] Parser escrito en `scrapers/parsers/` implementando `ParserProtocol`
 - [ ] Parser registrado en `run_pipeline.py::_get_parser`
 - [ ] Tests con fixtures sintéticos en `scrapers/tests/`

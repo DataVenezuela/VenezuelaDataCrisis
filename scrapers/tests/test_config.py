@@ -17,48 +17,50 @@ def test_demo_config_is_valid():
     assert payload["sources"][0]["parser_asignado"] == "demo_text"
 
 
-def test_starter_config_enabled_sources_have_registered_parser():
-    """En el starter config, toda fuente enabled debe tener un parser registrado.
+def test_sample_config_enabled_sources_have_registered_parser():
+    """Toda fuente enabled debe tener un parser registrado.
 
     El registry de _get_parser solo conoce 'encuentralos'; cualquier otra
     fuente con un parser_asignado no registrado debe quedar enabled: false para
     no contar como fuente omitida en cada corrida (issue #125, mejora 2).
+    El fixture usa identidades sinteticas (*.invalid): el repo nunca versiona
+    la lista real de fuentes (ADR 0009).
     """
     path = (
-        Path(__file__).resolve().parents[1]
-        / "config"
-        / "sources.venezuela.starter.yaml"
+        Path(__file__).resolve().parent
+        / "fixtures"
+        / "sources.sample.yaml"
     )
     payload = validate_sources_config(path)
 
     # Set de parsers concretos registrados en _get_parser (run_pipeline).
     registered = {"encuentralos"}
     enabled = [s for s in payload["sources"] if s.get("enabled")]
-    assert enabled, "el starter config deberia tener al menos una fuente enabled"
+    assert enabled, "el fixture deberia tener al menos una fuente enabled"
     for source in enabled:
         assert source["parser_asignado"] in registered, (
             f"fuente enabled {source['id']!r} usa parser no registrado "
             f"{source['parser_asignado']!r}: deberia estar enabled: false"
         )
-    # encuentralos sigue habilitada.
-    assert any(s["id"] == "encuentralos_tecnosoft" for s in enabled)
+    assert any(s["id"] == "sample_enabled_api" for s in enabled)
 
 
-def test_custom_template_config_is_valid():
+def test_custom_config_is_valid_and_thin():
     path = (
         Path(__file__).resolve().parents[1]
         / "config"
-        / "sources.custom.template.yaml"
+        / "sources.custom.yaml"
     )
     payload = validate_sources_config(path)
 
-    # El template de produccion es formato thin: cada fuente es solo el binding
-    # source_id (UUID) -> parser + enabled; url/name/type viven en la DB.
-    assert len(payload["sources"]) == 3
+    # El config de produccion (versionado) es formato thin: cada fuente es solo el
+    # binding source_id (UUID) -> parser + enabled; url/name/type viven en la DB.
+    # Ninguna entrada debe exponer identidad de fuente en el repo (ADR 0009).
+    assert payload["sources"], "sources.custom.yaml deberia listar al menos una entrada thin"
     for source in payload["sources"]:
         assert "url" not in source, "una entrada thin no debe exponer la url en el repo"
+        assert "name" not in source, "una entrada thin no debe exponer el name en el repo"
         assert source["parser_asignado"]
-        assert source["enabled"] is False  # deshabilitadas hasta poner UUIDs reales
 
 
 def test_missing_required_field_is_rejected(tmp_path):
@@ -234,21 +236,21 @@ sources:
     assert sources[0].max_concurrent_posts is None
 
 
-def test_encuentralos_parallelism_config_is_loaded():
+def test_parallelism_config_is_loaded():
     config = (
-        Path(__file__).resolve().parents[1]
-        / "config"
-        / "sources.venezuela.starter.yaml"
+        Path(__file__).resolve().parent
+        / "fixtures"
+        / "sources.sample.yaml"
     )
 
     _project, sources = load_sources(config)
-    encuentralos = next(
-        source for source in sources if source.id == "encuentralos_tecnosoft"
+    source = next(
+        source for source in sources if source.id == "sample_enabled_api"
     )
 
-    assert encuentralos.max_concurrent_pages == 32
-    assert encuentralos.max_concurrent_posts == 8
-    assert encuentralos.probe_limit == 1000
+    assert source.max_concurrent_pages == 32
+    assert source.max_concurrent_posts == 8
+    assert source.probe_limit == 1000
 
 
 def test_invalid_max_concurrent_posts_is_rejected(tmp_path):

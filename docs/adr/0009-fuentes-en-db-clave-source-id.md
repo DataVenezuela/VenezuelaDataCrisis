@@ -98,7 +98,15 @@ con el UUID; al ser greenfield no hay filas previas que reconciliar.
 ## 4. Seguridad
 
 - **Identidades fuera de version control y fuera de los logs.** Un repo filtrado (o
-  su historia) ya no entrega la lista de fuentes; los logs de CI tampoco.
+  su historia) ya no entrega la url/name/keywords de ninguna fuente; los logs de CI
+  tampoco (solo UUID opaco + parser).
+- **El mapa thin `sources.custom.yaml` se versiona.** Un binding
+  `uuid -> parser + enabled` no expone identidad: el UUID es opaco y el parser ya
+  vive en el repo (y ambos aparecen en los logs de cada corrida). Versionarlo no
+  filtra nada que los logs no muestren ya, y mantiene la asignación de parser bajo
+  code review. La única exposición marginal son las entradas `enabled: false`
+  (fuentes sembradas pero no activas todavía): un UUID opaco atado a un parser
+  genérico, señal débil que se asume.
 - **Exposición residual (honesta):** quien tenga la key de lectura de la DB ve las
   fuentes (es la fuente de verdad, esperado); el egress de red sigue mostrando al
   scraper llamando a esos hosts. Esto acota el activo, no lo vuelve anónimo.
@@ -146,8 +154,9 @@ con el UUID; al ser greenfield no hay filas previas que reconciliar.
   el mantenedor los corre en Supabase y comparte los UUIDs.
 - **Repo:** loader dual (thin + fallback completo), validador de entradas thin,
   exporters sin resolver, watermark en `sources`, quieting de httpx/httpcore, y el
-  config de produccion en formato thin (`sources.custom.yaml`, gitignored;
-  `sources.custom.template.yaml` documenta el formato).
+  config de produccion en formato thin (`sources.custom.yaml`, versionado y
+  autodocumentado: mapa `uuid -> parser` sin identidad). Los workflows de
+  `ingest`/`consolidate` lo leen directo del repo (no hay secret ni inyeccion).
 - **Verificación:** correr offline con `sources.demo.yaml` (sin SUPABASE_*), la
   suite de tests, y un grep de los logs buscando `url`/`display_name` (debe dar 0).
 
