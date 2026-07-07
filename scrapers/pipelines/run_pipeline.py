@@ -1005,7 +1005,7 @@ def run_pipeline(
     # Dos exporters HTTP independientes (cada uno con su httpx.Client y sus env
     # vars). Ambos hacen dry-run silencioso si faltan sus credenciales.
     exporter = StagingExporter(StagingConfig.from_env(), run_id=run_id)
-    quarantine_exporter = QuarantineExporter(QuarantineConfig.from_env(), run_id=run_id)
+    quarantine_exporter = QuarantineExporter(QuarantineConfig.from_env())
     # Bronze (issue #256): escribe scrape_runs + raw_artifacts. Reusa las mismas
     # SUPABASE_* que el staging exporter, asi que ambos entran/salen de dry-run
     # juntos. El run_id de scrape_runs lo genera la DB por fuente (no este uuid).

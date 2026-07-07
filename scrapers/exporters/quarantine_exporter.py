@@ -187,14 +187,9 @@ class QuarantineExporter:
         config: QuarantineConfig | None,
         *,
         client: httpx.Client | None = None,
-        run_id: str | None = None,
     ) -> None:
         self.config = config
         self.enabled = config is not None
-        # run_id es un UUID de correlacion local del pipeline, NO un scrape_runs.run_id.
-        # La columna quarantined_records.run_id es nullable (FK a scrape_runs) y se
-        # omite del payload: enviar un UUID que no existe en scrape_runs violaria la FK.
-        self.run_id = run_id
         self._owns_client = client is None
         self._client: httpx.Client | None = client
         if self.enabled and config is not None and client is None:

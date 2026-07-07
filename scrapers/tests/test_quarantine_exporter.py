@@ -77,7 +77,7 @@ def _cfg() -> QuarantineConfig:
 
 def _exporter(transport: httpx.BaseTransport) -> QuarantineExporter:
     client = httpx.Client(base_url="https://backend.test", transport=transport)
-    return QuarantineExporter(_cfg(), client=client, run_id="run-1")
+    return QuarantineExporter(_cfg(), client=client)
 
 
 class TestAuthHeader:
@@ -85,7 +85,7 @@ class TestAuthHeader:
         # PostgREST Supabase autentica con apikey + Authorization: Bearer,
         # igual que StagingExporter. Se abandona x-api-key del backend removido.
         cfg = _cfg()
-        exp = QuarantineExporter(cfg, run_id="run-1")
+        exp = QuarantineExporter(cfg)
         try:
             assert exp._client is not None
             assert exp._client.headers.get("apikey") == "anon-key"
@@ -96,7 +96,7 @@ class TestAuthHeader:
 
     def test_prefer_return_minimal(self) -> None:
         cfg = _cfg()
-        exp = QuarantineExporter(cfg, run_id="run-1")
+        exp = QuarantineExporter(cfg)
         try:
             assert exp._client is not None
             assert exp._client.headers.get("prefer") == "return=minimal"
@@ -282,7 +282,7 @@ class TestPostRetry:
     def test_503_then_201_ends_as_sent(self) -> None:
         t = _FlakyTransport([503, 201])
         client = httpx.Client(base_url="https://backend.test", transport=t)
-        exp = QuarantineExporter(_cfg(), client=client, run_id="run-1")
+        exp = QuarantineExporter(_cfg(), client=client)
         with patch("scrapers.exporters.quarantine_exporter.time.sleep", lambda *_: None):
             res = exp.quarantine(_record())
         assert res.sent == 1
@@ -292,7 +292,7 @@ class TestPostRetry:
     def test_persistent_503_ends_as_error(self) -> None:
         t = _FlakyTransport([503])
         client = httpx.Client(base_url="https://backend.test", transport=t)
-        exp = QuarantineExporter(_cfg(), client=client, run_id="run-1")
+        exp = QuarantineExporter(_cfg(), client=client)
         with patch("scrapers.exporters.quarantine_exporter.time.sleep", lambda *_: None):
             res = exp.quarantine(_record())
         assert res.sent == 0
@@ -303,7 +303,7 @@ class TestPostRetry:
 
 class TestDryRun:
     def test_dry_run_disabled_sends_nothing(self) -> None:
-        exp = QuarantineExporter(None, run_id="run-1")
+        exp = QuarantineExporter(None)
         assert exp.enabled is False
         res = exp.quarantine(_record())
         assert isinstance(res, QuarantineResult)

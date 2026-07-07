@@ -135,16 +135,16 @@ def _patch_quarantine_exporter(transport: httpx.BaseTransport) -> Any:
     """Factory que reemplaza QuarantineExporter por uno con client mockeado.
 
     Espeja ``_patch_exporter``: run_pipeline llama
-    ``QuarantineExporter(QuarantineConfig.from_env(), run_id=...)``; la factory
+    ``QuarantineExporter(QuarantineConfig.from_env())``; la factory
     inyecta un httpx.Client(transport=...) para que nada salga a la red.
     """
     def _factory(
-        config: QuarantineConfig | None, *, run_id: str | None = None
+        config: QuarantineConfig | None,
     ) -> QuarantineExporter:
         if config is None:
-            return QuarantineExporter(None, run_id=run_id)
+            return QuarantineExporter(None)
         client = httpx.Client(base_url=config.supabase_url, transport=transport)
-        return QuarantineExporter(config, client=client, run_id=run_id)
+        return QuarantineExporter(config, client=client)
 
     return patch.object(rp, "QuarantineExporter", side_effect=_factory)
 
