@@ -301,7 +301,6 @@ def test_fetch_person_candidates_retorna_aportes_con_block_key_solapante() -> No
     adapter = FakeInMemoryAdapter(aportes)
     result = adapter.fetch_person_candidates(
         block_keys=["phon:ev1:abc", "ced:ev1:hmac1"],
-        event_id="ev1",
     )
     ids = {rec["id"] for rec in result}
     assert ids == {"fp1", "fp2"}
@@ -316,7 +315,6 @@ def test_fetch_person_candidates_excluye_ya_consolidados() -> None:
     adapter.consolidated_ids.add("fp1")
     result = adapter.fetch_person_candidates(
         block_keys=["phon:ev1:abc"],
-        event_id="ev1",
     )
     assert [rec["id"] for rec in result] == ["fp2"]
 
@@ -329,14 +327,13 @@ def test_fetch_person_candidates_excluye_otros_entity_types() -> None:
     adapter = FakeInMemoryAdapter(aportes)
     result = adapter.fetch_person_candidates(
         block_keys=["phon:ev1:abc"],
-        event_id="ev1",
     )
     assert [rec["id"] for rec in result] == ["fp1"]
 
 
 def test_fetch_person_candidates_block_keys_vacias_retorna_lista_vacia() -> None:
     adapter = FakeInMemoryAdapter([_fake_person("fp1", ["phon:ev1:abc"])])
-    assert adapter.fetch_person_candidates(block_keys=[], event_id="ev1") == []
+    assert adapter.fetch_person_candidates(block_keys=[]) == []
 
 
 # --- Funciones puras --------------------------------------------------------

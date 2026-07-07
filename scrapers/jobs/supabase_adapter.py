@@ -79,6 +79,15 @@ _ENTITY_TABLES: dict[str, tuple[str, str]] = {
     "AcopioCenter": ("acopio", "/rest/v1/acopio_centers"),
 }
 
+# Inverso de _ENTITY_TABLES: slug de DB ("event", "acopio", "person") ->
+# nombre interno del tipo ("Event", "AcopioCenter", "Person"). Person no entra
+# al auto-merge de #91 pero si al fetch de candidatos de #92, por eso se
+# agrega manualmente.
+_SLUG_TO_ENTITY: dict[str, str] = {
+    slug: name for name, (slug, _) in _ENTITY_TABLES.items()
+}
+_SLUG_TO_ENTITY["person"] = "Person"
+
 # Columnas canonicas reales de cada tabla (supabase/migrations 0004 + dedup_hash
 # de 0009). El upsert proyecta el payload del ganador SOLO sobre estas columnas:
 # nunca inventa columnas (evita el falso-verde #90/#104/#187). dedup_hash se
@@ -224,6 +233,12 @@ def _aporte_to_record(row: dict[str, object]) -> Record:
     for column, key in _APORTE_FIELD_MAP.items():
         if column in row:
             record[key] = row[column]
+    # Normaliza entity_type del slug de DB ("person") al nombre interno ("Person")
+    # para que los Records sean consistentes con el contrato de ports.py y con el
+    # FakeInMemoryAdapter, independientemente del casing que devuelva la DB.
+    raw_type = record.get("entity_type")
+    if isinstance(raw_type, str):
+        record["entity_type"] = _SLUG_TO_ENTITY.get(raw_type, raw_type)
     # trust_tier: columna de aportes segun la decision del equipo (A=1..D=4). NO
     # existe todavia en el schema real (depende de migracion pendiente); si falta,
     # cae a _MISSING_TRUST_TIER y pick_winner lo trata como tier desconocido.
@@ -392,17 +407,20 @@ class SupabaseConsolidationAdapter:
     def fetch_person_candidates(
         self,
         block_keys: list[str],
-        event_id: str,
     ) -> list[Record]:
         """GET aportes de tipo person cuyo block_keys solapa con los dados.
 
         Filtra entity_type='person', consolidated_at IS NULL, y block_keys
         contiene al menos una de las claves dadas (OR sobre cs PostgREST).
         Si block_keys esta vacio devuelve lista vacia sin red.
+
+        block_keys es jsonb (array de strings). PostgREST requiere sintaxis de
+        array JSON para el operador de contencion (@>): cs.["clave"]. La forma
+        cs.{clave} es para arrays de Postgres y produce JSON invalido contra jsonb.
         """
         if not block_keys:
             return []
-        cs_clauses = ",".join(f"block_keys.cs.{{{key}}}" for key in block_keys)
+        cs_clauses = ",".join(f'block_keys.cs.["{key}"]' for key in block_keys)
         resp = self._request_with_retry(
             "GET",
             _APORTES_PATH,

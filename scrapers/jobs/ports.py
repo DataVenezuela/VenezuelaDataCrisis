@@ -68,7 +68,7 @@ class ConsolidationDataPort(Protocol):
 
     # --- Person: parte del contrato, fuera de alcance de este job (#91) ------
 
-    def fetch_person_candidates(self, block_keys: list[str], event_id: str) -> list[Record]:
+    def fetch_person_candidates(self, block_keys: list[str]) -> list[Record]:
         """Aportes person cuyo block_keys solapa con block_keys dados.
 
         Retorna candidatos para el similarity scorer (#92). NO lo usa el job
@@ -131,7 +131,7 @@ class FakeInMemoryAdapter:
         self.consolidated_ids.update(aporte_ids)
         self.mark_calls += 1
 
-    def fetch_person_candidates(self, block_keys: list[str], event_id: str) -> list[Record]:
+    def fetch_person_candidates(self, block_keys: list[str]) -> list[Record]:
         if not block_keys:
             return []
         key_set = set(block_keys)

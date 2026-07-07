@@ -493,7 +493,6 @@ def test_fetch_person_candidates_envia_filtros_correctos() -> None:
     adapter = _adapter(handler)
     adapter.fetch_person_candidates(
         block_keys=["phon:ev1:abc123", "ced:ev1:hmac456"],
-        event_id="ev1",
     )
 
     query = parse_qs(urlparse(str(captured["url"])).query)
@@ -502,8 +501,8 @@ def test_fetch_person_candidates_envia_filtros_correctos() -> None:
     assert query["entity_type"] == ["eq.person"]
     assert "or" in query
     or_val = query["or"][0]
-    assert "block_keys.cs.{phon:ev1:abc123}" in or_val
-    assert "block_keys.cs.{ced:ev1:hmac456}" in or_val
+    assert 'block_keys.cs.["phon:ev1:abc123"]' in or_val
+    assert 'block_keys.cs.["ced:ev1:hmac456"]' in or_val
 
 
 def test_fetch_person_candidates_vacio_no_llama() -> None:
@@ -515,7 +514,7 @@ def test_fetch_person_candidates_vacio_no_llama() -> None:
         return httpx.Response(200, json=[])
 
     adapter = _adapter(handler)
-    result = adapter.fetch_person_candidates(block_keys=[], event_id="ev1")
+    result = adapter.fetch_person_candidates(block_keys=[])
     assert result == []
     assert calls == 0
 
@@ -538,7 +537,6 @@ def test_fetch_person_candidates_mapea_records() -> None:
     adapter = _adapter(handler)
     records = adapter.fetch_person_candidates(
         block_keys=["phon:ev1:abc123"],
-        event_id="ev1",
     )
 
     assert len(records) == 1
@@ -556,7 +554,7 @@ def test_fetch_person_candidates_un_solo_block_key() -> None:
         return httpx.Response(200, json=[])
 
     adapter = _adapter(handler)
-    adapter.fetch_person_candidates(block_keys=["phon:ev2:xyz"], event_id="ev2")
+    adapter.fetch_person_candidates(block_keys=["phon:ev2:xyz"])
 
     or_val = parse_qs(urlparse(str(captured["url"])).query)["or"][0]
-    assert or_val == "(block_keys.cs.{phon:ev2:xyz})"
+    assert or_val == '(block_keys.cs.["phon:ev2:xyz"])'
