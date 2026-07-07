@@ -230,7 +230,7 @@ def main() -> None:
     )
     consolidate_cmd.add_argument(
         "--config",
-        default="scrapers/config/sources.demo.yaml",
+        default="scrapers/config/sources.venezuela.starter.yaml",
         help="YAML config path (para project.event_id del seed del catalogo)",
     )
 

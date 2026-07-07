@@ -47,4 +47,4 @@ jobs:
         run: |
           python -m scrapers.cli consolidate \
             --output-dir scrapers/runtime_output \
-            --config scrapers/config/sources.custom.yaml
+            --config scrapers/config/sources.venezuela.starter.yaml
