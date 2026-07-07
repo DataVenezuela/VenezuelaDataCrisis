@@ -11,17 +11,32 @@ garantiza es el orden de creacion ni que todas las constraints sean ejecutables
 tal cual (ver WARNING).
 
 ```sql
--- WARNING: Authoritative schema mirror, not meant to be run as-is.
--- Table order and some constraints may not be valid for execution.
+-- WARNING: This schema is for context only and is not meant to be run.
+-- Table order and constraints may not be valid for execution.
 CREATE TABLE public.sources (
   source_id uuid NOT NULL DEFAULT gen_random_uuid(),
-  slug text NOT NULL UNIQUE,
   display_name text NOT NULL,
   governed_tier USER-DEFINED NOT NULL DEFAULT 'D'::trust_tier,
   tier_set_by uuid,
   tier_set_at timestamp with time zone,
   active boolean NOT NULL DEFAULT true,
   created_at timestamp with time zone NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  url text,
+  source_type text,
+  required_keywords ARRAY NOT NULL DEFAULT '{}'::text[],
+  refresh_minutes integer,
+  allowed_domains ARRAY,
+  page_size integer,
+  cursor_field text,
+  full_scan boolean NOT NULL DEFAULT false,
+  rate_limit_per_minute integer,
+  timeout_seconds real,
+  max_retries integer,
+  probe_limit integer,
+  max_concurrent_pages integer,
+  max_concurrent_posts integer,
+  bulk_size integer,
+  watermark_at timestamp with time zone,
   CONSTRAINT sources_pkey PRIMARY KEY (source_id)
 );
 CREATE TABLE public.scrape_runs (
