@@ -68,8 +68,12 @@ class ConsolidationDataPort(Protocol):
 
     # --- Person: parte del contrato, fuera de alcance de este job (#91) ------
 
-    def fetch_person_candidates(self, batch_size: int) -> list[Record]:
-        """Candidatos de Person para revision humana. NO lo usa el job de #91."""
+    def fetch_person_candidates(self, block_keys: list[str]) -> list[Record]:
+        """Aportes person cuyo block_keys solapa con block_keys dados.
+
+        Retorna candidatos para el similarity scorer (#92). NO lo usa el job
+        de #91 (Event/AcopioCenter auto-merge).
+        """
         ...
 
     # --- ciclo de vida -------------------------------------------------------
@@ -127,16 +131,17 @@ class FakeInMemoryAdapter:
         self.consolidated_ids.update(aporte_ids)
         self.mark_calls += 1
 
-    def fetch_person_candidates(self, batch_size: int) -> list[Record]:
-        # Presente por el contrato; el job de #91 no lo usa. Person exige
-        # revision humana y queda para #92.
-        pending = [
+    def fetch_person_candidates(self, block_keys: list[str]) -> list[Record]:
+        if not block_keys:
+            return []
+        key_set = set(block_keys)
+        return [
             rec
             for rec in self.aportes
             if rec.get("entity_type") == "Person"
             and str(rec.get("id")) not in self.consolidated_ids
+            and any(k in key_set for k in (rec.get("block_keys") or []))
         ]
-        return pending[:batch_size]
 
     def close(self) -> None:
         # No-op: el fake no abre recursos. Presente por el contrato para que el
