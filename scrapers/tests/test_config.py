@@ -1,7 +1,9 @@
 from pathlib import Path
 
+import httpx
 import pytest
 
+from scrapers.exporters.staging_exporter import StagingConfig
 from scrapers.sources.loader import load_sources
 from scrapers.validators.source_validator import validate_sources_config
 
@@ -50,8 +52,13 @@ def test_custom_template_config_is_valid():
     )
     payload = validate_sources_config(path)
 
-    assert len(payload["sources"]) == 5
-    assert {source["type"] for source in payload["sources"]} >= {"webapp_js", "pdf"}
+    # El template de produccion es formato thin: cada fuente es solo el binding
+    # source_id (UUID) -> parser + enabled; url/name/type viven en la DB.
+    assert len(payload["sources"]) == 3
+    for source in payload["sources"]:
+        assert "url" not in source, "una entrada thin no debe exponer la url en el repo"
+        assert source["parser_asignado"]
+        assert source["enabled"] is False  # deshabilitadas hasta poner UUIDs reales
 
 
 def test_missing_required_field_is_rejected(tmp_path):
@@ -473,3 +480,147 @@ def test_full_scan_absent_is_valid(tmp_path):
 def test_full_scan_non_bool_is_rejected(tmp_path):
     with pytest.raises(ValueError, match="full_scan"):
         validate_sources_config(_config_with(tmp_path, "    full_scan: yes_please\n"))
+
+
+# ---------------------------------------------------------------------------
+# Fuentes thin (uuid -> parser) resueltas contra la DB (ADR 0009)
+# ---------------------------------------------------------------------------
+
+_UUID_A = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+
+
+def _thin_config(tmp_path, uuid: str = _UUID_A, parser: str = "encuentralos", enabled: bool = True):
+    config = tmp_path / "thin.yaml"
+    config.write_text(
+        f"""
+project:
+  event_id: 8f14e45f-ceea-467e-bd5d-0a4f2e0c1a3a
+sources:
+  - id: {uuid}
+    parser_asignado: {parser}
+    enabled: {str(enabled).lower()}
+""",
+        encoding="utf-8",
+    )
+    return config
+
+
+def _patch_db(monkeypatch, handler):
+    """Hace que el loader resuelva fuentes thin contra un MockTransport en memoria."""
+    cfg = StagingConfig(
+        supabase_url="https://project.supabase.co", publishable_key="k", ingest_jwt="jwt"
+    )
+    monkeypatch.setattr(StagingConfig, "from_env", classmethod(lambda cls: cfg))
+    real_client = httpx.Client
+
+    def fake_client(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setattr("scrapers.sources.loader.httpx.Client", fake_client)
+
+
+def test_thin_entry_is_valid_and_requires_uuid(tmp_path):
+    # Una entrada thin valida (id UUID + parser + enabled, sin url) pasa.
+    validate_sources_config(_thin_config(tmp_path))
+
+    # Un id que no es UUID en una entrada thin se rechaza.
+    bad = tmp_path / "bad_thin.yaml"
+    bad.write_text(
+        """
+sources:
+  - id: no_es_un_uuid
+    parser_asignado: html
+    enabled: true
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="UUID"):
+        validate_sources_config(bad)
+
+
+def test_thin_config_merges_db_definition(tmp_path, monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/rest/v1/sources"
+        assert request.method == "GET"
+        assert request.url.params.get("source_id") == f"in.({_UUID_A})"
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "source_id": _UUID_A,
+                    "display_name": "Fuente Secreta",
+                    "source_type": "api_json",
+                    "url": "https://secreta.example/api",
+                    "required_keywords": ["terremoto"],
+                    "governed_tier": "B",
+                    "refresh_minutes": 30,
+                    "active": True,
+                    "page_size": 250,
+                }
+            ],
+        )
+
+    _patch_db(monkeypatch, handler)
+    _project, sources = load_sources(_thin_config(tmp_path))
+
+    assert len(sources) == 1
+    source = sources[0]
+    assert source.id == _UUID_A
+    assert source.parser_asignado == "encuentralos"  # del repo (el "shape")
+    assert source.url == "https://secreta.example/api"  # de la DB
+    assert source.type == "api_json"
+    assert source.trust_tier == "B"
+    assert source.required_keywords == ["terremoto"]
+    assert source.page_size == 250
+    assert source.enabled is True
+
+
+def test_thin_enabled_is_anded_with_db_active(tmp_path, monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "source_id": _UUID_A,
+                    "display_name": "X",
+                    "source_type": "api_json",
+                    "url": "https://x",
+                    "governed_tier": "C",
+                    "refresh_minutes": 30,
+                    "active": False,
+                }
+            ],
+        )
+
+    _patch_db(monkeypatch, handler)
+    _project, sources = load_sources(_thin_config(tmp_path, enabled=True))
+    # enabled efectivo = repo enabled (True) AND db active (False)
+    assert sources[0].enabled is False
+
+
+def test_thin_config_fails_closed_when_row_missing(tmp_path, monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[])  # la fuente no existe en sources
+
+    _patch_db(monkeypatch, handler)
+    with pytest.raises(ValueError, match="no existe en la tabla sources"):
+        load_sources(_thin_config(tmp_path))
+
+
+def test_thin_config_fails_closed_on_incomplete_db_row(tmp_path, monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=[{"source_id": _UUID_A, "display_name": "X", "source_type": "api_json"}],
+        )  # falta url/governed_tier/refresh_minutes
+
+    _patch_db(monkeypatch, handler)
+    with pytest.raises(ValueError, match="requerido para operar"):
+        load_sources(_thin_config(tmp_path))
+
+
+def test_thin_config_requires_supabase_env(tmp_path, monkeypatch):
+    monkeypatch.setattr(StagingConfig, "from_env", classmethod(lambda cls: None))
+    with pytest.raises(ValueError, match="SUPABASE"):
+        load_sources(_thin_config(tmp_path))
