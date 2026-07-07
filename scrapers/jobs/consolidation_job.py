@@ -430,7 +430,6 @@ def _source_record_ids(candidate: dict[str, Any]) -> set[str]:
 
 def _candidate_payload(candidate: dict[str, Any]) -> dict[str, Any]:
     required = (
-        "event_id",
         "left_aporte_id",
         "right_aporte_id",
         "blocking_key",
@@ -440,14 +439,15 @@ def _candidate_payload(candidate: dict[str, Any]) -> dict[str, Any]:
     missing = [key for key in required if not candidate.get(key)]
     if missing:
         raise ValueError(f"candidate payload missing required fields: {missing}")
+    priority_str = candidate.get("priority", "medium")
+    priority_int = 2 if priority_str == "high" else 1
     return {
-        "event_id": candidate["event_id"],
         "left_aporte_id": candidate["left_aporte_id"],
         "right_aporte_id": candidate["right_aporte_id"],
         "blocking_key": candidate["blocking_key"],
         "score": candidate["score"],
         "reasons": candidate["reasons"],
-        "priority": 0,
+        "priority": priority_int,
         "touches_gold": False,
         "decision": "pending",
         "created_at": datetime.now(timezone.utc).isoformat(),
