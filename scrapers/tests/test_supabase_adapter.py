@@ -479,3 +479,84 @@ def test_default_tier_rank_orden() -> None:
     assert default_tier_rank("A") < default_tier_rank("B") < default_tier_rank("C") < \
         default_tier_rank("D")
     assert default_tier_rank("?") > default_tier_rank("D")
+
+
+# --- fetch_person_candidates ------------------------------------------------
+
+def test_fetch_person_candidates_envia_filtros_correctos() -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = request.url
+        return httpx.Response(200, json=[])
+
+    adapter = _adapter(handler)
+    adapter.fetch_person_candidates(
+        block_keys=["phon:ev1:abc123", "ced:ev1:hmac456"],
+        event_id="ev1",
+    )
+
+    query = parse_qs(urlparse(str(captured["url"])).query)
+    assert urlparse(str(captured["url"])).path == "/rest/v1/aportes"
+    assert query["consolidated_at"] == ["is.null"]
+    assert query["entity_type"] == ["eq.person"]
+    assert "or" in query
+    or_val = query["or"][0]
+    assert "block_keys.cs.{phon:ev1:abc123}" in or_val
+    assert "block_keys.cs.{ced:ev1:hmac456}" in or_val
+
+
+def test_fetch_person_candidates_vacio_no_llama() -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, json=[])
+
+    adapter = _adapter(handler)
+    result = adapter.fetch_person_candidates(block_keys=[], event_id="ev1")
+    assert result == []
+    assert calls == 0
+
+
+def test_fetch_person_candidates_mapea_records() -> None:
+    row = {
+        "id": "ap-p1",
+        "created_at": "2026-06-24T10:00:00Z",
+        "source_id": "src-a",
+        "entity_type": "person",
+        "dedup_hash": None,
+        "raw_json": {"full_name": "Ana Gonzalez", "event_id": "ev1"},
+        "trust_tier": "B",
+        "block_keys": ["phon:ev1:abc123"],
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[row])
+
+    adapter = _adapter(handler)
+    records = adapter.fetch_person_candidates(
+        block_keys=["phon:ev1:abc123"],
+        event_id="ev1",
+    )
+
+    assert len(records) == 1
+    rec = records[0]
+    assert rec["id"] == "ap-p1"
+    assert rec["payload"] == {"full_name": "Ana Gonzalez", "event_id": "ev1"}
+    assert rec["trust_tier"] == "B"
+
+
+def test_fetch_person_candidates_un_solo_block_key() -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = request.url
+        return httpx.Response(200, json=[])
+
+    adapter = _adapter(handler)
+    adapter.fetch_person_candidates(block_keys=["phon:ev2:xyz"], event_id="ev2")
+
+    or_val = parse_qs(urlparse(str(captured["url"])).query)["or"][0]
+    assert or_val == "(block_keys.cs.{phon:ev2:xyz})"

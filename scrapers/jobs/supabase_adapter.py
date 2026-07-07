@@ -387,18 +387,37 @@ class SupabaseConsolidationAdapter:
             )
             resp.raise_for_status()
 
-    # -- Person: parte del contrato, fuera de alcance de #91 ------------------
+    # -- Person: candidatos por block keys para el scorer (#92) ---------------
 
-    def fetch_person_candidates(self, batch_size: int) -> list[Record]:
-        """Person exige revision humana (nunca auto-merge). El job de #91 no lo usa.
+    def fetch_person_candidates(
+        self,
+        block_keys: list[str],
+        event_id: str,
+    ) -> list[Record]:
+        """GET aportes de tipo person cuyo block_keys solapa con los dados.
 
-        El camino Person (#92) tiene su propio adapter; esta rama no debe llamarse
-        desde el flujo Event/Acopio.
+        Filtra entity_type='person', consolidated_at IS NULL, y block_keys
+        contiene al menos una de las claves dadas (OR sobre cs PostgREST).
+        Si block_keys esta vacio devuelve lista vacia sin red.
         """
-        raise NotImplementedError(
-            "fetch_person_candidates: Person se maneja en el camino de #92, "
-            "no en el adapter de auto-merge Event/AcopioCenter (#91)"
+        if not block_keys:
+            return []
+        cs_clauses = ",".join(f"block_keys.cs.{{{key}}}" for key in block_keys)
+        resp = self._request_with_retry(
+            "GET",
+            _APORTES_PATH,
+            params={
+                "select": "*",
+                "consolidated_at": "is.null",
+                "entity_type": "eq.person",
+                "or": f"({cs_clauses})",
+            },
         )
+        resp.raise_for_status()
+        payload = resp.json()
+        if not isinstance(payload, list):
+            raise TypeError("respuesta de aportes debe ser una lista")
+        return [_aporte_to_record(row) for row in payload if isinstance(row, dict)]
 
     # -- ciclo de vida --------------------------------------------------------
 

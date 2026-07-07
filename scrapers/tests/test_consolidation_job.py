@@ -280,6 +280,65 @@ def test_person_no_admite_automerge() -> None:
         raise AssertionError("Person deberia rechazar auto-merge")
 
 
+# --- fetch_person_candidates (FakeInMemoryAdapter) --------------------------
+
+def _fake_person(aporte_id: str, block_keys: list[str]) -> Record:
+    return {
+        "id": aporte_id,
+        "entity_type": "Person",
+        "block_keys": block_keys,
+        "dedup_hash": None,
+        "trust_tier": "B",
+    }
+
+
+def test_fetch_person_candidates_retorna_aportes_con_block_key_solapante() -> None:
+    aportes = [
+        _fake_person("fp1", ["phon:ev1:abc", "ced:ev1:hmac1"]),
+        _fake_person("fp2", ["phon:ev1:abc"]),
+        _fake_person("fp3", ["phon:ev1:xyz"]),
+    ]
+    adapter = FakeInMemoryAdapter(aportes)
+    result = adapter.fetch_person_candidates(
+        block_keys=["phon:ev1:abc", "ced:ev1:hmac1"],
+        event_id="ev1",
+    )
+    ids = {rec["id"] for rec in result}
+    assert ids == {"fp1", "fp2"}
+
+
+def test_fetch_person_candidates_excluye_ya_consolidados() -> None:
+    aportes = [
+        _fake_person("fp1", ["phon:ev1:abc"]),
+        _fake_person("fp2", ["phon:ev1:abc"]),
+    ]
+    adapter = FakeInMemoryAdapter(aportes)
+    adapter.consolidated_ids.add("fp1")
+    result = adapter.fetch_person_candidates(
+        block_keys=["phon:ev1:abc"],
+        event_id="ev1",
+    )
+    assert [rec["id"] for rec in result] == ["fp2"]
+
+
+def test_fetch_person_candidates_excluye_otros_entity_types() -> None:
+    aportes: list[Record] = [
+        {"id": "fev1", "entity_type": "Event", "block_keys": ["phon:ev1:abc"]},
+        _fake_person("fp1", ["phon:ev1:abc"]),
+    ]
+    adapter = FakeInMemoryAdapter(aportes)
+    result = adapter.fetch_person_candidates(
+        block_keys=["phon:ev1:abc"],
+        event_id="ev1",
+    )
+    assert [rec["id"] for rec in result] == ["fp1"]
+
+
+def test_fetch_person_candidates_block_keys_vacias_retorna_lista_vacia() -> None:
+    adapter = FakeInMemoryAdapter([_fake_person("fp1", ["phon:ev1:abc"])])
+    assert adapter.fetch_person_candidates(block_keys=[], event_id="ev1") == []
+
+
 # --- Funciones puras --------------------------------------------------------
 
 def test_group_by_dedup_hash_preserva_orden_y_descarta_sin_hash() -> None:
