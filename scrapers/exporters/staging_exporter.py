@@ -47,8 +47,7 @@ log = logging.getLogger(__name__)
 
 _DEFAULT_WATERMARK = "1970-01-01T00:00:00Z"
 _APORTES_UPSERT_PATH = "/rest/v1/aportes?on_conflict=source_id,external_id"
-_WATERMARKS_PATH = "/rest/v1/source_watermarks"
-_WATERMARKS_UPSERT_PATH = "/rest/v1/source_watermarks?on_conflict=slug"
+_SOURCES_PATH = "/rest/v1/sources"
 
 # Placeholder de artifact_id para dry-run: el aporte canonico exige artifact_id
 # NOT NULL, pero en dry-run no hay red ni Bronze, asi que se usa este valor solo
@@ -67,9 +66,10 @@ _DEFAULT_BATCH_SIZE = 100
 class StagingConfig:
     """Configuracion del exporter leida del entorno.
 
-    El source_slug NO vive aqui: una sola corrida del pipeline procesa
+    El source_id NO vive aqui: una sola corrida del pipeline procesa
     multiples fuentes (ver run_pipeline._run_source), asi que cada llamada a
-    get_watermark/export_source recibe su propio source_slug (source.id).
+    get_watermark/export_source recibe su propio source_id (source.id, el UUID
+    de la tabla sources).
     """
 
     supabase_url: str
@@ -150,7 +150,7 @@ def _apply_safety_margin(watermark_at: str) -> str:
 
 def _aporte_external_id(
     entity_type: str,
-    source_slug: str,
+    source_id: str,
     source_record_id: str | None,
     content_hash: str,
 ) -> str:
@@ -170,7 +170,7 @@ def _aporte_external_id(
     linkeo, ya no la identidad del aporte.
     """
     basis = source_record_id if source_record_id else content_hash
-    seed = f"{entity_type.lower()}|{source_slug}|{basis}"
+    seed = f"{entity_type.lower()}|{source_id}|{basis}"
     return hashlib.sha256(seed.encode("utf-8")).hexdigest()
 
 
@@ -193,7 +193,6 @@ class StagingExporter:
         self.run_id = run_id or str(uuid.uuid4())
         self._owns_client = client is None
         self._client: httpx.Client | None = client
-        self._source_id_cache: dict[str, str] = {}
         if self.enabled and config is not None and client is None:
             self._client = httpx.Client(
                 base_url=config.supabase_url,
@@ -208,41 +207,9 @@ class StagingExporter:
                 follow_redirects=False,
             )
 
-    # -- source resolution ----------------------------------------------------
-
-    def _resolve_source_id(self, source_slug: str) -> str | None:
-        """Resuelve ``source_slug`` → UUID de ``sources`` via PostgREST.
-
-        Cachea éxitos y fallos en ``self._source_id_cache`` (fallo = "")
-        para no repetir el GET en cada payload de la misma corrida.
-        En dry-run devuelve un UUID placeholder para que ``_build_payload`` no falle.
-        """
-        if not self.enabled or self._client is None:
-            return "00000000-0000-0000-0000-000000000000"
-        cached = self._source_id_cache.get(source_slug)
-        if cached is not None:
-            return cached or None
-        try:
-            resp = self._client.get(
-                "/rest/v1/sources",
-                params={"slug": f"eq.{source_slug}", "select": "id"},
-            )
-            if resp.status_code == 200:
-                rows = resp.json()
-                if isinstance(rows, list) and len(rows) > 0:
-                    sid = str(rows[0].get("id", ""))
-                    if sid:
-                        self._source_id_cache[source_slug] = sid
-                        return sid
-            log.warning("no se pudo resolver source_id para %s: status=%s", source_slug, resp.status_code)
-        except (httpx.HTTPError, ValueError, AttributeError) as exc:
-            log.warning("error resolviendo source_id para %s: %s", source_slug, exc)
-        self._source_id_cache[source_slug] = ""
-        return None
-
     # -- payload --------------------------------------------------------------
 
-    def _build_payload(self, rec: dict[str, object], source_slug: str) -> dict[str, object]:
+    def _build_payload(self, rec: dict[str, object], source_id: str) -> dict[str, object]:
         entity_type = str(rec.get("_entity_type") or "Person")
         clean = {k: v for k, v in rec.items() if not k.startswith("_")}
         spec = specs.spec_for_entity_type(entity_type)
@@ -252,16 +219,11 @@ class StagingExporter:
         # linkeo en gold, pero ya no keyea aportes (ver _aporte_external_id).
         content_hash = _content_hash(clean)
         src_rec_id = _opt_str(rec.get("_source_record_id"))
-        external_id = _aporte_external_id(entity_type, source_slug, src_rec_id, content_hash)
+        external_id = _aporte_external_id(entity_type, source_id, src_rec_id, content_hash)
         dedup_hash = specs.dedup_key(rec, entity_type)
 
-        source_id = self._resolve_source_id(source_slug)
-        if source_id is None:
-            raise ValueError(
-                f"no se pudo resolver source_id para {source_slug!r}; "
-                "verificar que la fuente exista en la tabla sources "
-                "y que el JWT tenga SELECT sobre sources"
-            )
+        # ``source_id`` ES el UUID de la tabla sources (source.id): el config lo
+        # trae resuelto, asi que el aporte ya no necesita un GET slug -> id.
         # artifact_id (FK NOT NULL -> raw_artifacts) lo stampa el pipeline como
         # meta-campo _artifact_id, tras registrar la pagina en Bronze
         # (ProvenanceExporter). Sin el no puede existir el aporte canonico: en
@@ -303,63 +265,69 @@ class StagingExporter:
 
     # -- watermark ------------------------------------------------------------
 
-    def get_watermark(self, source_slug: str) -> str:
+    def get_watermark(self, source_id: str) -> str:
+        # El watermark vive en la propia fila de la fuente (sources.watermark_at),
+        # ya no en una tabla aparte: se lee filtrando por source_id (UUID).
         if not self.enabled or self._client is None:
             return _DEFAULT_WATERMARK
         try:
             resp = self._client.get(
-                _WATERMARKS_PATH,
-                params={"slug": f"eq.{source_slug}", "select": "watermark_at"},
+                _SOURCES_PATH,
+                params={"source_id": f"eq.{source_id}", "select": "watermark_at"},
             )
             if resp.status_code in (401, 403):
                 raise PermissionError(
-                    f"get_watermark {source_slug}: sin permiso (status {resp.status_code}); "
+                    f"get_watermark {source_id}: sin permiso (status {resp.status_code}); "
                     "verificar SUPABASE_INGEST_JWT y grants del rol scraper_ingest"
                 )
             if resp.status_code == 200:
                 rows = resp.json()
                 if isinstance(rows, list) and len(rows) > 0:
-                    return str(rows[0].get("watermark_at", _DEFAULT_WATERMARK))
+                    return str(rows[0].get("watermark_at") or _DEFAULT_WATERMARK)
             else:
                 log.warning(
                     "get_watermark %s: status %s body=%r",
-                    source_slug, resp.status_code, resp.text[:300],
+                    source_id, resp.status_code, resp.text[:300],
                 )
             return _DEFAULT_WATERMARK
         except (httpx.HTTPError, ValueError, AttributeError) as exc:
-            log.warning("no se pudo leer watermark de %s: %s", source_slug, exc)
+            log.warning("no se pudo leer watermark de %s: %s", source_id, exc)
             response = getattr(exc, "response", None)
             if response is not None:
                 log.warning(
                     "respuesta HTTP de %s: status=%s body=%r",
-                    source_slug,
+                    source_id,
                     response.status_code,
                     response.text[:300],
                 )
             return _DEFAULT_WATERMARK
 
-    def _set_watermark(self, source_slug: str, watermark_at: str) -> bool:
+    def _set_watermark(self, source_id: str, watermark_at: str) -> bool:
         assert self._client is not None
+        # PATCH sobre la fila existente de la fuente (no upsert): la fila de sources
+        # ya existe (la sembro el maintainer). return=minimal -> 204 en exito.
         try:
             resp = self._post_with_retry(
-                _WATERMARKS_UPSERT_PATH,
-                {"slug": source_slug, "watermark_at": watermark_at},
-                headers={"Prefer": "resolution=merge-duplicates"},
+                f"{_SOURCES_PATH}?source_id=eq.{source_id}",
+                {"watermark_at": watermark_at},
+                method="PATCH",
+                headers={"Prefer": "return=minimal"},
             )
         except httpx.HTTPError:
             return False
         if resp.status_code in (401, 403):
             raise PermissionError(
-                f"_set_watermark {source_slug}: sin permiso (status {resp.status_code}); "
+                f"_set_watermark {source_id}: sin permiso (status {resp.status_code}); "
                 "verificar SUPABASE_INGEST_JWT y grants del rol scraper_ingest"
             )
-        return resp.status_code in (200, 201)
+        return resp.status_code in (200, 201, 204)
 
     def _post_with_retry(
         self,
         path: str,
         payload: list[dict[str, object]] | dict[str, object],
         *,
+        method: str = "POST",
         timeout: httpx.Timeout | None = None,
         headers: dict[str, str] | None = None,
     ) -> httpx.Response:
@@ -368,7 +336,9 @@ class StagingExporter:
         resp: httpx.Response | None = None
         for attempt in range(1, _MAX_POST_RETRIES + 1):
             try:
-                resp = self._client.post(path, json=payload, timeout=timeout, headers=headers)
+                resp = self._client.request(
+                    method, path, json=payload, timeout=timeout, headers=headers
+                )
             except (httpx.TimeoutException, httpx.NetworkError) as exc:
                 last_exc = exc
                 if attempt < _MAX_POST_RETRIES:
@@ -394,21 +364,21 @@ class StagingExporter:
         raise last_exc
 
     def _advance_watermark(
-        self, source_slug: str, source_fetched_ats: list[str], source_errors: bool, sent: int
+        self, source_id: str, source_fetched_ats: list[str], source_errors: bool, sent: int
     ) -> str | None:
         """Avanza el watermark si se envió al menos un registro sin errores pre-export."""
         if source_errors or not source_fetched_ats or sent == 0:
             return None
         new_watermark = _apply_safety_margin(max(source_fetched_ats))
         try:
-            if not self._set_watermark(source_slug, new_watermark):
+            if not self._set_watermark(source_id, new_watermark):
                 return "no se pudo actualizar el watermark"
         except PermissionError as exc:
             return str(exc)
         return None
 
     def advance_watermark(
-        self, source_slug: str, source_fetched_ats: list[str], source_errors: bool, sent: int
+        self, source_id: str, source_fetched_ats: list[str], source_errors: bool, sent: int
     ) -> str | None:
         """Avanza el watermark si se envió ≥1 registro sin errores pre-export.
 
@@ -420,7 +390,7 @@ class StagingExporter:
             return None
         new_watermark = _apply_safety_margin(max(source_fetched_ats))
         try:
-            if not self._set_watermark(source_slug, new_watermark):
+            if not self._set_watermark(source_id, new_watermark):
                 return "no se pudo actualizar el watermark"
         except PermissionError as exc:
             return str(exc)
@@ -432,7 +402,7 @@ class StagingExporter:
         self,
         records: list[dict[str, object]],
         *,
-        source_slug: str,
+        source_id: str,
         batch_size: int | None = None,
         max_concurrent_posts: int | None = None,
     ) -> ExportResult:
@@ -450,7 +420,7 @@ class StagingExporter:
         if not self.enabled or self._client is None or self.config is None:
             for rec in records:
                 try:
-                    payload = self._build_payload(rec, source_slug)
+                    payload = self._build_payload(rec, source_id)
                 except ValueError as exc:
                     log.warning("DRY-RUN saltando registro: %s", exc)
                     continue
@@ -464,7 +434,7 @@ class StagingExporter:
         payloads: list[dict[str, object]] = []
         for rec in records:
             try:
-                payloads.append(self._build_payload(rec, source_slug))
+                payloads.append(self._build_payload(rec, source_id))
             except ValueError as exc:
                 result.errors.append(str(exc))
         if not payloads:
@@ -479,7 +449,7 @@ class StagingExporter:
         if max_concurrent_posts is None or max_concurrent_posts <= 1:
             log.info(
                 "[%s] exportando %d batches secuencial (max_concurrent_posts=%s); ",
-                source_slug, len(chunks), max_concurrent_posts,
+                source_id, len(chunks), max_concurrent_posts,
             )
             for chunk in chunks:
                 _sent, _errors = self._post_chunk(chunk, _batch_timeout, batch_headers)
@@ -489,7 +459,7 @@ class StagingExporter:
         else:
             log.info(
                 "export_source %s: enviando %d batches con %d workers concurrentes",
-                source_slug, len(chunks), workers,
+                source_id, len(chunks), workers,
             )
             with ThreadPoolExecutor(max_workers=workers) as pool:
                 futures = [pool.submit(self._post_chunk, chunk, _batch_timeout, batch_headers) for chunk in chunks]
@@ -581,13 +551,13 @@ class StagingExporter:
         self,
         records: list[dict[str, object]],
         *,
-        source_slug: str,
+        source_id: str,
         source_fetched_ats: list[str],
         source_errors: list[str] | None = None,
         batch_size: int | None = None,
         max_concurrent_posts: int | None = None,
     ) -> ExportResult:
-        """Exporta los records de ``source_slug``; avanza su watermark si todo OK.
+        """Exporta los records de ``source_id``; avanza su watermark si todo OK.
 
         ``source_errors`` son errores previos de la fuente (parse, PII,
         enriquecimiento y el fail-closed de proteccion de menores). Si no estan
@@ -596,14 +566,14 @@ class StagingExporter:
         """
         result = self.export_batch(
             records,
-            source_slug=source_slug,
+            source_id=source_id,
             batch_size=batch_size,
             max_concurrent_posts=max_concurrent_posts,
         )
         if not self.enabled:
             return result
         watermark_err = self._advance_watermark(
-            source_slug, source_fetched_ats, bool(source_errors), result.sent
+            source_id, source_fetched_ats, bool(source_errors), result.sent
         )
         if watermark_err is not None:
             result.errors.append(watermark_err)
