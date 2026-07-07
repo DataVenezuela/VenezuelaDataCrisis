@@ -99,7 +99,7 @@ CREATE TABLE public.aportes (
   CONSTRAINT aportes_artifact_id_foreign FOREIGN KEY (artifact_id) REFERENCES public.raw_artifacts(artifact_id),
   -- Requerida por el upsert del staging_exporter (?on_conflict=source_id,external_id):
   -- un aporte por registro-fuente por fuente; silver nunca colapsa.
-  CONSTRAINT aportes_source_id_external_id_key UNIQUE (source_id, external_id)
+  CONSTRAINT aportes_source_external_uq UNIQUE (source_id, external_id)
 );
 CREATE TABLE public.events (
   event_id uuid NOT NULL DEFAULT gen_random_uuid(),
