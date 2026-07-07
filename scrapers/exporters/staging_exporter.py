@@ -293,6 +293,8 @@ class StagingExporter:
         for key, value in (
             ("dedup_hash", dedup_hash),
             ("source_record_id", src_rec_id),
+            ("source_url", _opt_str(rec.get("_source_url"))),
+            ("parser_version", _opt_str(rec.get("_parser_version"))),
             ("normalizer_version", _opt_str(rec.get("_normalizer_version"))),
         ):
             if value is not None:
