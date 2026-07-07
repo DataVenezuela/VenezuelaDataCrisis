@@ -1,0 +1,48 @@
+# Synthetic full-format source config for OFFLINE tests only.
+#
+# Contains NO real source identity (ADR 0009): every id/name/url below is a
+# fake placeholder on the reserved `*.invalid` domain. Production never keeps a
+# source list in the repo: it refers to sources by opaque source_id UUID in the
+# committed thin config (sources.custom.yaml). This fixture exists only to
+# exercise the loader/validator full-format path plus enabled/disabled filtering
+# and tuning (parallelism) loading, without touching the network or leaking a
+# real source.
+project:
+  event_id: 8f14e45f-ceea-467e-bd5d-0a4f2e0c1a3a
+  default_country: Venezuela
+
+sources:
+  # Enabled, registered parser, with tuning: exercises parallelism loading.
+  - id: sample_enabled_api
+    name: Sample enabled API (synthetic)
+    type: api_json
+    enabled: true
+    trust_tier: C
+    url: "https://sample.invalid/api/records"
+    refresh_minutes: 30
+    parser_asignado: encuentralos
+    required_keywords: []
+    probe_limit: 1000
+    max_concurrent_pages: 32
+    max_concurrent_posts: 8
+    bulk_size: 100
+
+  # Disabled + unregistered parser: must be filtered out of list-enabled and
+  # must not trip the "enabled sources use a registered parser" gate.
+  - id: sample_disabled_rss
+    name: Sample disabled RSS (synthetic)
+    type: rss
+    enabled: false
+    trust_tier: A
+    url: "https://sample.invalid/rss.xml"
+    refresh_minutes: 30
+    parser_asignado: rss
+
+  - id: sample_disabled_html
+    name: Sample disabled HTML (synthetic)
+    type: html_static
+    enabled: false
+    trust_tier: A
+    url: "https://sample.invalid/page"
+    refresh_minutes: 60
+    parser_asignado: html
