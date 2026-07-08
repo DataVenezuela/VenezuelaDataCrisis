@@ -440,14 +440,7 @@ class StagingExporter:
 
         chunks = [payloads[i : i + size] for i in range(0, len(payloads), size)]
         _batch_timeout = httpx.Timeout(connect=10.0, read=120.0, write=120.0, pool=10.0)
-        # ``missing=default``: los aportes de un batch no comparten el mismo set de
-        # claves (cada registro trae solo los campos que la fuente reporto), asi que
-        # sin este preferente PostgREST rechaza el lote con 400 PGRST102 ("All object
-        # keys must match") y el fallback cae a fila-a-fila. Con el, toma la union de
-        # claves y rellena las ausentes con el DEFAULT de la columna.
-        batch_headers = {
-            "Prefer": "resolution=merge-duplicates,return=minimal,missing=default"
-        }
+        batch_headers = {"Prefer": "resolution=merge-duplicates,return=minimal"}
 
         workers = max(1, max_concurrent_posts or 1)
 

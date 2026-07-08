@@ -321,7 +321,7 @@ class SilverMaterializer:
             resp = self._client.post(
                 _CURSOR_UPSERT_PATH,
                 json=payload,
-                headers={"Prefer": "resolution=merge-duplicates,return=minimal"},
+                headers={"Prefer": "resolution=merge-duplicates,return=minimal,missing=default"},
             )
         except (httpx.TimeoutException, httpx.NetworkError) as exc:
             log.warning("materializer: POST cursor error de red (%s)", type(exc).__name__)
