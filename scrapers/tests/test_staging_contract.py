@@ -4,8 +4,8 @@ scrapers/tests/test_staging_contract.py
 Test de contrato del payload contra el ``aportes`` canonico.
 
 Valida que los payloads que genera ``_build_payload`` tengan las columnas
-canonicas (segun ``docs/schema.md`` y ``docs/specs/db-scraper-contract.md``, tras
-el cutover Bronze de #256) y que el batch upsert use ``on_conflict`` resoluble.
+canonicas (segun ``docs/schema.md``, tras el cutover Bronze de #256) y que el
+batch upsert use ``on_conflict`` resoluble.
 
 Cutover #256: el payload emite ``artifact_id`` (FK NOT NULL -> raw_artifacts) y
 ya NO emite ``run_id``/``scraper_id``/``source_url``/``parser_version`` (la

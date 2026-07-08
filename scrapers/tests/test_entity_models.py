@@ -202,18 +202,25 @@ def test_serialization_round_trip():
         "event_id",
         "cedula_hmac",
         "cedula_masked",
+        "cedula_partial",
+        "cedula_partial_pattern",
+        "identity_kind",
+        "pii_provenance",
         "age_range",
         "is_minor",
         "last_known_location",
+        "last_known_location_status",
         "status",
         "verification_status",
         "trust_tier",
         "confidence_score",
         "nota",
         "foto",
+        "foto_status",
         "deterministic_id",
         "source_record_id",
         "fuente",
+        "unmapped",
     }
     assert Person.model_validate(p.model_dump()) == p
     assert "Ana" in p.model_dump_json()
@@ -226,3 +233,108 @@ def test_existing_sourceconfig_intact():
 
     assert SourceConfig.__name__ == "SourceConfig"
     assert is_dataclass(SourceConfig)
+
+
+# ---------------------------------------------------------------------------
+# Tests para los campos del modelo objetivo implementados en v1.1 (issue #242)
+# ---------------------------------------------------------------------------
+
+
+def test_person_identity_kind_defaults_to_none():
+    p = Person(full_name="A", event_id=_EVENT_ID, fuente="s")
+    assert p.identity_kind == "none"
+    assert p.pii_provenance == "cleartext"
+    assert p.cedula_partial is None
+    assert p.cedula_partial_pattern is None
+    assert p.unmapped is None
+    assert p.foto_status is None
+    assert p.last_known_location_status is None
+
+
+def test_person_identity_kind_hmac_requires_cedula_hmac():
+    p = Person(
+        full_name="B",
+        event_id=_EVENT_ID,
+        fuente="s",
+        identity_kind="hmac",
+        cedula_hmac="a" * 64,
+    )
+    assert p.identity_kind == "hmac"
+    with pytest.raises(ValidationError):
+        Person(full_name="B", event_id=_EVENT_ID, fuente="s", identity_kind="hmac")
+
+
+def test_person_identity_kind_partial_requires_cedula_partial_and_pattern():
+    p = Person(
+        full_name="C",
+        event_id=_EVENT_ID,
+        fuente="s",
+        identity_kind="partial",
+        cedula_partial="5675",
+        cedula_partial_pattern="suffix_4",
+    )
+    assert p.identity_kind == "partial"
+    assert p.cedula_partial == "5675"
+    assert p.cedula_partial_pattern == "suffix_4"
+    # missing cedula_partial
+    with pytest.raises(ValidationError):
+        Person(
+            full_name="C", event_id=_EVENT_ID, fuente="s",
+            identity_kind="partial", cedula_partial_pattern="suffix_4",
+        )
+    # missing cedula_partial_pattern
+    with pytest.raises(ValidationError):
+        Person(
+            full_name="C", event_id=_EVENT_ID, fuente="s",
+            identity_kind="partial", cedula_partial="5675",
+        )
+
+
+def test_person_cedula_partial_validates_digits():
+    _partial = dict(identity_kind="partial", cedula_partial_pattern="suffix_2")
+    Person(full_name="A", event_id=_EVENT_ID, fuente="s", cedula_partial="12", **_partial)
+    Person(full_name="A", event_id=_EVENT_ID, fuente="s", cedula_partial="1234",
+           identity_kind="partial", cedula_partial_pattern="suffix_4")
+    with pytest.raises(ValidationError):
+        Person(full_name="A", event_id=_EVENT_ID, fuente="s", cedula_partial="1", **_partial)
+    with pytest.raises(ValidationError):
+        Person(full_name="A", event_id=_EVENT_ID, fuente="s", cedula_partial="12345", **_partial)
+    with pytest.raises(ValidationError):
+        Person(full_name="A", event_id=_EVENT_ID, fuente="s", cedula_partial="ab12", **_partial)
+
+
+def test_person_pii_provenance_valid_values():
+    for prov in ("cleartext", "source_masked_lossy", "source_hashed"):
+        p = Person(full_name="A", event_id=_EVENT_ID, fuente="s", pii_provenance=prov)
+        assert p.pii_provenance == prov
+    with pytest.raises(ValidationError):
+        Person(full_name="A", event_id=_EVENT_ID, fuente="s", pii_provenance="unknown_prov")
+
+
+def test_person_field_status_valid_values():
+    for fs in ("present", "absent_source", "removed_minor", "removed_pii"):
+        p = Person(
+            full_name="A", event_id=_EVENT_ID, fuente="s",
+            foto_status=fs, last_known_location_status=fs,
+        )
+        assert p.foto_status == fs
+        assert p.last_known_location_status == fs
+    with pytest.raises(ValidationError):
+        Person(full_name="A", event_id=_EVENT_ID, fuente="s", foto_status="bad_status")
+    with pytest.raises(ValidationError):
+        Person(full_name="A", event_id=_EVENT_ID, fuente="s", last_known_location_status="bad")
+
+
+def test_person_unmapped_accepts_arbitrary_dict():
+    p = Person(
+        full_name="A", event_id=_EVENT_ID, fuente="s",
+        unmapped={"campo_raro": "valor", "otro": 42},
+    )
+    assert p.unmapped == {"campo_raro": "valor", "otro": 42}
+
+
+def test_person_identity_kind_rejects_unknown_values():
+    with pytest.raises(ValidationError):
+        Person(full_name="A", event_id=_EVENT_ID, fuente="s", identity_kind="national_id")
+    with pytest.raises(ValidationError):
+        Person(full_name="A", event_id=_EVENT_ID, fuente="s", identity_kind="composite")

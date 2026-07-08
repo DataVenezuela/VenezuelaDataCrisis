@@ -7,7 +7,7 @@
 | Decisores | Infraestructura, DB/API, Scrapers/Cleaners |
 | Reemplaza a | (ninguno) |
 | Complementa | `docs/adr/0001-arquitectura-serving-publico.md`, `docs/adr/0002-endurecimiento-seguridad-cloudflare.md` |
-| Relacionado con | `CONTRIBUTING.md`, `docs/base-standards.md §2`, `docs/specs/db-scraper-contract.md`, issues #224 y #231 |
+| Relacionado con | `CONTRIBUTING.md`, `docs/base-standards.md §2`, issues #224 y #231 |
 
 > **Estado / implementación:** `Propuesta`. Los repos privados `vzla-deployment`
 > y `vzla-web` todavía no existen y nada cambia en producción hasta crearlos;
@@ -197,8 +197,9 @@ público con `vzla-deployment` (§3.2). No queda abierto: se aborda por dos piez
 de seguimiento, ambas en curso.
 
 * **El mecanismo del contrato** (precondiciones/postcondiciones entidad->DB) se
-  documenta en `docs/specs/db-scraper-contract.md` (issue #224 punto 4, issue
-  #231, PR #232, aún sin fusionar).
+  documentaba en `docs/specs/db-scraper-contract.md` (issue #224 punto 4, issue
+  #231, PR #232); la spec fue eliminada en PR #258 y la forma canónica del
+  schema vive en `docs/schema.md`.
 * **Su versionado** (`CONTRACT_VERSION`, semver, y el tag `contract-v1.0` que
   `vzla-deployment` fija) lo define la **ADR 0004** (versionado de contrato,
   incluida en PR #232, aún sin fusionar).

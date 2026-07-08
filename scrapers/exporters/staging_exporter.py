@@ -20,9 +20,10 @@ no abre cliente, calcula payloads para validarlos, loguea a INFO lo que
 enviaria, y devuelve ExportResult vacio.
 
 El envio concurrente de batches se activa pasando ``max_concurrent_posts > 1``;
-usa ``concurrent.futures.ThreadPoolExecutor``. El watermark solo avanza si
-TODOS los batches del source terminaron en 200/201, preservando la semantica
-at-least-once (el thread pool aguanta hasta que todos terminan, fallos o no).
+usa ``concurrent.futures.ThreadPoolExecutor``. El watermark avanza si no hubo
+errores de parseo/PII/enriquecimiento previos al export y se envio al menos un
+registro (sent > 0); puede avanzar aunque algun batch de aportes haya fallado
+(esos errores quedan en result.errors, no se pliegan a source_errors).
 """
 
 from __future__ import annotations

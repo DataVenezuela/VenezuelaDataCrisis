@@ -197,8 +197,7 @@ enriquecimiento, minor protection) **y** se envió al menos un registro
 (`sent > 0`): puede avanzar aunque algún POST a `aportes` haya fallado. La
 entrega at-least-once la sostienen el margen de seguridad de 5 minutos y la
 idempotencia por `external_id`, no el bloqueo del watermark. Un watermark
-avanzado no implica cero pérdida en ese ciclo (ver
-`docs/specs/db-scraper-contract.md` §7).
+avanzado no implica cero pérdida en ese ciclo.
 
 ---
 
