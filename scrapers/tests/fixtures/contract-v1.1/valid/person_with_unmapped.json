@@ -1,0 +1,12 @@
+{
+  "_comment": "Persona con campos desconocidos enrutados a unmapped por el parser.",
+  "full_name": "Ana Ficticia",
+  "event_id": "8f14e45f-ceea-467e-bd5d-0a4f2e0c1a3a",
+  "fuente": "encuentralos",
+  "identity_kind": "none",
+  "pii_provenance": "cleartext",
+  "unmapped": {
+    "campo_fuente_extra": "valor_ficticio",
+    "otro_campo": 99
+  }
+}

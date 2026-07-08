@@ -85,10 +85,14 @@ def acopio_dedup_key(rec: dict[str, object]) -> str:
 # --- Block keys -------------------------------------------------------------
 
 def person_block_keys(rec: dict[str, object]) -> list[str]:
-    """Claves de bloqueo de Person, orden estable [fuerte?, fonetica].
+    """Claves de bloqueo de Person, orden estable [fuerte?, parcial?, fonetica].
 
     Fuerte (solo si hay cedula_hmac no vacio): ced:{event_id}:{cedula_hmac}.
     cedula_hmac ya es un HMAC opaco; no se re-hashea.
+    Parcial (si identity_kind=partial con cedula_partial y patron):
+        ced_partial:{event_id}:{pattern}:{digits} — agrupa registros con la
+        misma cedula parcial para comparacion; la regla asimetrica (solo suma
+        cuando coincide, nunca descarta cuando difiere) se aplica en similarity.
     Fonetica (siempre): phon:{event_id}:{phonetic_hash(full_name)}.
 
     Location is intentionally excluded from the phonetic key: two records
@@ -102,6 +106,11 @@ def person_block_keys(rec: dict[str, object]) -> list[str]:
     cedula_hmac = rec.get("cedula_hmac")
     if isinstance(cedula_hmac, str) and cedula_hmac.strip():
         keys.append(f"ced:{event_id}:{cedula_hmac}")
+    if rec.get("identity_kind") == "partial":
+        partial = rec.get("cedula_partial")
+        pattern = rec.get("cedula_partial_pattern")
+        if isinstance(partial, str) and partial and isinstance(pattern, str) and pattern:
+            keys.append(f"ced_partial:{event_id}:{pattern}:{partial}")
     keys.append(f"phon:{event_id}:{ph}")
     return keys
 
