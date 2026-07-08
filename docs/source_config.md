@@ -8,15 +8,12 @@ La configuración de fuentes existe para que el pipeline sepa qué scrapear, có
 
 ## Formato YAML
 
-> ⚠️ El bloque `pagination:` de este ejemplo es **aspiracional, no
-> implementado**. `SourceConfig` (`scrapers/models/source.py`) no tiene
-> campo `pagination` ni `page_size`, y `_get_adapter` en `run_pipeline.py`
-> instancia `ApiAdapter` sin pasarlo — siempre usa el default interno de
-> `api_adapter.py` (`page_size=20`), sin importar lo que digas en el YAML.
-> Si agregás este bloque a una fuente real, el loader lo ignora
-> silenciosamente sin error. Ver `AGENTS.md` §2.1 para el detalle completo
-> y el impacto medido en producción (`encuentralos_tecnosoft`, ~98.830
-> registros con page_size=20 ≈ 4.941 requests).
+> Nota: no existe un bloque anidado `pagination:`. La paginación se controla con
+> campos planos de `SourceConfig`: `page_size`, `probe_limit`,
+> `max_concurrent_pages` y `max_concurrent_posts` (documentados abajo).
+> `page_size` sí se pasa al `ApiAdapter` (`run_pipeline.py`); si se omite, el
+> adapter usa su default interno (`_DEFAULT_PAGE_SIZE=100`). Solo aplica a fuentes
+> `api_json`.
 
 ```yaml
 project:
@@ -35,11 +32,7 @@ sources:
     max_concurrent_pages: 4  # opcional; solo aplica si la primera pagina reporta total
     max_concurrent_posts: 8  # opcional; POSTs paralelos al staging API (default: 1)
     probe_limit: 1000        # opcional; tamaño de la primera request para descubrir el límite real del API
-    # pagination:               # NO IMPLEMENTADO — ver advertencia arriba
-    #   path: /api/personas
-    #   limit_param: limit
-    #   offset_param: offset
-    #   page_size: 20
+    page_size: 100           # opcional; tamaño de página que se pasa al ApiAdapter (default interno: 100)
 
   - id: mi_fuente_html
     name: "Hospital Central Barquisimeto"
@@ -71,24 +64,60 @@ Fuente social experimental deshabilitada:
 
 ---
 
+## Formato thin (fuentes en la DB, ADR 0009)
+
+Además del formato completo de arriba, una fuente puede declararse en formato
+**thin**: la entrada del repo solo trae `id` (el `source_id` UUID de la tabla
+`sources`), `parser_asignado` y `enabled`. La `url`, `name`, `type`, `trust_tier`,
+`required_keywords` y el tuning viven en la tabla `sources` y los resuelve el loader
+por `source_id`. Así el repo nunca expone la identidad de la fuente, solo su parser
+(su "shape"). Ver ADR 0009.
+
+```yaml
+project:
+  event_id: "f0e1d2c3-b4a5-6789-0fed-cba987654321"
+
+sources:
+  - id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"  # source_id (UUID) de la tabla sources
+    parser_asignado: encuentralos
+    enabled: true
+```
+
+Requisitos del formato thin:
+
+- Requiere las env `SUPABASE_URL` / `SUPABASE_PUBLISHABLE_KEY` /
+  `SUPABASE_INGEST_JWT`: sin ellas no se pueden resolver las definiciones y se falla
+  cerrado. Para correr offline (demo, tests) usar el formato completo (con `url`).
+- La fila debe existir en `sources` con al menos `url`, `source_type`,
+  `governed_tier` y `refresh_minutes`, si no la fuente se descarta (fail-closed).
+- `enabled` efectivo = `enabled` del repo AND `active` de la fila en `sources`.
+
+La presencia de `url` en la entrada distingue el formato completo (offline) del thin.
+
+---
+
 ## Campos
+
+Una entrada **completa** (con `url`) debe traer todos los campos marcados "sí". Una
+entrada **thin** (sin `url`) solo requiere `id`, `parser_asignado` y `enabled`; el
+resto lo aporta la tabla `sources`.
 
 | Campo | Requerido | Descripción |
 |---|---|---|
-| `id` | sí | Identificador único de la fuente (slug, sin espacios) |
-| `name` | sí | Nombre legible para logs y trazabilidad |
-| `url` | sí | URL base de la fuente |
-| `type` | sí | Tipo de adapter a usar (ver §Tipos) |
+| `id` | sí | Identificador de la fuente. En formato completo, un slug sin espacios; en formato thin, el `source_id` (UUID) de la tabla `sources` |
+| `name` | completo | Nombre legible para trazabilidad (en thin lo aporta `sources.display_name`) |
+| `url` | completo | URL base de la fuente (en thin lo aporta `sources.url`) |
+| `type` | completo | Tipo de adapter a usar (ver §Tipos; en thin lo aporta `sources.source_type`) |
 | `parser_asignado` | sí | Nombre del parser. Sin parser → cuarentena |
-| `trust_tier` | sí | Letra A/B/C/D — nivel de confianza |
-| `enabled` | sí | `true`/`false`. Las deshabilitadas se ignoran |
+| `trust_tier` | completo | Letra A/B/C/D, nivel de confianza (en thin lo aporta `sources.governed_tier`) |
+| `enabled` | sí | `true`/`false`. Las deshabilitadas se ignoran. En thin se combina con `sources.active` |
 | `refresh_minutes` | no | Frecuencia mínima de scraping. Default: 60 |
 | `max_concurrent_pages` | no | Máximo de páginas API en vuelo cuando la primera respuesta reporta `total`, `count`, `total_count` o `totalCount`. Si se omite, `api_adapter.py` usa un default conservador. Sin total confiable, el adapter conserva paginación secuencial. |
 | `max_concurrent_posts` | no | Máximo de POSTs en paralelo al staging API durante `export_source()`. Default: `1` (comportamiento secuencial original). Útil para fuentes con muchos registros donde la latencia de red domina. |
 | `probe_limit` | no | Entero positivo: tamaño de la primera request de paginación, usado para descubrir el límite real que soporta el API. Si el API devuelve ≥ `probe_limit` registros, ese valor se adopta como `page_size` efectivo; si devuelve menos y hay más datos, el cap detectado queda en los logs. La primera página se reutiliza como datos reales (sin requests extra). Sin este campo, `api_adapter.py` usa el `page_size` configurado o su default interno. Solo aplica a fuentes `api_json`. |
 | `allowed_domains` | no | Lista de hosts **exactos** permitidos para `url`. Si se define y el host de la URL no está en la lista, la fuente se omite **sin hacer ningún request** y el error queda visible en el summary. Match exacto, case-insensitive — no acepta subdominios. |
 | `rate_limit_per_minute` | no | Entero positivo: máximo de requests por ventana deslizante de 60s. Solo lo aplica `api_json` (es el único adapter que pagina dentro de una corrida); los demás fetchean una vez por corrida y su frecuencia la gobierna `refresh_minutes`. |
-| `bulk_size` | no | Entero positivo: cuántos aportes enviar por request a `POST /api/aportes/bulk`. Si está configurado, el pipeline usa `export_source_bulk()` en lugar del loop individual de `export_source()`. Reduce N POSTs a `ceil(N/bulk_size)` requests (ej. 109 915 → ~220 con `bulk_size: 500`). Solo aplica si el backend expone `POST /api/aportes/bulk`. Omitir = un POST por registro (comportamiento original). |
+| `bulk_size` | no | Entero positivo: cuántos aportes agrupar por request (batch) al upsert PostgREST `POST /rest/v1/aportes`. El pipeline llama a `export_batch()` con `batch_size=bulk_size`, reduciendo N registros a `ceil(N/bulk_size)` requests (ej. 109 915 con `bulk_size: 500` = ~220 requests). Omitir = default interno de batch. |
 
 No se deben agregar campos nuevos al contrato sin actualizar este documento.
 
@@ -110,14 +139,14 @@ No se deben agregar campos nuevos al contrato sin actualizar este documento.
 
 ## `trust_tier`
 
-El `trust_tier` en el YAML siempre usa **letras**. La BD usa enteros. La conversión ocurre en el staging exporter.
+El `trust_tier` usa **letras** tanto en el YAML como en la BD: la columna `trust_tier` (enum `trust_tier` en Postgres) guarda la misma letra `A`/`B`/`C`/`D`. No hay conversión a entero en el staging exporter.
 
-| Letra | Entero BD | Significado |
-|---|---|---|
-| `A` | `1` | Fuente oficial: gobierno, USGS, Cruz Roja, FUNVISIS |
-| `B` | `2` | ONG verificada o medio establecido |
-| `C` | `3` | Voluntario/comunidad con ownership visible |
-| `D` | `3` | Anónima o sin verificar |
+| Letra | Significado |
+|---|---|
+| `A` | Fuente oficial: gobierno, USGS, Cruz Roja, FUNVISIS |
+| `B` | ONG verificada o medio establecido |
+| `C` | Voluntario/comunidad con ownership visible |
+| `D` | Anónima o sin verificar |
 
 ---
 
@@ -135,7 +164,7 @@ Cuando lleguen registros de una fuente sin parser registrado, el pipeline los en
 - Si `allowed_domains` está presente, el host de `url` debe coincidir exactamente con uno de sus valores
 - Si `rate_limit_per_minute` está presente, debe ser un entero positivo
 - Si `probe_limit` está presente, debe ser un entero positivo; solo tiene efecto en fuentes `api_json`
-- Si `bulk_size` está presente, debe ser un entero positivo; requiere que el backend exponga `POST /api/aportes/bulk`
+- Si `bulk_size` está presente, debe ser un entero positivo (tamaño de batch para el upsert a `/rest/v1/aportes`)
 - Si la fuente no es pública, su uso debe revisarse antes de agregarse (ver `scrapers/security/SOURCE_POLICY.md`)
 - El `id` debe ser único en el archivo
 - `trust_tier` = letra, nunca entero en el YAML

@@ -1,5 +1,5 @@
 # Módulo `scrapers`
-Para entender el proceso de procesado de datos, leer: [Pipeline](PIPELINE.md)
+Para entender el proceso de procesado de datos, leer: [Pipeline](../docs/pipeline.md)
 
 Este paquete implementa el pipeline de recolección: fetch de fuentes externas, parsing a entidades tipadas, enmascaramiento de PII, normalización y envío a staging en Supabase.
 
@@ -12,8 +12,7 @@ scrapers/
 ├── cli.py                          # Punto de entrada CLI
 ├── config/
 │   ├── sources.demo.yaml           # Demo offline con datos sintéticos
-│   ├── sources.venezuela.starter.yaml
-│   └── sources.custom.template.yaml
+│   └── sources.custom.yaml         # Config thin de producción (uuid -> parser)
 ├── adapters/
 │   ├── base.py                     # RawContent dataclass + AdapterProtocol
 │   ├── api_adapter.py              # httpx, paginación, retry
@@ -107,9 +106,10 @@ En producción, el pipeline corre vía `.github/workflows/ingest.yml` (cron`*/10
 export PII_HMAC_SECRET="valor-secreto"
 export PII_SALT="$PII_HMAC_SECRET"   # alias legacy, mismo valor — no son dos secrets distintos
 
-# Credenciales de dataVenezuela (staging exporter)
-export STAGING_API_KEY="x-api-key del scraper"
-export STAGING_BASE_URL="https://..."
+# Staging exporter (escritura directa a Supabase vía PostgREST)
+export SUPABASE_URL="https://<proyecto>.supabase.co"
+export SUPABASE_PUBLISHABLE_KEY="clave publishable (header apikey)"
+export SUPABASE_INGEST_JWT="JWT firmado con rol scraper_ingest"
 
 # Opcional: solo para fuentes type=x_recent_search habilitadas
 export X_BEARER_CREDENTIAL="credencial Bearer de X API"
@@ -119,25 +119,33 @@ export X_BEARER_CREDENTIAL="credencial Bearer de X API"
 
 ## Agregar una fuente nueva
 
-1. Declararla en `scrapers/config/sources.venezuela.starter.yaml`:
+La identidad de la fuente (url, name, keywords, tier) vive solo en la tabla
+`sources` de la DB, nunca en el repo (ADR 0009). El repo solo referencia la
+fuente por su `source_id` (UUID opaco) y le asigna un parser.
+
+1. El mantenedor siembra la fila en `sources` (url, source_type, display_name,
+   required_keywords, governed_tier, refresh_minutes, active) y comparte el
+   `source_id` UUID generado. El tuning operativo (`page_size`, `probe_limit`,
+   `max_concurrent_pages`, `max_concurrent_posts`) tambien vive en columnas de
+   `sources`; ver `docs/source_config.md`.
+
+2. Agregar la entrada thin (versionada) en `scrapers/config/sources.custom.yaml`:
    ```yaml
-   - id: mi_fuente
-     name: "Mi Fuente"
-     url: "https://mi-fuente.org/api/personas"
-     type: api_json
+   - id: 00000000-0000-0000-0000-000000000000   # el source_id de la DB
      parser_asignado: mi_parser
-     trust_tier: C
      enabled: true
    ```
-   `SourceConfig` no soporta hoy un bloque `pagination:` ni `page_size` aunque `docs/source_config.md` lo muestre como ejemplo, ver `AGENTS.md` §2.1 antes de asumir que ese campo tiene efecto.
+   Es un mapa `uuid -> parser`: no expone identidad (url/name/keywords viven en
+   la DB), solo el UUID opaco y el parser, que ya aparecen en los logs.
 
-2. Escribir el parser en `scrapers/parsers/mi_parser.py` implementando `ParserProtocol`.
+3. Escribir el parser en `scrapers/parsers/mi_parser.py` implementando `ParserProtocol`.
 
-3. Registrar el parser en `run_pipeline.py::_get_parser`.
+4. Registrar el parser en `run_pipeline.py::_get_parser`.
 
-4. Agregar tests en `scrapers/tests/test_mi_parser.py` con fixtures sintéticos.
+5. Agregar tests en `scrapers/tests/test_mi_parser.py` con fixtures sintéticos.
 
-Si la fuente no tiene parser todavía, declararla con `enabled: false`. Los registros sin parser van a **cuarentena**, no se descartan.
+Si la fuente no tiene parser todavía, dejar la entrada thin con `enabled: false`
+(o `active: false` en la DB). Los registros sin parser van a **cuarentena**, no se descartan.
 
 ### Fuentes X/Twitter
 

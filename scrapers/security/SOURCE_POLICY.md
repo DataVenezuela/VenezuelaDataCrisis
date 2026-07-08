@@ -13,18 +13,22 @@ Cada fuente debe tener:
 
 ## Tipos soportados
 
-- `html_static`
 - `api_json`
-- `rss`
+- `html_static`
+- `webapp_js`
+- `pdf`
 - `manual_file`
+- `rss`
+- `x_recent_search`
 
 ## Trust tier
 
-- A: fuente altamente confiable
-- B: fuente institucional/local
-- C: medio o página pública
-- D: red social/carga manual
-- E: baja confianza / solo señal
+- A: fuente oficial (gobierno, USGS, Cruz Roja, FUNVISIS)
+- B: ONG verificada o medio establecido
+- C: voluntario/comunidad con ownership visible
+- D: anónima o sin verificar
+
+Solo existen los tiers `A`/`B`/`C`/`D` (enum `trust_tier`). No hay tier `E`.
 
 ## Reglas
 
