@@ -642,7 +642,7 @@ class TestPostRetry:
         cfg = StagingConfig(supabase_url="https://project.supabase.co", publishable_key="k", ingest_jwt=_TEST_JWT)
         client = httpx.Client(base_url="https://project.supabase.co", transport=t)
         exp = StagingExporter(cfg, client=client, run_id="run-1")
-        with patch("scrapers.exporters.staging_exporter.time.sleep", lambda *_: None):
+        with patch("scrapers.adapters._shared.time.sleep", lambda *_: None):
             res = exp.export_source(
                 [_person("Juan")], source_id="demo", source_fetched_ats=["2026-06-24T15:00:00Z"]
             )
@@ -655,7 +655,7 @@ class TestPostRetry:
         cfg = StagingConfig(supabase_url="https://project.supabase.co", publishable_key="k", ingest_jwt=_TEST_JWT)
         client = httpx.Client(base_url="https://project.supabase.co", transport=t)
         exp = StagingExporter(cfg, client=client, run_id="run-1")
-        with patch("scrapers.exporters.staging_exporter.time.sleep", lambda *_: None):
+        with patch("scrapers.adapters._shared.time.sleep", lambda *_: None):
             res = exp.export_source(
                 [_person("Juan")], source_id="demo", source_fetched_ats=["2026-06-24T15:00:00Z"]
             )

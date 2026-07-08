@@ -43,12 +43,11 @@ job NUNCA la loguea: solo ids de aporte, conteos y status HTTP.
 from __future__ import annotations
 
 import logging
-import time
 from dataclasses import dataclass, field
 
 import httpx
 
-from scrapers.adapters._shared import backoff_delay
+from scrapers.adapters._shared import retry_post
 from scrapers.adapters.http_client import USER_AGENT
 from scrapers.exporters.staging_exporter import StagingConfig
 
@@ -105,8 +104,6 @@ _ACOPIO_FIELDS = (
     "current_load",
 )
 
-_RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
-_MAX_POST_RETRIES = 4
 _DEFAULT_BATCH_SIZE = 500
 _MAX_PAGES = 100_000  # backstop anti-loop; el cron real nunca se acerca.
 
@@ -188,31 +185,7 @@ class SilverMaterializer:
         headers = {
             "Prefer": "resolution=ignore-duplicates,return=representation,missing=default"
         }
-        resp: httpx.Response | None = None
-        for attempt in range(1, _MAX_POST_RETRIES + 1):
-            try:
-                resp = self._client.post(path, json=payload, headers=headers)
-            except (httpx.TimeoutException, httpx.NetworkError) as exc:
-                if attempt < _MAX_POST_RETRIES:
-                    delay = backoff_delay(attempt)
-                    log.warning(
-                        "%s en POST %s intento %d/%d — reintento en %.1fs",
-                        type(exc).__name__, path, attempt, _MAX_POST_RETRIES, delay,
-                    )
-                    time.sleep(delay)
-                    continue
-                log.warning("POST %s agoto reintentos por error de red: %s", path, exc)
-                return None
-            if resp.status_code in _RETRYABLE_STATUS and attempt < _MAX_POST_RETRIES:
-                delay = backoff_delay(attempt)
-                log.warning(
-                    "HTTP %s en POST %s intento %d/%d — reintento en %.1fs",
-                    resp.status_code, path, attempt, _MAX_POST_RETRIES, delay,
-                )
-                time.sleep(delay)
-                continue
-            return resp
-        return resp
+        return retry_post(self._client, path, payload, headers=headers, log=log)
 
     @staticmethod
     def _inserted_count(resp: httpx.Response | None) -> int:
@@ -471,6 +444,9 @@ class SilverMaterializer:
                 # FK-safe: asegura la fila de catalogo antes de proyectar. Un fallo
                 # de seed es transitorio: no proyectamos este aporte y no avanzamos.
                 if not self._seed_event(row_event_id, seeded, result):
+                    result.errors.append(
+                        f"seed event {row_event_id!r}: aporte {aporte_id!r} silenciado"
+                    )
                     ok = False
                     continue
             if entity_type == "person":

@@ -28,12 +28,11 @@ from __future__ import annotations
 
 import json
 import logging
-import time
 from datetime import datetime, timezone
 
 import httpx
 
-from scrapers.adapters._shared import backoff_delay
+from scrapers.adapters._shared import retry_post
 from scrapers.adapters.base import RawContent
 from scrapers.adapters.http_client import USER_AGENT
 from scrapers.exporters.staging_exporter import StagingConfig
@@ -46,10 +45,6 @@ _RAW_ARTIFACTS_PATH = "/rest/v1/raw_artifacts"
 # UUID placeholder para dry-run: nunca viaja a la red (en dry-run no se abre
 # cliente). Deja que el pipeline stampee un _artifact_id no vacio y siga.
 _DRYRUN_PLACEHOLDER = "00000000-0000-0000-0000-000000000000"
-
-_RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
-_MAX_POST_RETRIES = 4
-
 
 def _now_iso() -> str:
     """Timestamp ISO-8601 UTC sin microsegundos, para ``scrape_runs.finished_at``."""
@@ -109,36 +104,14 @@ class ProvenanceExporter:
     ) -> httpx.Response | None:
         """POST con backoff en status transitorios / errores de red.
 
-        Devuelve la ultima response, o None si se agotan los reintentos por un
-        error de transporte (nunca propaga: la procedencia no debe tumbar el run).
-        NUNCA incluye ``payload`` en los logs (puede contener raw_text = PII).
+        Devuelve None si se agotan los reintentos (nunca propaga: la procedencia
+        no debe tumbar el run). NUNCA loguea el payload (puede contener PII).
+        ConnectError ⊂ NetworkError, ConnectTimeout ⊂ TimeoutException — errores
+        pre-envío se reintentan igual que los de red para evitar duplicados en
+        raw_artifacts. No separar en dos except ni reordenar esta invariante.
         """
         assert self._client is not None
-        resp: httpx.Response | None = None
-        for attempt in range(1, _MAX_POST_RETRIES + 1):
-            try:
-                resp = self._client.post(path, json=payload, headers=headers)
-            except (httpx.TimeoutException, httpx.NetworkError) as exc:
-                if attempt < _MAX_POST_RETRIES:
-                    delay = backoff_delay(attempt)
-                    log.warning(
-                        "%s en POST %s intento %d/%d — reintento en %.1fs",
-                        type(exc).__name__, path, attempt, _MAX_POST_RETRIES, delay,
-                    )
-                    time.sleep(delay)
-                    continue
-                log.warning("POST %s agoto reintentos por error de red: %s", path, exc)
-                return None
-            if resp.status_code in _RETRYABLE_STATUS and attempt < _MAX_POST_RETRIES:
-                delay = backoff_delay(attempt)
-                log.warning(
-                    "HTTP %s en POST %s intento %d/%d — reintento en %.1fs",
-                    resp.status_code, path, attempt, _MAX_POST_RETRIES, delay,
-                )
-                time.sleep(delay)
-                continue
-            return resp
-        return resp
+        return retry_post(self._client, path, payload, headers=headers, log=log)
 
     @staticmethod
     def _extract_id(resp: httpx.Response, id_key: str) -> str | None:
