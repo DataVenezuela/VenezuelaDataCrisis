@@ -1,10 +1,10 @@
-"""Puerto de acceso a datos para la consolidacion (Stage 2) y un fake en memoria.
+"""Puertos de acceso a datos para Stage 2 y sus fakes en memoria.
 
 La decision de arquitectura del backend (PostgREST directo vs proxy Vercel)
-sigue SIN tomarse por el equipo. Para no acoplar el job a ninguna de las dos
-opciones, todo el acceso a datos pasa por `ConsolidationDataPort` (un Protocol).
-El adapter concreto de produccion NO se implementa aqui: queda pendiente de esa
-decision. Los tests usan `FakeInMemoryAdapter`, sin red ni base de datos real.
+sigue SIN tomarse por el equipo. Para no acoplar los jobs a ninguna de las dos
+opciones, todo el acceso a datos pasa por Protocols. Los adapters concretos de
+produccion NO se implementan aqui: quedan pendientes de esa decision. Los tests
+usan los Fakes en memoria definidos al final de este modulo.
 
 Modelo de datos (contrato minimo, agnostico del backend)
 --------------------------------------------------------
@@ -25,6 +25,7 @@ docstring de ``pick_winner`` en ``consolidation_job``.
 
 from __future__ import annotations
 
+import uuid
 from typing import Protocol, runtime_checkable
 
 # Alias del tipo de record para legibilidad. Es intencionalmente laxo
@@ -146,4 +147,103 @@ class FakeInMemoryAdapter:
     def close(self) -> None:
         # No-op: el fake no abre recursos. Presente por el contrato para que el
         # caller pueda cerrar el port de forma uniforme (real o fake).
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Gold tables port + fake (#266)
+# ---------------------------------------------------------------------------
+
+
+@runtime_checkable
+class GoldDataPort(Protocol):
+    """Contrato de I/O para el writer de tablas gold.
+
+    El adapter de produccion (Supabase PostgREST) queda pendiente; los tests
+    usan `FakeGoldAdapter` (sin red ni DB).
+    """
+
+    def upsert_gold_entity(self, entity: Record) -> str:
+        """UPSERT en gold_entities por canonical_aporte_id.
+
+        Si ya existe una fila con ese canonical_aporte_id la actualiza; si no,
+        la crea. Devuelve el gold_id (UUID str) de la fila resultante.
+        """
+        ...
+
+    def upsert_gold_member(
+        self,
+        gold_id: str,
+        aporte_id: str,
+        via_candidate: str | None = None,
+    ) -> None:
+        """UPSERT en gold_members por (gold_id, aporte_id).
+
+        Re-upsertar la misma pareja es no-op (idempotente).
+        El via_candidate se almacena en la primera insercion; re-upsertar con
+        un via_candidate distinto actualiza el campo existente.
+        """
+        ...
+
+    def insert_gold_history(self, event: Record) -> None:
+        """INSERT en gold_history (append-only, log inmutable)."""
+        ...
+
+    def close(self) -> None:
+        """Libera recursos (no-op en el fake)."""
+        ...
+
+
+class FakeGoldAdapter:
+    """Implementacion en memoria de GoldDataPort para tests offline.
+
+    - entities:   canonical_aporte_id -> fila completa (incluye gold_id generado).
+    - members:    set de (gold_id, aporte_id) ya insertadas (para asserts de membership).
+    - member_via: (gold_id, aporte_id) -> via_candidate (siempre actualizado, UPSERT).
+    - history:    lista ordenada de eventos (append-only).
+    """
+
+    def __init__(self) -> None:
+        self.entities: dict[str, Record] = {}
+        self.members: set[tuple[str, str]] = set()
+        self.member_via: dict[tuple[str, str], str | None] = {}
+        self.history: list[Record] = []
+
+        self.upsert_entity_calls: int = 0
+        self.upsert_member_calls: int = 0
+        self.insert_history_calls: int = 0
+
+    def upsert_gold_entity(self, entity: Record) -> str:
+        canonical_aporte_id = str(entity.get("canonical_aporte_id") or "")
+        if not canonical_aporte_id:
+            raise ValueError("upsert_gold_entity: canonical_aporte_id requerido")
+
+        self.upsert_entity_calls += 1
+        existing = self.entities.get(canonical_aporte_id)
+        if existing is not None:
+            existing.update(entity)
+            return str(existing["gold_id"])
+
+        gold_id = str(uuid.uuid4())
+        row: Record = dict(entity)
+        row["gold_id"] = gold_id
+        self.entities[canonical_aporte_id] = row
+        return gold_id
+
+    def upsert_gold_member(
+        self,
+        gold_id: str,
+        aporte_id: str,
+        via_candidate: str | None = None,
+    ) -> None:
+        self.upsert_member_calls += 1
+        key = (gold_id, aporte_id)
+        self.members.add(key)
+        self.member_via[key] = via_candidate
+
+    def insert_gold_history(self, event: Record) -> None:
+        self.insert_history_calls += 1
+        self.history.append(dict(event))
+
+    def close(self) -> None:
         return None

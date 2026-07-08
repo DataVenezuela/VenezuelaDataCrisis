@@ -17,15 +17,8 @@ from __future__ import annotations
 
 import pytest
 
-from scrapers.jobs.gold_writer import (
-    FakeGoldAdapter,
-    GoldDataPort,
-    GoldWriter,
-    _ACTION_MERGE,
-    _ACTION_PASSTHROUGH,
-    _ACTOR_KIND_SYSTEM,
-)
-from scrapers.jobs.ports import Record
+from scrapers.jobs.gold_writer import GoldWriter
+from scrapers.jobs.ports import FakeGoldAdapter, GoldDataPort, Record
 
 
 def _aporte(
@@ -77,7 +70,7 @@ def test_cluster_un_miembro_passthrough() -> None:
     entity = adapter.entities["aporte-1"]
     assert entity["gold_id"] == gold_id
     assert entity["canonical_aporte_id"] == "aporte-1"
-    assert entity["entity_type"] == "Event"
+    assert entity["entity_type"] == "event"
     assert entity["verification_status"] == "unverified"
 
     # Un miembro registrado.
@@ -87,8 +80,8 @@ def test_cluster_un_miembro_passthrough() -> None:
     assert len(adapter.history) == 1
     hist = adapter.history[0]
     assert hist["gold_id"] == gold_id
-    assert hist["action"] == _ACTION_PASSTHROUGH
-    assert hist["actor_kind"] == _ACTOR_KIND_SYSTEM
+    assert hist["action"] == "passthrough"
+    assert hist["actor_kind"] == "system"
     assert hist["detail"]["cluster_size"] == 1
 
 
@@ -114,7 +107,7 @@ def test_cluster_dos_miembros_merge() -> None:
 
     assert len(adapter.history) == 1
     hist = adapter.history[0]
-    assert hist["action"] == _ACTION_MERGE
+    assert hist["action"] == "merge"
     assert hist["detail"]["cluster_size"] == 2
     assert set(hist["detail"]["aporte_ids"]) == {"aporte-1", "aporte-2"}
     assert hist["detail"]["winner_aporte_id"] == "aporte-1"
@@ -139,7 +132,7 @@ def test_cluster_n_miembros_merge() -> None:
         assert (gold_id, f"aporte-{i}") in adapter.members
 
     hist = adapter.history[0]
-    assert hist["action"] == _ACTION_MERGE
+    assert hist["action"] == "merge"
     assert hist["detail"]["cluster_size"] == 5
 
 
@@ -181,10 +174,12 @@ def test_idempotencia_via_candidate_registrado() -> None:
     a2 = _aporte("aporte-2")
 
     candidate_id = "cand-uuid-123"
-    writer.write_cluster([a1, a2], winner=a1, via_candidate=candidate_id)
+    gold_id = writer.write_cluster([a1, a2], winner=a1, via_candidate=candidate_id)
 
     hist = adapter.history[0]
     assert hist["via_candidate"] == candidate_id
+    assert adapter.member_via[(gold_id, "aporte-1")] == candidate_id
+    assert adapter.member_via[(gold_id, "aporte-2")] == candidate_id
 
 
 # ---------------------------------------------------------------------------

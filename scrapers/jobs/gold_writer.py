@@ -10,19 +10,17 @@ winner (elegido por `pick_winner`), escribe:
 Huerfanos (cluster de 1 miembro): se proyectan como gold_entity con 1
 miembro y accion "passthrough", sin necesitar un candidato previo.
 
-Acceso a datos: todo pasa por `GoldDataPort` (Protocol). El adapter de
-produccion (Supabase PostgREST) queda pendiente; los tests usan
-`FakeGoldAdapter` (sin red ni DB).
+Acceso a datos: todo pasa por `GoldDataPort` (Protocol, definido en ports.py).
+El adapter de produccion (Supabase PostgREST) queda pendiente; los tests usan
+`FakeGoldAdapter` (sin red ni DB), tambien definido en ports.py.
 """
 
 from __future__ import annotations
 
 import logging
-import uuid
-from datetime import datetime, timezone
-from typing import Protocol, runtime_checkable
 
-from scrapers.jobs.ports import Record
+from scrapers.adapters._shared import now_utc
+from scrapers.jobs.ports import GoldDataPort, Record
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -30,92 +28,13 @@ _ACTION_MERGE = "merge"
 _ACTION_PASSTHROUGH = "passthrough"
 _ACTOR_KIND_SYSTEM = "system"
 
-
-@runtime_checkable
-class GoldDataPort(Protocol):
-    """Contrato de I/O para el writer de tablas gold."""
-
-    def upsert_gold_entity(self, entity: Record) -> str:
-        """UPSERT en gold_entities por canonical_aporte_id.
-
-        Si ya existe una fila con ese canonical_aporte_id, la actualiza;
-        si no, la crea. Devuelve el gold_id (UUID str) de la fila resultante.
-        """
-        ...
-
-    def upsert_gold_member(
-        self,
-        gold_id: str,
-        aporte_id: str,
-        via_candidate: str | None = None,
-    ) -> None:
-        """UPSERT en gold_members por (gold_id, aporte_id).
-
-        Re-upsertar la misma pareja es no-op (idempotente).
-        """
-        ...
-
-    def insert_gold_history(self, event: Record) -> None:
-        """INSERT en gold_history (append-only, log inmutable)."""
-        ...
-
-    def close(self) -> None:
-        """Libera recursos (no-op en el fake)."""
-        ...
-
-
-class FakeGoldAdapter:
-    """Implementacion en memoria de GoldDataPort para tests offline.
-
-    - entities: canonical_aporte_id -> fila completa (incluye gold_id generado).
-    - members:  set de (gold_id, aporte_id) ya insertadas.
-    - history:  lista ordenada de eventos (append-only).
-    """
-
-    def __init__(self) -> None:
-        self.entities: dict[str, Record] = {}
-        self.members: set[tuple[str, str]] = set()
-        self.history: list[Record] = []
-
-        self.upsert_entity_calls: int = 0
-        self.upsert_member_calls: int = 0
-        self.insert_history_calls: int = 0
-
-    def upsert_gold_entity(self, entity: Record) -> str:
-        canonical_aporte_id = str(entity.get("canonical_aporte_id") or "")
-        if not canonical_aporte_id:
-            raise ValueError("upsert_gold_entity: canonical_aporte_id requerido")
-
-        self.upsert_entity_calls += 1
-        existing = self.entities.get(canonical_aporte_id)
-        if existing is not None:
-            existing.update(entity)
-            return str(existing["gold_id"])
-
-        gold_id = str(uuid.uuid4())
-        row: Record = dict(entity)
-        row["gold_id"] = gold_id
-        self.entities[canonical_aporte_id] = row
-        return gold_id
-
-    def upsert_gold_member(
-        self,
-        gold_id: str,
-        aporte_id: str,
-        via_candidate: str | None = None,
-    ) -> None:
-        self.upsert_member_calls += 1
-        key = (gold_id, aporte_id)
-        if key in self.members:
-            return
-        self.members.add(key)
-
-    def insert_gold_history(self, event: Record) -> None:
-        self.insert_history_calls += 1
-        self.history.append(dict(event))
-
-    def close(self) -> None:
-        return None
+# Mapeo de nombre interno -> slug del enum de DB (gold_entities.entity_type).
+# El enum del backend acepta: "event" | "acopio" | "person" (minusculas).
+_ENTITY_TYPE_SLUG: dict[str, str] = {
+    "Event": "event",
+    "AcopioCenter": "acopio",
+    "Person": "person",
+}
 
 
 class GoldWriter:
@@ -157,26 +76,34 @@ class GoldWriter:
         if not winner_id:
             raise ValueError("write_cluster: winner debe tener un campo 'id'")
 
-        entity_type = str(winner.get("entity_type") or "")
-        confidence_score = winner.get("confidence_score")
+        internal_type = str(winner.get("entity_type") or "")
+        entity_type_slug = _ENTITY_TYPE_SLUG.get(internal_type, internal_type.lower())
+        raw_score = winner.get("confidence_score")
+        confidence_score = (
+            float(raw_score)
+            if not isinstance(raw_score, bool) and isinstance(raw_score, (int, float))
+            else 0.0
+        )
         dedup_hash = winner.get("dedup_hash")
-        now = datetime.now(timezone.utc).isoformat()
+        now = now_utc()
 
         entity: Record = {
             "canonical_aporte_id": winner_id,
-            "entity_type": entity_type,
-            "confidence_score": confidence_score if isinstance(confidence_score, (int, float)) else 0.0,
+            "entity_type": entity_type_slug,
+            "confidence_score": confidence_score,
             "verification_status": "unverified",
             "last_deduplicated_at": now,
             "updated_at": now,
         }
         gold_id = self._port.upsert_gold_entity(entity)
 
-        aporte_ids = [str(rec.get("id") or "") for rec in cluster]
-        for aporte_id in aporte_ids:
+        valid_aporte_ids: list[str] = []
+        for rec in cluster:
+            aporte_id = str(rec.get("id") or "")
             if not aporte_id:
                 _LOGGER.warning("write_cluster: aporte sin id en cluster, omitiendo")
                 continue
+            valid_aporte_ids.append(aporte_id)
             self._port.upsert_gold_member(gold_id, aporte_id, via_candidate)
 
         action = _ACTION_PASSTHROUGH if len(cluster) == 1 else _ACTION_MERGE
@@ -189,7 +116,7 @@ class GoldWriter:
             "at": now,
             "detail": {
                 "cluster_size": len(cluster),
-                "aporte_ids": aporte_ids,
+                "aporte_ids": valid_aporte_ids,
                 "winner_aporte_id": winner_id,
                 "dedup_hash": dedup_hash,
             },
@@ -199,7 +126,7 @@ class GoldWriter:
         _LOGGER.info(
             "gold_writer cluster_written entity_type=%s gold_id=%s "
             "cluster_size=%d action=%s winner_id=%s via_candidate=%s",
-            entity_type,
+            entity_type_slug,
             gold_id,
             len(cluster),
             action,
