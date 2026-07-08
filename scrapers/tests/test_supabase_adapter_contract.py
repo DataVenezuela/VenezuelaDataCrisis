@@ -156,3 +156,44 @@ def test_table_paths_apuntan_a_tablas_reales() -> None:
     for _, table_path in _ENTITY_TABLES.values():
         table = table_path.rsplit("/", 1)[-1]
         assert f"create table public.{table}" in sql
+
+
+# ---------------------------------------------------------------------------
+# dedup_candidates — contrato del consolidation_job (#281)
+# ---------------------------------------------------------------------------
+
+def test_dedup_candidates_columnas_reales_existen() -> None:
+    sql = _read_schema()
+    cols = _columns_of_table(sql, "dedup_candidates")
+    for col in ("left_aporte_id", "right_aporte_id", "blocking_key", "priority", "touches_gold"):
+        assert col in cols, (
+            f"dedup_candidates.{col} requerida por el consolidation_job "
+            f"no existe en el schema real; columnas: {sorted(cols)}"
+        )
+    # Columnas del schema viejo (migración 0009) no deben estar en el fixture actual.
+    assert "left_person" not in cols, (
+        "dedup_candidates.left_person es del schema antiguo; fixture debe usar left_aporte_id"
+    )
+    assert "right_person" not in cols, (
+        "dedup_candidates.right_person es del schema antiguo; fixture debe usar right_aporte_id"
+    )
+
+
+def test_candidate_payload_solo_emite_columnas_reales() -> None:
+    from scrapers.jobs.consolidation_job import _candidate_payload
+
+    sql = _read_schema()
+    dedup_cols = _columns_of_table(sql, "dedup_candidates")
+    payload = _candidate_payload({
+        "left_aporte_id": "aaaaaaaa-0000-4000-8000-000000000001",
+        "right_aporte_id": "aaaaaaaa-0000-4000-8000-000000000002",
+        "blocking_key": "ced:ev1:abc123",
+        "score": 0.95,
+        "reasons": {"nombre": 0.5},
+        "priority": 1,
+    })
+    unknown = set(payload) - dedup_cols
+    assert not unknown, (
+        f"_candidate_payload() emite claves sin columna real en dedup_candidates: {unknown}. "
+        "Actualizar el payload o el fixture si el schema cambió."
+    )

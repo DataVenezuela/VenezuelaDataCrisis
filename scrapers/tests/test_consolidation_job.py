@@ -518,13 +518,13 @@ def test_person_candidate_payload_matches_master_schema() -> None:
     assert len(transport.post_bodies) == 1
     assert isinstance(transport.post_bodies[0], list)
     body = transport.post_bodies[0][0]
-    assert body["event_id"] == _EVENT_ID
     assert body["left_aporte_id"] == "a1"
     assert body["right_aporte_id"] == "a2"
     assert body["blocking_key"] == f"ced:{_EVENT_ID}:same"
     assert body["priority"] == 1
     assert body["touches_gold"] is False
     assert body["decision"] == "pending"
+    assert "event_id" not in body
     assert "left_person" not in body
     assert "right_person" not in body
 
