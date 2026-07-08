@@ -87,7 +87,9 @@ CREATE TABLE public.aportes (
   artifact_id uuid NOT NULL,
   source_record_id text,
   external_id text NOT NULL,
-  dedup_hash character varying NOT NULL,
+  -- Nullable a proposito: Person sin deterministic_id manda NULL para que el
+  -- backend distinga ausencia de hash de un hash real (scrapers/dedup/specs.py).
+  dedup_hash character varying,
   dedup_version text NOT NULL,
   block_keys jsonb NOT NULL DEFAULT '[]'::jsonb,
   content_hash character varying NOT NULL,
@@ -96,7 +98,10 @@ CREATE TABLE public.aportes (
   source_id uuid NOT NULL,
   CONSTRAINT aportes_pkey PRIMARY KEY (id),
   CONSTRAINT aportes_source_fk FOREIGN KEY (source_id) REFERENCES public.sources(source_id),
-  CONSTRAINT aportes_artifact_id_foreign FOREIGN KEY (artifact_id) REFERENCES public.raw_artifacts(artifact_id)
+  CONSTRAINT aportes_artifact_id_foreign FOREIGN KEY (artifact_id) REFERENCES public.raw_artifacts(artifact_id),
+  -- Requerida por el upsert del staging_exporter (?on_conflict=source_id,external_id):
+  -- un aporte por registro-fuente por fuente; silver nunca colapsa.
+  CONSTRAINT aportes_source_external_uq UNIQUE (source_id, external_id)
 );
 CREATE TABLE public.events (
   event_id uuid NOT NULL DEFAULT gen_random_uuid(),
