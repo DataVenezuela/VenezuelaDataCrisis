@@ -56,11 +56,21 @@ _SUPABASE_ENV = {
 }
 
 
+def _source_id_from_url(url: httpx.URL) -> str | None:
+    """Extrae X de un filtro PostgREST ``source_id=eq.X`` en la query."""
+    value = url.params.get("source_id")
+    if value and value.startswith("eq."):
+        return value[len("eq.") :]
+    return None
+
+
 class _StagingTransport(httpx.BaseTransport):
     """Intercepta POSTs a /rest/v1/aportes y el watermark via PostgREST.
 
     PostgREST batch devuelve 201 con body vacio (return=minimal). No hay
-    409 porque resolution=merge-duplicates absorbe duplicados.
+    409 porque resolution=merge-duplicates absorbe duplicados. El watermark vive
+    en sources.watermark_at: se lee con GET /sources?source_id=eq.X&select=watermark_at
+    y se escribe con PATCH /sources?source_id=eq.X {"watermark_at": ...}.
     """
 
     def __init__(self, aportes_status: int = 201) -> None:
@@ -77,14 +87,16 @@ class _StagingTransport(httpx.BaseTransport):
             else:
                 self.batch_posts.append([body])
             return httpx.Response(self.aportes_status, json={})
-        if path == "/rest/v1/source_watermarks":
-            if request.method == "GET":
-                return httpx.Response(200, json=[])
-            body = json.loads(request.content)
-            self.watermark_posts.append(body)
-            return httpx.Response(200, json={})
         if path == "/rest/v1/sources":
-            return httpx.Response(200, json=[{"id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"}])
+            if request.method == "GET":
+                return httpx.Response(200, json=[{"watermark_at": None}])
+            if request.method == "PATCH":
+                body = json.loads(request.content)
+                self.watermark_posts.append(
+                    {"source_id": _source_id_from_url(request.url), **body}
+                )
+                return httpx.Response(200, json=[body])
+            return httpx.Response(404)
         return httpx.Response(404)
 
 
@@ -112,21 +124,20 @@ def _patch_exporter(transport: httpx.BaseTransport) -> Any:
     return patch.object(rp, "StagingExporter", side_effect=_factory)
 
 
-_QUARANTINE_ENV = {
-    "QUARANTINE_API_KEY": "test-key",
-    "QUARANTINE_BASE_URL": "https://backend.test",
-}
+# Quarantine ahora usa las mismas SUPABASE_* que staging; _QUARANTINE_ENV
+# se conserva vacio para no romper los test que hacen {**_SUPABASE_ENV, **_QUARANTINE_ENV}.
+_QUARANTINE_ENV: dict[str, str] = {}
 
 
 class _QuarantineTransport(httpx.BaseTransport):
-    """Intercepta POSTs a /api/v1/quarantine y captura los bodies."""
+    """Intercepta POSTs a /rest/v1/quarantined_records y captura los bodies."""
 
     def __init__(self, status: int = 201) -> None:
         self.status = status
         self.posts: list[dict[str, Any]] = []
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/api/v1/quarantine":
+        if request.url.path == "/rest/v1/quarantined_records":
             self.posts.append(json.loads(request.content))
             return httpx.Response(self.status, json={"ok": True})
         return httpx.Response(404)
@@ -136,16 +147,16 @@ def _patch_quarantine_exporter(transport: httpx.BaseTransport) -> Any:
     """Factory que reemplaza QuarantineExporter por uno con client mockeado.
 
     Espeja ``_patch_exporter``: run_pipeline llama
-    ``QuarantineExporter(QuarantineConfig.from_env(), run_id=...)``; la factory
+    ``QuarantineExporter(QuarantineConfig.from_env())``; la factory
     inyecta un httpx.Client(transport=...) para que nada salga a la red.
     """
     def _factory(
-        config: QuarantineConfig | None, *, run_id: str | None = None
+        config: QuarantineConfig | None,
     ) -> QuarantineExporter:
         if config is None:
-            return QuarantineExporter(None, run_id=run_id)
-        client = httpx.Client(base_url=config.base_url, transport=transport)
-        return QuarantineExporter(config, client=client, run_id=run_id)
+            return QuarantineExporter(None)
+        client = httpx.Client(base_url=config.supabase_url, transport=transport)
+        return QuarantineExporter(config, client=client)
 
     return patch.object(rp, "QuarantineExporter", side_effect=_factory)
 
@@ -174,8 +185,6 @@ class _ProvenanceTransport(httpx.BaseTransport):
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
-        if path == "/rest/v1/sources":
-            return httpx.Response(200, json=[{"id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"}])
         if path == "/rest/v1/scrape_runs":
             if request.method == "PATCH":
                 return httpx.Response(200, json=[])
@@ -707,7 +716,7 @@ class TestWatermarkEndToEnd:
 
         class _PersistedWatermarkTransport(_StagingTransport):
             def handle_request(self, request: httpx.Request) -> httpx.Response:
-                if request.url.path == "/rest/v1/source_watermarks" and request.method == "GET":
+                if request.url.path == "/rest/v1/sources" and request.method == "GET":
                     return httpx.Response(200, json=[{"watermark_at": "2026-06-01T00:00:00Z"}])
                 return super().handle_request(request)
 
@@ -752,8 +761,8 @@ sources:
             "scrapers.pipelines.run_pipeline._get_parser", side_effect=lambda *_: _mock_parser()
         ):
             run_pipeline(config_path=cfg, output_dir=tmp_path / "out")
-        slugs = {p["slug"] for p in transport.watermark_posts}
-        assert slugs == {"fuente_a", "fuente_b"}
+        source_ids = {p["source_id"] for p in transport.watermark_posts}
+        assert source_ids == {"fuente_a", "fuente_b"}
 
     def test_full_scan_omits_updated_after(self, tmp_path: Path) -> None:
         """full_scan=True → updated_after no llega al adapter."""
@@ -879,8 +888,8 @@ sources:
         assert summary["sources_processed"] == 5
         assert summary["staging_sent"] == 10  # 2 personas x 5 fuentes
         assert summary["errors"] == []
-        slugs = {p["slug"] for p in transport.watermark_posts}
-        assert slugs == {f"fuente_{i}" for i in range(5)}
+        source_ids = {p["source_id"] for p in transport.watermark_posts}
+        assert source_ids == {f"fuente_{i}" for i in range(5)}
 
     def test_max_workers_one_is_sequential_default(self, tmp_path: Path) -> None:
         cfg = self._make_n_sources_config(tmp_path, 5)
@@ -1205,7 +1214,7 @@ class TestMinorProtectionEndToEnd:
         assert transport.batch_posts == []
         assert any("registro omitido" in e for e in summary["errors"])
         assert len(qtransport.posts) >= 1
-        assert qtransport.posts[0]["riskLevel"] == "high"
+        assert qtransport.posts[0]["risk_level"] == "high"
 
 
 # ---------------------------------------------------------------------------
@@ -1362,7 +1371,7 @@ class _WatermarkTransport(_StagingTransport):
         self._initial_watermark = watermark_at
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/rest/v1/source_watermarks" and request.method == "GET":
+        if request.url.path == "/rest/v1/sources" and request.method == "GET":
             return httpx.Response(200, json=[{"watermark_at": self._initial_watermark}])
         return super().handle_request(request)
 
@@ -1638,12 +1647,13 @@ class TestBronzeProvenance:
         assert prov.artifact_posts[0]["body_hash"] == prov.artifact_posts[1]["body_hash"]
         assert all("on_conflict" not in q for q in prov.artifact_queries)
 
-    def test_scrape_run_posts_resolved_source_id(
+    def test_scrape_run_posts_source_id_directly(
         self, tmp_path: Path, demo_config: Path
     ) -> None:
+        # source.id (config) ES el source_id que va a scrape_runs, sin resolver slug.
         prov = _ProvenanceTransport()
         self._run(tmp_path, demo_config, prov)
-        assert prov.run_posts[0]["source_id"] == "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        assert prov.run_posts[0]["source_id"] == "encuentralos_tecnosoft"
 
     def test_provenance_failure_blocks_export_and_watermark(
         self, tmp_path: Path, demo_config: Path

@@ -1,0 +1,39 @@
+# Production scraper source config (thin format). COMMITTED on purpose.
+#
+# This file is a thin binding only:
+#   source_id (UUID)  ->  parser (the "shape")  + enabled
+# It holds NO source identity. url/name/type/trust_tier/keywords/refresh live in
+# the `sources` table in Supabase and are resolved by source_id at load time
+# (ADR 0009). A committed thin map leaks nothing the runtime logs don't already
+# show (opaque UUID + parser name); the real identities never leave the DB.
+#
+# HOW TO USE
+#   1. The maintainer seeds a row in `sources` (url, source_type, display_name,
+#      required_keywords, governed_tier, refresh_minutes, active) and gets its
+#      generated `source_id` UUID. See docs/adr/README.md / ADR 0009.
+#   2. Replace a placeholder UUID below with the real source_id, set the parser,
+#      and flip enabled: true. Commit the change (parser assignment stays under
+#      code review, ADR 0009 §6).
+#   3. At runtime SUPABASE_URL / SUPABASE_PUBLISHABLE_KEY / SUPABASE_INGEST_JWT
+#      must be set: a thin config cannot run offline (it has no url). For
+#      offline/demo runs use a full-format config instead (sources.demo.yaml).
+#
+# Per thin source, only these three keys:
+#   id               - the source_id UUID from the `sources` table
+#   parser_asignado  - the parser that handles this source's shape
+#   enabled          - run in this deployment (AND-ed with sources.active in the DB)
+#
+# project.event_id must be a valid UUID: it is injected into every Person the
+# pipeline exports (persons.event_id is NOT NULL) and seeds the events catalog.
+
+project:
+  event_id: 8f14e45f-ceea-467e-bd5d-0a4f2e0c1a3a
+  default_country: Venezuela
+
+sources:
+  # Cada entrada es un binding thin uuid -> parser. El source_id debe existir en
+  # la tabla `sources` (el loader resuelve TODAS las entradas contra la DB, esten
+  # enabled o no); un UUID sin fila falla cerrado al cargar.
+  - id: 0b50c515-c320-43cd-ade8-535295f6d029
+    parser_asignado: encuentralos
+    enabled: true

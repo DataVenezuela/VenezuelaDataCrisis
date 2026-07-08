@@ -361,10 +361,14 @@ class SilverMaterializer:
         if resp is not None and resp.status_code in (200, 201):
             self._add_projected(kind, self._inserted_count(resp), result)
             return
-        if len(rows) > 1 and resp is not None:
+        if len(rows) > 1:
+            # El batch fallo: rechazo HTTP (resp con status de error) o error de red
+            # tras agotar reintentos (resp None). Ambos casos activan el fallback
+            # fila a fila para aislar la fila mala sin descartar todo el lote; un
+            # error de red no debe saltarse el retry individual.
             log.warning(
                 "proyeccion %s: batch de %d rechazado (status %s); reintentando fila a fila",
-                kind, len(rows), resp.status_code,
+                kind, len(rows), getattr(resp, "status_code", "n/a"),
             )
             for row in rows:
                 r = self._post(path, [row])

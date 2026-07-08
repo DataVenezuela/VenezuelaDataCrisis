@@ -7,7 +7,7 @@
 | Decisores | DB/API, Scrapers/Cleaners, Verification |
 | Reemplaza a | [ADR 0001](./0001-arquitectura-serving-publico.md) §5 (modelo de datos del artefacto público) |
 | Complementa | [ADR 0006](./0006-proteccion-pii-ingesta.md) (protección de PII) |
-| Relacionado con | `docs/pipeline.md`, `docs/schema.md`, `docs/specs/person-dedup.md`, `docs/specs/db-scraper-contract.md` |
+| Relacionado con | `docs/pipeline.md`, `docs/schema.md`, `docs/specs/person-dedup.md` |
 
 ---
 

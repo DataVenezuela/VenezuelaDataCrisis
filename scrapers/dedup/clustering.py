@@ -19,8 +19,8 @@ def find_candidates(
 
     Returns list of candidate dicts with keys:
         event_id: event UUID
-        left_aporte_id: left aporte.id
-        right_aporte_id: right aporte.id
+        left_aporte_id: left aportes.id
+        right_aporte_id: right aportes.id
         blocking_key: block key that produced the candidate
         score: float
         reasons: dict[str, float]

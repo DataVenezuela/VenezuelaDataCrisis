@@ -64,17 +64,53 @@ Fuente social experimental deshabilitada:
 
 ---
 
+## Formato thin (fuentes en la DB, ADR 0009)
+
+Además del formato completo de arriba, una fuente puede declararse en formato
+**thin**: la entrada del repo solo trae `id` (el `source_id` UUID de la tabla
+`sources`), `parser_asignado` y `enabled`. La `url`, `name`, `type`, `trust_tier`,
+`required_keywords` y el tuning viven en la tabla `sources` y los resuelve el loader
+por `source_id`. Así el repo nunca expone la identidad de la fuente, solo su parser
+(su "shape"). Ver ADR 0009.
+
+```yaml
+project:
+  event_id: "f0e1d2c3-b4a5-6789-0fed-cba987654321"
+
+sources:
+  - id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"  # source_id (UUID) de la tabla sources
+    parser_asignado: encuentralos
+    enabled: true
+```
+
+Requisitos del formato thin:
+
+- Requiere las env `SUPABASE_URL` / `SUPABASE_PUBLISHABLE_KEY` /
+  `SUPABASE_INGEST_JWT`: sin ellas no se pueden resolver las definiciones y se falla
+  cerrado. Para correr offline (demo, tests) usar el formato completo (con `url`).
+- La fila debe existir en `sources` con al menos `url`, `source_type`,
+  `governed_tier` y `refresh_minutes`, si no la fuente se descarta (fail-closed).
+- `enabled` efectivo = `enabled` del repo AND `active` de la fila en `sources`.
+
+La presencia de `url` en la entrada distingue el formato completo (offline) del thin.
+
+---
+
 ## Campos
+
+Una entrada **completa** (con `url`) debe traer todos los campos marcados "sí". Una
+entrada **thin** (sin `url`) solo requiere `id`, `parser_asignado` y `enabled`; el
+resto lo aporta la tabla `sources`.
 
 | Campo | Requerido | Descripción |
 |---|---|---|
-| `id` | sí | Identificador único de la fuente (slug, sin espacios) |
-| `name` | sí | Nombre legible para logs y trazabilidad |
-| `url` | sí | URL base de la fuente |
-| `type` | sí | Tipo de adapter a usar (ver §Tipos) |
+| `id` | sí | Identificador de la fuente. En formato completo, un slug sin espacios; en formato thin, el `source_id` (UUID) de la tabla `sources` |
+| `name` | completo | Nombre legible para trazabilidad (en thin lo aporta `sources.display_name`) |
+| `url` | completo | URL base de la fuente (en thin lo aporta `sources.url`) |
+| `type` | completo | Tipo de adapter a usar (ver §Tipos; en thin lo aporta `sources.source_type`) |
 | `parser_asignado` | sí | Nombre del parser. Sin parser → cuarentena |
-| `trust_tier` | sí | Letra A/B/C/D — nivel de confianza |
-| `enabled` | sí | `true`/`false`. Las deshabilitadas se ignoran |
+| `trust_tier` | completo | Letra A/B/C/D, nivel de confianza (en thin lo aporta `sources.governed_tier`) |
+| `enabled` | sí | `true`/`false`. Las deshabilitadas se ignoran. En thin se combina con `sources.active` |
 | `refresh_minutes` | no | Frecuencia mínima de scraping. Default: 60 |
 | `max_concurrent_pages` | no | Máximo de páginas API en vuelo cuando la primera respuesta reporta `total`, `count`, `total_count` o `totalCount`. Si se omite, `api_adapter.py` usa un default conservador. Sin total confiable, el adapter conserva paginación secuencial. |
 | `max_concurrent_posts` | no | Máximo de POSTs en paralelo al staging API durante `export_source()`. Default: `1` (comportamiento secuencial original). Útil para fuentes con muchos registros donde la latencia de red domina. |

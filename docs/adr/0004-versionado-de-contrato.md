@@ -7,7 +7,7 @@
 | Decisores | Mantenedores (mathiasaiva, mayerlim), equipo de pipeline |
 | Reemplaza a | (ninguno) |
 | Complementa | ADR 0003 (reestructuración de repos) |
-| Relacionado con | spec #231 (PR #232, `docs/specs/db-scraper-contract.md`) |
+| Relacionado con | spec #231 (PR #232) |
 
 ---
 
@@ -15,8 +15,8 @@
 
 El pipeline público `VZLA_DEDUP` expone un contrato entidad->DB hacia staging
 (`aportes`) que el repo privado `vzla-deployment` importa y consume (ADR 0003).
-Ese contrato ya está descrito como spec (`docs/specs/db-scraper-contract.md`,
-PR #232), pero no tiene una versión explícita. ADR 0003 §8 dejó el versionado
+Ese contrato ya está descrito como spec (issue #231, PR #232), pero no tiene
+una versión explícita. ADR 0003 §8 dejó el versionado
 como seguimiento de esta ADR.
 
 Sin versión, un cambio en la forma del payload es invisible para el consumidor:
@@ -96,16 +96,17 @@ Aspiracional en su mayoría. Hoy en el código:
 - **Sí existe** `dedup_version` por fila (`spec.version`, por ejemplo
   `person-detid-v1`), pero versiona el algoritmo de la clave de dedup, no la
   forma del contrato: no confundir uno con otro.
-- La spec del contrato entidad->DB (`docs/specs/db-scraper-contract.md`, PR #232)
-  existe, pero aún sin versión formal ni carpeta `contracts/` poblada.
+- La spec del contrato entidad->DB (issue #231, PR #232) existía pero fue
+  eliminada en PR #258 (la forma canónica vive en `docs/schema.md`). La columna
+  `contract_version` y la carpeta `contracts/` siguen pendientes.
 
-El primer paso de implementación es declarar `contract-v1.0` sobre la spec actual
-y añadir la columna; recién entonces `vzla-deployment` puede fijar el tag.
+El primer paso de implementación sigue siendo declarar `contract-v1.0` y añadir
+la columna; recién entonces `vzla-deployment` puede fijar el tag.
 
 ---
 
 ## 5. Enlaces
 
 - ADR 0003 (reestructuración de repos), §8 y §12.
-- Issue #231, PR #232: `docs/specs/db-scraper-contract.md` (contrato entidad->DB).
+- Issue #231, PR #232: contrato entidad->DB.
 - `docs/adr/PROPOSALS.md` (telemetría de cuarentena, futura). <!-- pendiente PR 238 -->

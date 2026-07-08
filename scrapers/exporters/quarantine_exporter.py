@@ -1,21 +1,21 @@
-"""Quarantine exporter: POST de registros no procesables a /api/v1/quarantine.
+"""Quarantine exporter: INSERT directo a Supabase via PostgREST.
 
 Cuando un registro no puede procesarse automaticamente (parser ausente, schema
 invalido, PII no redactable, PDF sin texto, etc.) NO se descarta en silencio:
-se preserva en la Quarantine DB del backend (dataVenezuela) via un POST por
-registro. El run no falla — el registro queda en cuarentena y el pipeline sigue
-con las demas fuentes (Issue #88).
+se preserva en ``quarantined_records`` via escritura directa a Supabase
+(POST /rest/v1/quarantined_records), igual que ``aportes`` (Issue #88).
 
 Espeja StagingExporter (scrapers/exporters/staging_exporter.py):
+  - Mismas credenciales: SUPABASE_URL / SUPABASE_PUBLISHABLE_KEY / SUPABASE_INGEST_JWT.
   - httpx.Client inyectable via el parametro ``client`` (tests sin red real).
-  - Dry-run silencioso si faltan las env vars QUARANTINE_*: no abre cliente,
+  - Dry-run silencioso si faltan las env vars SUPABASE_*: no abre cliente,
     loguea a INFO lo que enviaria y devuelve un QuarantineResult vacio.
   - Retry con backoff en status transitorios (429/5xx) y errores de red.
 
-La tabla ``quarantine_records`` vive en el backend, igual que ``aportes``; este
-repo (scraper) no ejecuta SQL — solo construye y envia el payload. El
-``run_id`` se comparte con el aporte para correlacionar cuarentena y staging de
-una misma corrida (depende del concepto de run_id de Stage 1, #81).
+El payload viaja en snake_case (columnas de ``quarantined_records``).
+El ``run_id`` del esquema es nullable (FK a scrape_runs); se omite del payload
+porque el pipeline usa un UUID de correlacion local que no existe en scrape_runs.
+La correlacion fuente/cuarentena se mantiene via ``source_slug``.
 """
 
 from __future__ import annotations
@@ -24,7 +24,6 @@ import hashlib
 import logging
 import os
 import time
-import uuid
 from dataclasses import dataclass, field
 
 import httpx
@@ -34,26 +33,24 @@ from scrapers.adapters.http_client import USER_AGENT
 
 log = logging.getLogger(__name__)
 
-_QUARANTINE_PATH = "/api/v1/quarantine"
+_QUARANTINE_PATH = "/rest/v1/quarantined_records"
 
-# Status HTTP transitorios que ameritan reintento (igual criterio que staging).
 _RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
 _MAX_POST_RETRIES = 4
 
-# Fragmento maximo del payload redactado que se envia. NUNCA el payload completo:
-# truncamos defensivamente aunque el caller pase algo mas largo.
+# Fragmento maximo del payload redactado que se envia. NUNCA el payload completo.
 _PREVIEW_MAX_CHARS = 500
 
-# Valores controlados — DEBEN coincidir con los CHECK de quarantine_records en
+# Valores controlados — DEBEN coincidir con los enums de quarantined_records en
 # el backend. Hay un fixture de test por cada reason_code (criterio #88).
 REASON_CODES = frozenset(
     {
-        "pii_untreatable",  # PII no tratable/redactable automaticamente
-        "invalid_schema",  # schema invalido o inesperado
-        "parser_unavailable",  # parser inexistente o incompatible
-        "pdf_no_text",  # PDF sin texto extraible
-        "unclassified_sensitive",  # contenido potencialmente sensible sin clasificar
-        "contradictory_sources",  # datos contradictorios entre fuentes
+        "pii_untreatable",          # PII no tratable/redactable automaticamente
+        "invalid_schema",           # schema invalido o inesperado
+        "parser_unavailable",       # parser inexistente o incompatible
+        "pdf_no_text",              # PDF sin texto extraible
+        "unclassified_sensitive",   # contenido potencialmente sensible sin clasificar
+        "contradictory_sources",    # datos contradictorios entre fuentes
         "ambiguous_manual_review",  # ambiguo, requiere criterio humano
     }
 )
@@ -66,7 +63,7 @@ def quarantine_payload_hash(raw: str | bytes) -> str:
 
     Igual que ``adapters._shared.sha256_hex`` (que tambien devuelve hex puro sin
     prefijo para ``content_hash``), aqui se devuelve hex pelado porque
-    ``quarantine_records.payload_hash`` es ``varchar(64)``. Ese hash sobrevive a
+    ``quarantined_records.payload_hash`` es ``varchar(64)``. Ese hash sobrevive a
     la destruccion del registro y permite verificar que ese payload exacto fue
     visto y destruido deliberadamente.
     """
@@ -78,31 +75,33 @@ def quarantine_payload_hash(raw: str | bytes) -> str:
 class QuarantineConfig:
     """Configuracion del exporter leida del entorno.
 
-    Apunta al backend que hospeda ``/api/v1/quarantine`` (normalmente el mismo
-    dataVenezuela que ``/api/aportes``, pero con sus propias credenciales para
-    no acoplar los dos endpoints).
+    Usa las mismas credenciales Supabase que StagingExporter: SUPABASE_URL,
+    SUPABASE_PUBLISHABLE_KEY y SUPABASE_INGEST_JWT. Ambos exporters entran y
+    salen de dry-run juntos cuando las env vars no estan seteadas.
     """
 
-    api_key: str
-    base_url: str
+    supabase_url: str
+    publishable_key: str
+    ingest_jwt: str
 
     @classmethod
     def from_env(cls) -> QuarantineConfig | None:
-        """Construye la config desde QUARANTINE_*; None si falta alguna.
+        """Construye la config desde SUPABASE_*; None si falta alguna.
 
-        Distingue el dry-run intencional (NINGUNA QUARANTINE_* seteada, dev
+        Distingue el dry-run intencional (NINGUNA SUPABASE_* seteada, dev
         local) de una config parcial en prod (algunas si, otras no): la primera
         loguea a INFO, la segunda a ERROR listando las faltantes. En ambos casos
         devuelve None (gatilla el dry-run) sin abortar el pipeline.
         """
         values = {
-            "QUARANTINE_API_KEY": os.getenv("QUARANTINE_API_KEY"),
-            "QUARANTINE_BASE_URL": os.getenv("QUARANTINE_BASE_URL"),
+            "SUPABASE_URL": os.getenv("SUPABASE_URL"),
+            "SUPABASE_PUBLISHABLE_KEY": os.getenv("SUPABASE_PUBLISHABLE_KEY"),
+            "SUPABASE_INGEST_JWT": os.getenv("SUPABASE_INGEST_JWT"),
         }
         present = [k for k, v in values.items() if v]
         if not present:
             log.info(
-                "quarantine_exporter deshabilitado: ninguna QUARANTINE_* seteada "
+                "quarantine_exporter deshabilitado: ninguna SUPABASE_* seteada "
                 "(dry-run intencional)"
             )
             return None
@@ -113,9 +112,18 @@ class QuarantineConfig:
                 missing,
             )
             return None
+        supabase_url = str(values["SUPABASE_URL"]).rstrip("/")
+        if not supabase_url.lower().startswith("https://"):
+            log.error(
+                "quarantine_exporter: SUPABASE_URL debe ser https:// (recibido %r); "
+                "entrando en dry-run para no enviar credenciales/PII en claro",
+                supabase_url,
+            )
+            return None
         return cls(
-            api_key=str(values["QUARANTINE_API_KEY"]),
-            base_url=str(values["QUARANTINE_BASE_URL"]).rstrip("/"),
+            supabase_url=supabase_url,
+            publishable_key=str(values["SUPABASE_PUBLISHABLE_KEY"]),
+            ingest_jwt=str(values["SUPABASE_INGEST_JWT"]),
         )
 
 
@@ -139,12 +147,7 @@ class QuarantineRecord:
     pii_findings_summary: dict[str, object] | None = None
 
     def validate(self) -> None:
-        """Valida enums controlados; ValueError si reason_code/risk_level es invalido.
-
-        Estos valores deben respetar los CHECK de la tabla en el backend; un
-        valor fuera del set seria rechazado por la DB. Validar aca lo convierte
-        en un error claro y temprano (cubierto por tests) en vez de un 4xx opaco.
-        """
+        """Valida enums controlados; ValueError si reason_code/risk_level es invalido."""
         if self.reason_code not in REASON_CODES:
             raise ValueError(
                 f"reason_code invalido: {self.reason_code!r} "
@@ -164,12 +167,11 @@ class QuarantineResult:
     """Resultado agregado de enviar registros a cuarentena."""
 
     sent: int = 0
-    duplicates: int = 0  # 409 — ese payload ya estaba en cuarentena
+    duplicates: int = 0
     errors: list[str] = field(default_factory=list)
 
 
 def _truncate_preview(preview: str | None) -> str | None:
-    """Trunca el fragmento redactado a _PREVIEW_MAX_CHARS (defensa, no redaccion)."""
     if preview is None:
         return None
     if len(preview) <= _PREVIEW_MAX_CHARS:
@@ -178,68 +180,66 @@ def _truncate_preview(preview: str | None) -> str | None:
 
 
 class QuarantineExporter:
-    """Envia registros no procesables a /api/v1/quarantine del backend."""
+    """Inserta registros no procesables en quarantined_records via PostgREST."""
 
     def __init__(
         self,
         config: QuarantineConfig | None,
         *,
         client: httpx.Client | None = None,
-        run_id: str | None = None,
     ) -> None:
         self.config = config
         self.enabled = config is not None
-        self.run_id = run_id or str(uuid.uuid4())
         self._owns_client = client is None
         self._client: httpx.Client | None = client
         if self.enabled and config is not None and client is None:
             self._client = httpx.Client(
-                base_url=config.base_url,
+                base_url=config.supabase_url,
                 headers={
-                    # El backend dataVenezuela autentica al scraper con x-api-key
-                    # (authenticatePartner), no con Bearer. Ver POST /api/v1/quarantine.
-                    "x-api-key": config.api_key,
+                    # Auth PostgREST: misma convencion que StagingExporter.
+                    "apikey": config.publishable_key,
+                    "Authorization": f"Bearer {config.ingest_jwt}",
                     "User-Agent": USER_AGENT,
                     "Accept": "application/json",
                     "Content-Type": "application/json",
+                    # Evitar que PostgREST devuelva la fila completa en la respuesta.
+                    "Prefer": "return=minimal",
                 },
                 timeout=httpx.Timeout(30.0),
-                follow_redirects=True,
+                follow_redirects=False,
             )
 
     # -- payload --------------------------------------------------------------
 
     def _build_payload(self, rec: QuarantineRecord) -> dict[str, object]:
-        """Arma el JSON del POST. Valida enums y trunca el preview.
+        """Arma el JSON del POST en snake_case (columnas de quarantined_records).
 
-        Las claves van en camelCase: es el contrato de la API de dataVenezuela
-        (el schema Zod de /api/v1/quarantine, igual que /api/aportes). El backend
-        mapea camelCase -> columnas snake_case en su capa de servicio.
+        Omite run_id: el pipeline usa un UUID de correlacion local que no existe
+        en scrape_runs, y la columna es nullable. No incluye claves con None
+        para no sobreescribir defaults del servidor (review_status, quarantined_at).
         """
         rec.validate()
-        return {
-            "runId": self.run_id,
-            "sourceSlug": rec.source_slug,
-            "sourceUrl": rec.source_url,
-            "reasonCode": rec.reason_code,
-            "reasonDetail": rec.reason_detail,
-            "riskLevel": rec.risk_level,
-            "payloadPreviewRedacted": _truncate_preview(rec.payload_preview_redacted),
-            "payloadHash": rec.payload_hash,
-            "piiFindingsSummary": rec.pii_findings_summary,
+        payload: dict[str, object] = {
+            "source_slug": rec.source_slug,
+            "reason_code": rec.reason_code,
+            "risk_level": rec.risk_level,
         }
+        for key, value in (
+            ("source_url", rec.source_url),
+            ("reason_detail", rec.reason_detail),
+            ("payload_preview_redacted", _truncate_preview(rec.payload_preview_redacted)),
+            ("payload_hash", rec.payload_hash),
+            ("pii_findings_summary", rec.pii_findings_summary),
+        ):
+            if value is not None:
+                payload[key] = value
+        return payload
 
     # -- POST con retry -------------------------------------------------------
 
     def _post_with_retry(
         self, path: str, payload: dict[str, object]
     ) -> httpx.Response:
-        """POST con backoff exponencial en status transitorios y errores de red.
-
-        Reintenta en 429/500/502/503/504 y en TimeoutException/NetworkError
-        usando backoff_delay (de _shared). Devuelve la ultima response; relanza
-        la ultima excepcion de transporte si se agotan los reintentos sin response.
-        """
         assert self._client is not None
         last_exc: httpx.HTTPError | None = None
         resp: httpx.Response | None = None
@@ -277,11 +277,7 @@ class QuarantineExporter:
         return self.quarantine_many([record])
 
     def quarantine_many(self, records: list[QuarantineRecord]) -> QuarantineResult:
-        """Envia varios registros a cuarentena. Nunca relanza: resiliencia por registro.
-
-        Un fallo de validacion, de red o un status inesperado de un registro se
-        acumula en ``errors`` y NO interrumpe el resto — el run debe seguir.
-        """
+        """Inserta varios registros en quarantined_records. Nunca relanza."""
         result = QuarantineResult()
 
         if not self.enabled or self._client is None:
@@ -294,8 +290,8 @@ class QuarantineExporter:
                 log.info(
                     "DRY-RUN quarantine_exporter: enviaria source_slug=%s reason_code=%s "
                     "risk_level=%s payload_hash=%s",
-                    payload["sourceSlug"], payload["reasonCode"],
-                    payload["riskLevel"], payload["payloadHash"],
+                    payload["source_slug"], payload["reason_code"],
+                    payload["risk_level"], payload.get("payload_hash"),
                 )
             return result
 
@@ -313,19 +309,20 @@ class QuarantineExporter:
             if resp.status_code in (200, 201):
                 result.sent += 1
             elif resp.status_code == 409:
+                # PostgREST sin on_conflict no devuelve 409, pero se conserva el
+                # contador por si el backend agrega un unique index en el futuro.
                 result.duplicates += 1
             else:
                 result.errors.append(
                     f"{_QUARANTINE_PATH} status {resp.status_code} "
-                    f"para source_slug={payload['sourceSlug']} "
-                    f"reason_code={payload['reasonCode']}"
+                    f"para source_slug={payload['source_slug']} "
+                    f"reason_code={payload['reason_code']}"
                 )
         return result
 
     # -- ciclo de vida --------------------------------------------------------
 
     def close(self) -> None:
-        """Cierra el httpx.Client solo si lo creo el exporter."""
         if self._owns_client and self._client is not None:
             self._client.close()
 
