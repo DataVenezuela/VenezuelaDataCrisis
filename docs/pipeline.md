@@ -864,6 +864,21 @@ mapea `full_name`, `cedula_hmac`, `cedula_masked`, `identity_kind`,
 etc., a columnas reales (ver `docs/schema.md`). No hay merge ni pérdida: las
 tablas tipadas son una vista 1:1 de `aportes` (ambas capas son silver).
 
+Como cada aporte copia solo las columnas presentes en su `raw_json`, las filas de
+un batch no comparten el mismo set de claves. El upsert va con
+`Prefer: missing=default` para que PostgREST tome la unión de claves y rellene las
+ausentes con el DEFAULT de cada columna: sin ese preferente rechazaría el lote
+entero con `400 PGRST102` ("All object keys must match") y caería a un fallback
+fila a fila que satura el timeout del cron con volúmenes de decenas de miles de
+aportes.
+
+El paginado es keyset por `(created_at, id)` con un cursor durable de una fila
+(`silver_materialize_state`): cada corrida arranca desde la frontera ya proyectada
+en vez de reescanear `aportes` desde el principio, y solo avanza el cursor tras
+confirmar cada página de forma contigua (una página que falla por red no lo mueve,
+así la siguiente corrida la reintenta). Si la tabla del cursor todavía no existe,
+el materializer se degrada a un scan completo (comportamiento previo) sin fallar.
+
 El materializer corre como **primera etapa del cron de consolidación**
 (`consolidate.yml`), antes de la generación de aristas (es independiente de ella,
 solo comparte la cadencia de 20 min). El upsert usa `resolution=ignore-duplicates`
