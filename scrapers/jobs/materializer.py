@@ -58,6 +58,12 @@ _APORTES_PATH = "/rest/v1/aportes"
 _EVENTS_UPSERT_PATH = "/rest/v1/events?on_conflict=event_id"
 _PERSONS_UPSERT_PATH = "/rest/v1/persons?on_conflict=person_record_id"
 _ACOPIO_UPSERT_PATH = "/rest/v1/acopio_centers?on_conflict=acopio_id"
+# Cursor incremental (una sola fila): la frontera durable (created_at,id) del
+# ultimo aporte proyectado. Deja de reescanear ~100k aportes desde offset 0 en
+# cada corrida; solo pagina lo nuevo. Si la tabla no existe aun (DDL en el cuerpo
+# del PR), se degrada a scan completo (Part A ya lo hace terminar dentro del cron).
+_CURSOR_PATH = "/rest/v1/silver_materialize_state"
+_CURSOR_UPSERT_PATH = "/rest/v1/silver_materialize_state?on_conflict=singleton"
 
 # events.event_type es integer NOT NULL. Fase 1 tiene un unico evento real (el
 # terremoto del 2026-06-24), asi que se siembra con este codigo fijo. No hay aun
@@ -143,6 +149,9 @@ class SilverMaterializer:
         self.config = config
         self.enabled = config is not None
         self._owns_client = client is None
+        # Se vuelve True si la tabla del cursor no existe (DDL pendiente): a partir
+        # de ahi no se reintenta persistir el cursor y se opera en scan completo.
+        self._cursor_unavailable = False
         self._client: httpx.Client | None = client
         if self.enabled and config is not None and client is None:
             self._client = httpx.Client(
@@ -169,7 +178,16 @@ class SilverMaterializer:
         Devuelve None si se agotan los reintentos por error de red.
         """
         assert self._client is not None
-        headers = {"Prefer": "resolution=ignore-duplicates,return=representation"}
+        # ``missing=default``: cada aporte copia solo sus columnas presentes
+        # (``_typed_payload``), asi que las filas de un batch NO comparten el mismo
+        # set de claves. Sin este preferente PostgREST rechaza el lote entero con
+        # 400 PGRST102 ("All object keys must match") y el fallback cae a fila-a-fila
+        # (lento: satura el timeout del cron con 100k aportes). Con el, PostgREST
+        # toma la union de claves y rellena las ausentes con el DEFAULT de cada
+        # columna, aceptando el batch heterogeneo de una sola vez.
+        headers = {
+            "Prefer": "resolution=ignore-duplicates,return=representation,missing=default"
+        }
         resp: httpx.Response | None = None
         for attempt in range(1, _MAX_POST_RETRIES + 1):
             try:
@@ -209,36 +227,128 @@ class SilverMaterializer:
 
     # -- fetch aportes --------------------------------------------------------
 
-    def _fetch_aportes_page(self, limit: int, offset: int) -> list[dict[str, object]]:
+    def _fetch_aportes_page(
+        self, limit: int, cursor: tuple[str, str] | None
+    ) -> list[dict[str, object]]:
+        """Trae una pagina de aportes con paginado keyset por (created_at, id).
+
+        Con ``cursor`` (la frontera durable ya proyectada) trae solo
+        ``(created_at, id) > cursor``: no reescanea lo ya proyectado. Sin cursor
+        (primera corrida o cursor no disponible) arranca desde el principio.
+        """
         assert self._client is not None
-        resp = self._client.get(
-            _APORTES_PATH,
-            params={
-                "select": "id,entity_type,raw_json",
-                # Desempate por id: created_at NO es unico (un batch de scrape
-                # commitea muchas filas con el mismo timestamp), y sin una clave
-                # estable el paginado offset podria saltar o repetir una fila en
-                # el borde de pagina. Repetir es inocuo (DO NOTHING); saltar se
-                # auto-cura en la proxima corrida (offset reinicia en 0).
-                "order": "created_at.asc,id.asc",
-                "limit": limit,
-                "offset": offset,
-            },
-        )
+        params: dict[str, object] = {
+            "select": "id,entity_type,raw_json,created_at",
+            # Desempate por id: created_at NO es unico (un batch de scrape commitea
+            # muchas filas con el mismo timestamp). Sin clave estable el paginado
+            # podria saltarse o repetir una fila en el borde de pagina.
+            "order": "created_at.asc,id.asc",
+            "limit": limit,
+        }
+        if cursor is not None:
+            ts, cid = cursor
+            # Keyset estricto (created_at,id) > cursor. El cursor apunta SIEMPRE a
+            # una fila ya proyectada (solo se persiste tras confirmar la pagina),
+            # asi que el '>' estricto nunca se salta un aporte sin proyectar.
+            params["or"] = f"(created_at.gt.{ts},and(created_at.eq.{ts},id.gt.{cid}))"
+        resp = self._client.get(_APORTES_PATH, params=params)
         if resp.status_code in (401, 403):
             raise PermissionError(
                 f"fetch aportes: sin permiso (status {resp.status_code}); verificar "
                 "SUPABASE_INGEST_JWT y el grant SELECT del rol scraper_ingest sobre aportes"
             )
         if resp.status_code != 200:
-            log.warning("fetch aportes: status inesperado %s (offset=%s)", resp.status_code, offset)
+            log.warning("fetch aportes: status inesperado %s (cursor=%s)", resp.status_code, cursor)
             return []
         try:
             rows = resp.json()
         except ValueError:
-            log.warning("fetch aportes: cuerpo 200 no es JSON valido (offset=%s)", offset)
+            log.warning("fetch aportes: cuerpo 200 no es JSON valido (cursor=%s)", cursor)
             return []
         return rows if isinstance(rows, list) else []
+
+    # -- cursor incremental ---------------------------------------------------
+
+    def _read_cursor(self) -> tuple[str, str] | None:
+        """Lee la frontera durable (created_at, id); None => scan completo.
+
+        Se degrada a None (scan completo, comportamiento previo) ante cualquier
+        problema: tabla ausente (DDL pendiente), sin permiso, o error de red.
+        """
+        assert self._client is not None
+        try:
+            resp = self._client.get(
+                _CURSOR_PATH,
+                params={"select": "cursor_created_at,cursor_id", "limit": 1},
+            )
+        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            log.warning("materializer: no se pudo leer el cursor (%s); scan completo", type(exc).__name__)
+            return None
+        if resp.status_code in (404, 406):
+            log.info(
+                "materializer: tabla de cursor ausente (status %s); scan completo "
+                "(aplicar el DDL del PR para habilitar el paginado incremental)",
+                resp.status_code,
+            )
+            self._cursor_unavailable = True
+            return None
+        if resp.status_code != 200:
+            log.warning("materializer: lectura de cursor status %s; scan completo", resp.status_code)
+            return None
+        try:
+            rows = resp.json()
+        except ValueError:
+            return None
+        if isinstance(rows, list) and rows:
+            ca = rows[0].get("cursor_created_at")
+            cid = rows[0].get("cursor_id")
+            if isinstance(ca, str) and ca and cid:
+                return (ca, str(cid))
+        return None
+
+    def _write_cursor(self, created_at: str, cursor_id: str) -> bool:
+        """Persiste la frontera durable (upsert de la fila unica). Best-effort.
+
+        No es PII (timestamp + UUID de aporte). Si la tabla no existe, lo marca y
+        no vuelve a intentar en esta corrida. Un fallo aqui no aborta el job: las
+        filas ya estan proyectadas; la proxima corrida re-deriva desde el cursor
+        persistido (o rehace, idempotente por PK)."""
+        if self._cursor_unavailable:
+            return False
+        assert self._client is not None
+        payload = [{"singleton": True, "cursor_created_at": created_at, "cursor_id": cursor_id}]
+        try:
+            resp = self._client.post(
+                _CURSOR_UPSERT_PATH,
+                json=payload,
+                headers={"Prefer": "resolution=merge-duplicates,return=minimal,missing=default"},
+            )
+        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            log.warning("materializer: POST cursor error de red (%s)", type(exc).__name__)
+            return False
+        if resp.status_code in (404, 406):
+            log.info(
+                "materializer: tabla de cursor ausente; sin paginado incremental "
+                "(aplicar el DDL del PR)"
+            )
+            self._cursor_unavailable = True
+            return False
+        if resp.status_code not in (200, 201, 204):
+            log.warning("materializer: no se pudo persistir el cursor (status %s)", resp.status_code)
+            return False
+        return True
+
+    @staticmethod
+    def _page_cursor(page: list[dict[str, object]]) -> tuple[str, str] | None:
+        """(created_at, id) de la ultima fila de la pagina (orden asc); None si falta."""
+        if not page:
+            return None
+        last = page[-1]
+        ca = last.get("created_at")
+        pid = last.get("id")
+        if isinstance(ca, str) and ca and pid:
+            return (ca, str(pid))
+        return None
 
     # -- seed events ----------------------------------------------------------
 
@@ -274,6 +384,13 @@ class SilverMaterializer:
         fila del catalogo antes de proyectar. Ademas siembra (defensivo) cualquier
         ``event_id`` referenciado por un aporte, para no romper la FK si difiere.
         Idempotente por PK: re-proyectar un aporte ya materializado es no-op.
+
+        Paginado keyset con cursor durable: arranca desde la frontera persistida
+        (``_read_cursor``) y solo avanza el cursor persistido tras confirmar cada
+        pagina de forma contigua. Una pagina que falla a nivel de batch (error
+        transitorio de red) NO avanza el cursor durable: la proxima corrida la
+        reintenta. Asi no se reescanean ~100k aportes desde el principio en cada
+        corrida ni se salta ninguno por una pagina a medio commitear.
         """
         result = MaterializeResult()
         if not self.enabled or self._client is None:
@@ -285,21 +402,35 @@ class SilverMaterializer:
         self._seed_event(event_id, seeded, result)
 
         size = max(1, batch_size)
-        offset = 0
+        cursor = self._read_cursor()
+        # Solo se persiste el cursor mientras las paginas confirmen en orden
+        # contiguo; tras la primera pagina fallida, el cursor durable se congela
+        # (aunque el cursor en memoria siga avanzando para intentar mas esta corrida).
+        contiguous = True
         try:
             for page_num in range(_MAX_PAGES):
-                page = self._fetch_aportes_page(size, offset)
+                page = self._fetch_aportes_page(size, cursor)
                 if not page:
                     break
-                self._project_page(page, event_id, seeded, result)
+                page_ok = self._project_page(page, event_id, seeded, result)
+                last = self._page_cursor(page)
+                if last is None:
+                    # Sin (created_at,id) utilizable no hay clave keyset estable;
+                    # cortamos para no arriesgar un salto. La proxima corrida reintenta.
+                    log.warning("materializer: pagina sin created_at/id; se corta el paginado")
+                    break
+                if not page_ok:
+                    contiguous = False
+                elif contiguous:
+                    self._write_cursor(*last)  # avanza la frontera durable
+                cursor = last  # el cursor en memoria avanza siempre
                 if len(page) < size:
                     break
-                offset += size
                 if page_num == _MAX_PAGES - 1:
                     log.warning(
                         "materializer: se alcanzo el backstop de %d paginas; "
-                        "puede quedar backlog sin proyectar (offset=%s)",
-                        _MAX_PAGES, offset,
+                        "puede quedar backlog sin proyectar (cursor=%s)",
+                        _MAX_PAGES, cursor,
                     )
         except PermissionError as exc:
             log.error("%s", exc)
@@ -312,14 +443,23 @@ class SilverMaterializer:
         default_event_id: str,
         seeded: set[str],
         result: MaterializeResult,
-    ) -> None:
+    ) -> bool:
+        """Proyecta una pagina. Devuelve True si commiteo por completo.
+
+        True => cada aporte de la pagina fue atendido de forma definitiva (exito o
+        fila-poison permanente): el cursor puede avanzar sobre esta pagina. False =>
+        hubo un fallo transitorio (red / seed del catalogo) que dejo aportes sin
+        proyectar: el cursor durable NO debe pasar de aqui para reintentar luego.
+        """
         persons: list[dict[str, object]] = []
         acopios: list[dict[str, object]] = []
+        ok = True
         for aporte in page:
             entity_type = str(aporte.get("entity_type") or "")
             raw = aporte.get("raw_json")
             aporte_id = aporte.get("id")
             if not isinstance(raw, dict) or not aporte_id:
+                # Aporte malformado: poison permanente, no bloquea el avance.
                 result.errors.append(f"aporte sin id/raw_json valido: {aporte_id!r}")
                 continue
             if entity_type == "event":
@@ -328,20 +468,24 @@ class SilverMaterializer:
                 continue
             row_event_id = raw.get("event_id")
             if isinstance(row_event_id, str) and row_event_id:
-                # FK-safe: asegura la fila de catalogo antes de proyectar.
+                # FK-safe: asegura la fila de catalogo antes de proyectar. Un fallo
+                # de seed es transitorio: no proyectamos este aporte y no avanzamos.
                 if not self._seed_event(row_event_id, seeded, result):
+                    ok = False
                     continue
             if entity_type == "person":
                 persons.append(self._person_row(str(aporte_id), raw, default_event_id))
             elif entity_type == "acopio":
                 acopios.append(self._acopio_row(str(aporte_id), raw, default_event_id))
             else:
+                # Tipo desconocido: poison permanente, no bloquea el avance.
                 result.errors.append(f"entity_type desconocido: {entity_type!r}")
 
         if persons:
-            self._upsert_rows(_PERSONS_UPSERT_PATH, persons, "persons", result)
+            ok = self._upsert_rows(_PERSONS_UPSERT_PATH, persons, "persons", result) and ok
         if acopios:
-            self._upsert_rows(_ACOPIO_UPSERT_PATH, acopios, "acopio", result)
+            ok = self._upsert_rows(_ACOPIO_UPSERT_PATH, acopios, "acopio", result) and ok
+        return ok
 
     def _upsert_rows(
         self,
@@ -349,18 +493,23 @@ class SilverMaterializer:
         rows: list[dict[str, object]],
         kind: str,
         result: MaterializeResult,
-    ) -> None:
+    ) -> bool:
         """Upserta un lote; si el batch es rechazado, reintenta fila a fila.
 
         Aisla la fila mala (p.ej. un valor de enum que la BD rechaza) para no
         perder las filas buenas del lote, como ``StagingExporter._post_chunk``.
         NUNCA loguea el payload (PII); la PK (``*_record_id``/``acopio_id``) es un
         UUID de aporte, no PII, asi que si se puede identificar la fila fallida.
+
+        Devuelve True si cada fila fue atendida de forma definitiva por la BD
+        (insertada, ya-presente, o rechazo permanente tipo enum). Devuelve False
+        solo ante un fallo transitorio de red (``_post`` -> None) que impidio
+        atender alguna fila: el llamador no debe avanzar el cursor durable.
         """
         resp = self._post(path, rows)
         if resp is not None and resp.status_code in (200, 201):
             self._add_projected(kind, self._inserted_count(resp), result)
-            return
+            return True
         if len(rows) > 1:
             # El batch fallo: rechazo HTTP (resp con status de error) o error de red
             # tras agotar reintentos (resp None). Ambos casos activan el fallback
@@ -370,6 +519,7 @@ class SilverMaterializer:
                 "proyeccion %s: batch de %d rechazado (status %s); reintentando fila a fila",
                 kind, len(rows), getattr(resp, "status_code", "n/a"),
             )
+            ok = True
             for row in rows:
                 r = self._post(path, [row])
                 if r is not None and r.status_code in (200, 201):
@@ -383,7 +533,11 @@ class SilverMaterializer:
                     result.errors.append(
                         f"POST {path}: status {getattr(r, 'status_code', 'n/a')} (pk={pk})"
                     )
-            return
+                    # r is None => red transitoria (reintentar en la proxima corrida);
+                    # r con status de error => rechazo permanente (no bloquea el cursor).
+                    if r is None:
+                        ok = False
+            return ok
         log.warning(
             "proyeccion %s fallo: %d filas, status %s",
             kind, len(rows), getattr(resp, "status_code", "n/a"),
@@ -391,6 +545,9 @@ class SilverMaterializer:
         result.errors.append(
             f"POST {path}: status {getattr(resp, 'status_code', 'n/a')} ({len(rows)} filas)"
         )
+        # Fila unica: rechazo definitivo de la BD (resp != None) es poison permanente
+        # y no debe bloquear el cursor; solo un fallo de red (resp None) lo bloquea.
+        return resp is not None
 
     @staticmethod
     def _add_projected(kind: str, inserted: int, result: MaterializeResult) -> None:

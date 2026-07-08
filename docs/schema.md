@@ -163,6 +163,17 @@ CREATE TABLE public.acopio_needs (
   CONSTRAINT acopio_needs_pkey PRIMARY KEY (need_id),
   CONSTRAINT acopio_needs_acopio_id_foreign FOREIGN KEY (acopio_id) REFERENCES public.acopio_centers(acopio_id)
 );
+-- Cursor durable (una sola fila) del materializer: frontera (created_at, id) del
+-- ultimo aporte proyectado a silver. Habilita el paginado keyset incremental
+-- (deja de reescanear aportes desde el principio en cada corrida del consolidate).
+CREATE TABLE public.silver_materialize_state (
+  singleton boolean NOT NULL DEFAULT true,
+  cursor_created_at timestamp with time zone,
+  cursor_id uuid,
+  updated_at timestamp with time zone NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT silver_materialize_state_pkey PRIMARY KEY (singleton),
+  CONSTRAINT silver_materialize_state_singleton CHECK (singleton)
+);
 CREATE TABLE public.dedup_candidates (
   candidate_id uuid NOT NULL DEFAULT gen_random_uuid(),
   left_aporte_id uuid NOT NULL,
