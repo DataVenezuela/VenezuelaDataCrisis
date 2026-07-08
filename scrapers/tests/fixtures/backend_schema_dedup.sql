@@ -91,3 +91,27 @@ create unique index events_dedup_uniq
   on public.events (dedup_hash);
 create unique index acopio_centers_dedup_uniq
   on public.acopio_centers (dedup_hash);
+
+-- ---------------------------------------------------------------------------
+-- dedup_candidates: schema real desplegado en Supabase
+-- NOTA: la migración pública 0009 usaba left_person/right_person (FK a persons).
+-- El schema desplegado usa left_aporte_id/right_aporte_id (FK a aportes.id),
+-- blocking_key, priority integer y touches_gold. No tiene event_id.
+-- Si el backend publica la migración equivalente, actualizar este bloque.
+-- ---------------------------------------------------------------------------
+create table public.dedup_candidates (
+  candidate_id    uuid primary key default gen_random_uuid(),
+  left_aporte_id  uuid not null,
+  right_aporte_id uuid not null,
+  blocking_key    text not null,
+  score           numeric not null,
+  reasons         jsonb,
+  priority        integer not null,
+  touches_gold    boolean not null,
+  decision        text not null default 'pending',
+  resolved_by     uuid,
+  second_reviewer uuid,
+  created_at      timestamptz not null default now(),
+  resolved_at     timestamptz,
+  check (left_aporte_id <> right_aporte_id)
+);
