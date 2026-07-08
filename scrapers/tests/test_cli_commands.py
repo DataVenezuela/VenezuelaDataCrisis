@@ -225,6 +225,29 @@ class TestConsolidate:
         assert result.returncode == 0
         assert "Materializer:" in result.stdout
 
+    def test_dry_run_does_not_write_events(self, tmp_path: Path) -> None:
+        event = {"event_type": "flood", "description": "Inundación ficticia", "fuente": "test"}
+        events_path = tmp_path / "events.jsonl"
+        events_path.write_text(json.dumps(event) + "\n")
+        original_mtime = events_path.stat().st_mtime
+
+        result = _run_cli(
+            "consolidate", "--dry-run",
+            "--config", str(_SAMPLE_CONFIG),
+            "--output-dir", str(tmp_path),
+        )
+        assert result.returncode == 0
+        assert "dry-run" in result.stdout
+        assert events_path.stat().st_mtime == original_mtime, "dry-run no debe escribir events.jsonl"
+
+    def test_dry_run_flag_accepted(self, tmp_path: Path) -> None:
+        result = _run_cli(
+            "consolidate", "--dry-run",
+            "--config", str(_SAMPLE_CONFIG),
+            "--output-dir", str(tmp_path),
+        )
+        assert result.returncode == 0
+
 
 # ── existing commands still work ──────────────────────────────────
 

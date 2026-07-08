@@ -15,7 +15,7 @@ permissions:
 jobs:
   consolidate:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -35,16 +35,31 @@ jobs:
           merge-multiple: true
         continue-on-error: true
 
+      - name: Dry-run consolidation (verificación)
+        run: |
+          python -m scrapers.cli consolidate \
+            --dry-run \
+            --output-dir scrapers/runtime_output \
+            --config scrapers/config/sources.custom.yaml
+
       - name: Run consolidation
         env:
           PII_SALT: ${{ secrets.PII_HMAC_SECRET }}
           PII_HMAC_SECRET: ${{ secrets.PII_HMAC_SECRET }}
-          # SUPABASE_* habilitan la etapa 1 (materializer: aportes -> silver
-          # tipado). Sin ellas el materializer entra en dry-run silencioso.
           SUPABASE_URL: ${{ vars.SUPABASE_URL }}
           SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
-          SUPABASE_INGEST_JWT: ${{ secrets.SUPABASE_INGEST_JWT }}
+          SUPABASE_CONSOLIDATION_JWT: ${{ secrets.SUPABASE_CONSOLIDATION_JWT }}
         run: |
+          set -o pipefail
           python -m scrapers.cli consolidate \
             --output-dir scrapers/runtime_output \
-            --config scrapers/config/sources.custom.yaml
+            --config scrapers/config/sources.custom.yaml \
+            2>&1 | tee consolidation.log
+
+      - name: Upload consolidation log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: consolidation-log-${{ github.run_number }}
+          path: consolidation.log
+          retention-days: 7
