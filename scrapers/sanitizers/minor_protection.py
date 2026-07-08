@@ -52,5 +52,7 @@ def protect_minor_fields(record: Mapping[str, Any]) -> dict[str, Any]:
         else:
             sanitized["last_known_location"] = None
         sanitized["last_known_location_status"] = "removed_minor"
+    elif isinstance(location, str):
+        sanitized["last_known_location_status"] = "present"
 
     return sanitized
