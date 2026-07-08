@@ -78,13 +78,6 @@ def find_candidates(
 
 
 def _aporte_id(person: dict[str, Any]) -> str:
-    """Return ``aportes.id`` expected by dedup_candidates FK.
-
-    ``aportes.id`` is the staging row PK. Falls back to ``external_id``
-    for backward compat during schema migration.
-    """
-    for key in ("id", "external_id"):
-        value = person.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return ""
+    """Return ``aportes.id`` (staging row PK) expected by dedup_candidates FK."""
+    value = person.get("id")
+    return value.strip() if isinstance(value, str) and value.strip() else ""

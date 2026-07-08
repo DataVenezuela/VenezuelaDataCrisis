@@ -512,12 +512,13 @@ class SupabasePersonDedupAdapter:
         clauses = []
         for payload in payloads:
             left, right, blocking_key = _candidate_key(payload)
+            safe_key = blocking_key.replace('"', '\\"')
             for left_id, right_id in ((left, right), (right, left)):
                 clauses.append(
                     "and("
                     f"left_aporte_id.eq.{left_id},"
                     f"right_aporte_id.eq.{right_id},"
-                    f"blocking_key.eq.{blocking_key}"
+                    f'blocking_key.eq."{safe_key}"'
                     ")"
                 )
 
