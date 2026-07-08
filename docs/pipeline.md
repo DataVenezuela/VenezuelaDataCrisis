@@ -657,7 +657,7 @@ Responsabilidades del exporter:
   registrar la página en `raw_artifacts`) y **dejó de emitir**
   `run_id`/`scraper_id`/`source_url`/`parser_version`: la procedencia de corrida y
   la URL de origen viven en la capa Bronze. Ver
-  `docs/specs/db-scraper-contract.md` §4.2 y ADR 0008.
+  `docs/schema.md` y ADR 0008.
 - `external_id` es determinista y **por-registro-de-fuente** para todo tipo:
   `sha256("<entity>|<source_id>|<source_record_id>")` cuando la fuente da un
   id de registro nativo, o `sha256("<entity>|<source_id>|<content_hash>")`
@@ -679,8 +679,7 @@ Responsabilidades del exporter:
   fallado. El margen de seguridad de 5 minutos más la idempotencia por
   `external_id` sostienen la entrega at-least-once (el ciclo siguiente reenvía
   los registros de la ventana de overlap sin duplicar). Un watermark avanzado
-  no implica cero pérdida en ese ciclo. Ver
-  `docs/specs/db-scraper-contract.md` §7.
+  no implica cero pérdida en ese ciclo.
 
 Auth con Supabase: header `apikey` con la publishable key del proyecto
 (`SUPABASE_PUBLISHABLE_KEY`) + `Authorization: Bearer` con un JWT firmado
@@ -692,8 +691,8 @@ valida localmente, sin requests extra de auth.
 
 El schema de staging, watermarks, cuarentena y jobs que escriben directo a
 Supabase tiene su fuente de verdad en `docs/schema.md` (mirror completo y
-autoritativo) más las specs de contrato en `docs/specs/`
-(`db-scraper-contract.md`, `person-dedup.md`).
+autoritativo), complementado por la spec de dedup en
+`docs/specs/person-dedup.md`.
 
 No agregues una copia local ad hoc del schema real (por ejemplo
 `tools/sql/issue_*.sql`) para que los tests pasen contra esa copia. Los fixtures
@@ -1475,7 +1474,7 @@ concurrentes (`bulk_size` / `max_concurrent_posts`), no un POST por registro.
 La garantía at-least-once se mantiene vía el margen de seguridad y la
 idempotencia por `external_id`: el watermark puede avanzar aunque algún batch
 falle, y el ciclo siguiente reenvía la ventana de overlap sin duplicar (ver
-"Capa 4 — Staging exporter" arriba y `docs/specs/db-scraper-contract.md` §7).
+"Capa 4 — Staging exporter" arriba).
 
 **Infraestructura: Supabase, la cuarentena y el API público se gestionan por
 separado.** El staging escribe directo a Supabase vía PostgREST, así que un 403

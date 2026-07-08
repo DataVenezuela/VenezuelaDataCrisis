@@ -7,7 +7,7 @@
 | Decisores | Mantenedores (mathiasaiva, mayerlim), equipo de pipeline |
 | Reemplaza a | (ninguno) |
 | Complementa | ADR 0002 (endurecimiento del borde), ADR 0006 (protección de PII en la ingesta) |
-| Relacionado con | `docs/schema.md`, `docs/specs/db-scraper-contract.md`, issue #256 |
+| Relacionado con | `docs/schema.md`, issue #256 |
 
 ---
 
@@ -116,7 +116,6 @@ Puntos de la decisión:
 ## 5. Enlaces
 
 - ADR 0002 (endurecimiento del borde), ADR 0006 (protección de PII en la ingesta).
-- `docs/schema.md` (tablas `scrape_runs` / `raw_artifacts` / `aportes` canónico).
-- `docs/specs/db-scraper-contract.md` (payload de aportes con `artifact_id`).
+- `docs/schema.md` (tablas `scrape_runs` / `raw_artifacts` / `aportes` canónico, payload de aportes con `artifact_id`).
 - `scrapers/exporters/provenance_exporter.py`, `scrapers/pipelines/run_pipeline.py`.
 - issue #256.
