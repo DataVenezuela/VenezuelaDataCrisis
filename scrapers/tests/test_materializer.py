@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 from unittest.mock import patch
@@ -106,6 +107,10 @@ class _FakeSupabase(httpx.BaseTransport):
 
     def __init__(self, aportes: list[dict[str, Any]]) -> None:
         self.aportes = aportes
+        # created_at sintetico y ordenable si el fixture no lo trae: el materializer
+        # ahora pagina por keyset (created_at, id), no por offset.
+        for i, ap in enumerate(aportes):
+            ap.setdefault("created_at", f"2026-07-01T00:00:00.{i:06d}Z")
         self.events: dict[str, dict[str, Any]] = {}
         self.persons: dict[str, dict[str, Any]] = {}
         self.acopios: dict[str, dict[str, Any]] = {}
@@ -126,15 +131,31 @@ class _FakeSupabase(httpx.BaseTransport):
             if store is not None:
                 self.post_order.append(path)
                 return self._upsert(request, *store)
+        # La tabla del cursor (silver_materialize_state) no existe por defecto:
+        # 404 => el materializer se degrada a scan completo (comportamiento previo).
         return httpx.Response(404, json={"path": path})
+
+    @staticmethod
+    def _sort_key(ap: dict[str, Any]) -> tuple[str, str]:
+        return (str(ap.get("created_at", "")), str(ap.get("id")))
+
+    @staticmethod
+    def _parse_keyset(or_expr: str) -> tuple[str, str]:
+        # or=(created_at.gt.TS,and(created_at.eq.TS,id.gt.ID))
+        ts = re.search(r"created_at\.gt\.([^,]+)", or_expr)
+        cid = re.search(r"id\.gt\.([^)]+)", or_expr)
+        return (ts.group(1) if ts else "", cid.group(1) if cid else "")
 
     def _get_aportes(self, request: httpx.Request) -> httpx.Response:
         self.aportes_gets += 1
         qs = parse_qs(urlparse(str(request.url)).query)
         limit = int(qs.get("limit", ["1000"])[0])
-        offset = int(qs.get("offset", ["0"])[0])
-        page = self.aportes[offset : offset + limit]
-        return httpx.Response(200, json=page)
+        rows = sorted(self.aportes, key=self._sort_key)
+        or_expr = qs.get("or", [None])[0]
+        if or_expr:
+            cursor = self._parse_keyset(or_expr)
+            rows = [ap for ap in rows if self._sort_key(ap) > cursor]
+        return httpx.Response(200, json=rows[:limit])
 
     def _upsert(
         self, request: httpx.Request, store: dict[str, dict[str, Any]], pk: str
@@ -384,3 +405,147 @@ class TestLifecycle:
         resp = client.get("/rest/v1/aportes")
         assert resp.status_code == 200
         client.close()
+
+
+# --- Part A: batch heterogeneo se acepta con missing=default ------------------
+
+
+class TestBatchHeterogeneousKeys:
+    """PGRST102: PostgREST rechaza un bulk insert cuyas filas no comparten el mismo
+    set de claves, salvo con ``Prefer: missing=default``. Como cada aporte copia
+    solo sus columnas presentes (``_typed_payload``), las filas del batch difieren;
+    sin el preferente el materializer caia a fila-a-fila (lento => timeout del cron).
+    """
+
+    class _RequiresUniformKeys(_FakeSupabase):
+        def _upsert(self, request, store, pk):  # type: ignore[no-untyped-def]
+            if request.url.path == "/rest/v1/persons":
+                prefer = request.headers.get("Prefer", "")
+                body = json.loads(request.content)
+                keysets = {frozenset(r.keys()) for r in body}
+                if len(keysets) > 1 and "missing=default" not in prefer:
+                    return httpx.Response(
+                        400,
+                        json={"code": "PGRST102", "message": "All object keys must match"},
+                    )
+            return super()._upsert(request, store, pk)
+
+    def test_heterogeneous_rows_projected_in_single_batch(self, caplog: Any) -> None:
+        # ap-1 trae cedula/age; ap-2 no => key sets distintos en el mismo batch.
+        a1 = _person_aporte("ap-1")
+        a2 = _person_aporte("ap-2", cedula_hmac=None, cedula_masked=None, age_range=None)
+        t = self._RequiresUniformKeys([a1, a2])
+        with caplog.at_level("WARNING", logger="scrapers.jobs.materializer"):
+            r = _materializer(t).materialize(event_id=_EVENT_ID)
+        # Ambos se proyectan en UN batch: sin PGRST102 y sin fallback fila-a-fila.
+        assert len(t.persons) == 2
+        assert r.persons_projected == 2
+        assert not any("fila a fila" in rec.getMessage() for rec in caplog.records)
+
+    def test_prefer_header_carries_missing_default(self) -> None:
+        captured: list[str] = []
+
+        class _Capture(_FakeSupabase):
+            def _upsert(self, request, store, pk):  # type: ignore[no-untyped-def]
+                if request.url.path == "/rest/v1/persons":
+                    captured.append(request.headers.get("Prefer", ""))
+                return super()._upsert(request, store, pk)
+
+        t = _Capture([_person_aporte("ap-1")])
+        _materializer(t).materialize(event_id=_EVENT_ID)
+        assert captured and all("missing=default" in p for p in captured)
+
+
+# --- Part B: cursor incremental (no reescanea lo ya proyectado) ---------------
+
+
+class _CursorFake(_FakeSupabase):
+    """_FakeSupabase + tabla silver_materialize_state (una fila) en memoria."""
+
+    def __init__(self, aportes: list[dict[str, Any]]) -> None:
+        super().__init__(aportes)
+        self.cursor_row: dict[str, Any] | None = None
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/rest/v1/silver_materialize_state":
+            if request.method == "GET":
+                return httpx.Response(200, json=[self.cursor_row] if self.cursor_row else [])
+            if request.method == "POST":
+                body = json.loads(request.content)
+                row = body[0] if isinstance(body, list) else body
+                self.cursor_row = {
+                    "cursor_created_at": row["cursor_created_at"],
+                    "cursor_id": row["cursor_id"],
+                }
+                return httpx.Response(201, json=[])
+        return super().handle_request(request)
+
+
+class TestIncrementalCursor:
+    def test_persists_cursor_at_last_projected_aporte(self) -> None:
+        aportes = [_person_aporte(f"ap-{i}") for i in range(5)]
+        t = _CursorFake(aportes)
+        _materializer(t).materialize(event_id=_EVENT_ID, batch_size=2)
+        assert len(t.persons) == 5
+        assert t.cursor_row is not None
+        # La frontera durable apunta al ultimo aporte (mayor created_at, id).
+        last = max(aportes, key=t._sort_key)
+        assert t.cursor_row["cursor_id"] == last["id"]
+
+    def test_rerun_does_not_rescan_already_projected(self) -> None:
+        aportes = [_person_aporte(f"ap-{i}") for i in range(5)]
+        t = _CursorFake(aportes)
+        m = _materializer(t)
+        m.materialize(event_id=_EVENT_ID, batch_size=2)
+        t.aportes_gets = 0
+        r2 = m.materialize(event_id=_EVENT_ID, batch_size=2)
+        # Nada nuevo: no reproyecta y hace UN solo GET (la cola vacia del keyset),
+        # no un re-scan de todas las paginas desde el principio.
+        assert r2.persons_projected == 0
+        assert t.aportes_gets == 1
+
+    def test_resumes_from_cursor_and_projects_only_new(self) -> None:
+        aportes = [_person_aporte(f"ap-{i}") for i in range(3)]
+        t = _CursorFake(aportes)
+        m = _materializer(t)
+        m.materialize(event_id=_EVENT_ID, batch_size=10)
+        assert len(t.persons) == 3
+        # Llega un aporte mas nuevo (created_at posterior al cursor).
+        t.aportes.append({
+            "id": "ap-new",
+            "entity_type": "person",
+            "raw_json": {"full_name": _PII_NAME, "event_id": _EVENT_ID, "status": "missing"},
+            "created_at": "2026-07-01T00:00:00.900000Z",
+        })
+        r2 = m.materialize(event_id=_EVENT_ID, batch_size=10)
+        assert "ap-new" in t.persons
+        assert r2.persons_projected == 1
+
+    def test_batch_network_failure_does_not_advance_cursor(self) -> None:
+        # Una pagina que falla por red (POST -> None tras agotar reintentos) NO debe
+        # avanzar el cursor durable: la proxima corrida la reintegra.
+        class _NetFailPersons(_CursorFake):
+            fail = True
+
+            def handle_request(self, request):  # type: ignore[no-untyped-def]
+                if (
+                    self.fail
+                    and request.method == "POST"
+                    and request.url.path == "/rest/v1/persons"
+                ):
+                    raise httpx.ConnectError("boom")
+                return super().handle_request(request)
+
+        aportes = [_person_aporte(f"ap-{i}") for i in range(2)]
+        t = _NetFailPersons(aportes)
+        with patch("scrapers.jobs.materializer.time.sleep", lambda *_: None):
+            m = _materializer(t)
+            m.materialize(event_id=_EVENT_ID, batch_size=10)
+            assert t.cursor_row is None  # congelado: no avanzo pese al fallo
+            assert len(t.persons) == 0
+            # Se restablece la red: la re-corrida proyecta desde el principio.
+            t.fail = False
+            r2 = m.materialize(event_id=_EVENT_ID, batch_size=10)
+        assert len(t.persons) == 2
+        assert r2.persons_projected == 2
+        assert t.cursor_row is not None
