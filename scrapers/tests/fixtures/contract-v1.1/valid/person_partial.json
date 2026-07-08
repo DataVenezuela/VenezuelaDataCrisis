@@ -1,0 +1,10 @@
+{
+  "_comment": "Persona con cédula parcial: identity_kind=partial requiere cedula_partial + cedula_partial_pattern.",
+  "full_name": "Pedro Ficticio",
+  "event_id": "8f14e45f-ceea-467e-bd5d-0a4f2e0c1a3a",
+  "fuente": "encuentralos",
+  "identity_kind": "partial",
+  "cedula_partial": "5675",
+  "cedula_partial_pattern": "suffix_4",
+  "pii_provenance": "source_masked_lossy"
+}

@@ -641,6 +641,52 @@ def _apply_minor_protection(
 
 
 # ---------------------------------------------------------------------------
+# Escaneo de PII en `unmapped`
+# ---------------------------------------------------------------------------
+
+def _check_unmapped_pii(
+    records: list[dict],
+    errors: list[str],
+    source: SourceConfig,
+    quarantine_batch: list[QuarantineRecord],
+) -> list[dict]:
+    """Scan the `unmapped` dict in each record for raw PII before export.
+
+    If raw PII is found the record is quarantined (pii_in_unmapped, high risk)
+    and excluded from staging. Records where unmapped is absent, empty, or
+    contains only masked/non-PII values pass through unchanged.
+    """
+    clean: list[dict] = []
+    for rec in records:
+        unmapped = rec.get("unmapped") or {}
+        if not unmapped:
+            clean.append(rec)
+            continue
+        unmapped_text = _to_text(unmapped)
+        findings = detect_pii(unmapped_text)
+        if findings:
+            kinds = ", ".join(sorted({str(f.get("kind")) for f in findings}))
+            detail = (
+                f"PII cruda en campo `unmapped` "
+                f"({len(findings)} hallazgo(s): {kinds})"
+            )
+            log.warning("[%s] %s", source.id, detail)
+            errors.append(detail)
+            quarantine_batch.append(
+                _quarantine_from_text(
+                    source=source,
+                    text=_to_text(rec),
+                    reason_code="pii_in_unmapped",
+                    risk_level="high",
+                    detail=detail,
+                )
+            )
+        else:
+            clean.append(rec)
+    return clean
+
+
+# ---------------------------------------------------------------------------
 # Domain allowlist
 # ---------------------------------------------------------------------------
 
@@ -830,6 +876,7 @@ def _run_source(
                 records = _apply_pii(
                     page_entities, source_errors, source, quarantine_batch,
                 )
+                records = _check_unmapped_pii(records, source_errors, source, quarantine_batch)
                 records = _enrich_records(records, source_errors)
                 records = _apply_confidence(records, source_errors)
                 records = _apply_minor_protection(records, source_errors, source, quarantine_batch)

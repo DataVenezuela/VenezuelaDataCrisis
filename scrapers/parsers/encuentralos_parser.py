@@ -11,8 +11,9 @@ Mapeo de campos (schema vigente)
 API field          → Person field
 -----------------  -----------------------
 nombre             full_name  (normalize_proper_name)
-cedula             cedula_hmac = None  (cédula ya viene pre-mascarada; HMAC imposible)
-                   cedula_masked = None
+cedula (cleartext) cedula_hmac + cedula_masked; identity_kind="hmac"; pii_provenance="cleartext"
+cedula (masked)    unmapped["cedula_source_masked"]; identity_kind="none"; pii_provenance="source_masked_lossy"
+cedula (absent)    identity_kind="none"; pii_provenance="cleartext"
 ultima_ubicacion   last_known_location  (string libre → normalize_location → str legible)
 estado             status  (ver _STATUS_MAP abajo)
 descripcion        nota
@@ -35,9 +36,12 @@ fallecido          deceased
 Cédula pre-mascarada
 ---------------------
 La API entrega la cédula censurada (e.g. ``"22•••52"``).
-No es posible calcular el HMAC sobre el valor censurado, por lo que
-``cedula_hmac`` y ``cedula_masked`` quedan permanentemente como ``None``
-para todos los registros de esta fuente.
+No es posible calcular el HMAC sobre el valor censurado; en ese caso
+``cedula_hmac`` y ``cedula_masked`` quedan ``None``, ``identity_kind``
+es ``"none"``, ``pii_provenance`` es ``"source_masked_lossy"``, y el
+valor censurado se guarda en ``unmapped["cedula_source_masked"]`` para
+que el detector de PII confirme que ya viene enmascarado por la fuente.
+Si la cédula llega en claro, se tokeniza normalmente (identity_kind="hmac").
 
 Nota de seguridad
 -----------------
@@ -258,14 +262,25 @@ class EncuentralosParser:
         # La API entrega la cédula pre-mascarada ("22•••52"); HMAC imposible.
         cedula_hmac: str | None = None
         cedula_masked: str | None = None
+        identity_kind = "none"
+        pii_provenance = "cleartext"
+        unmapped: dict[str, Any] | None = None
         raw_cedula = rec.get("cedula")
         if raw_cedula:
             raw_cedula_str = str(raw_cedula).strip()
-            if raw_cedula_str and not _is_pre_masked_cedula(raw_cedula_str):
+            if raw_cedula_str and _is_pre_masked_cedula(raw_cedula_str):
+                # La fuente entregó la cédula ya censurada — no podemos
+                # calcular HMAC. Guardamos el valor en unmapped para que
+                # el detector de PII confirme que ya viene enmascarado.
+                pii_provenance = "source_masked_lossy"
+                unmapped = {"cedula_source_masked": raw_cedula_str}
+            elif raw_cedula_str:
+                pii_provenance = "cleartext"
                 cedula_masked = _mask_cedula(raw_cedula_str)
                 if self._secret:
                     try:
                         cedula_hmac = identity_token(raw_cedula_str, self._secret)
+                        identity_kind = "hmac"
                     except Exception as exc:
                         log.warning(
                             "%s: id=%s error tokenizando cédula: %s",
@@ -304,6 +319,8 @@ class EncuentralosParser:
                 event_id=self._event_id,
                 cedula_hmac=cedula_hmac,
                 cedula_masked=cedula_masked,
+                identity_kind=identity_kind,
+                pii_provenance=pii_provenance,
                 age_range=age_range,
                 is_minor=is_minor,
                 last_known_location=last_known_location,
@@ -314,6 +331,7 @@ class EncuentralosParser:
                 foto=foto,
                 source_record_id=source_record_id,
                 fuente=FUENTE_LABEL,
+                unmapped=unmapped,
             )
         except Exception as exc:
             log.warning(
