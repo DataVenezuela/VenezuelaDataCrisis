@@ -177,8 +177,10 @@ def _cmd_consolidate(args: argparse.Namespace) -> None:
     if events:
         deduped, n_removed = deduplicate_typed_entities(events)
         if not dry_run:
+            consolidated_dir = output_dir / "consolidated"
+            consolidated_dir.mkdir(exist_ok=True)
             lines = [json.dumps(e.model_dump(mode="json"), ensure_ascii=False) for e in deduped]
-            events_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            (consolidated_dir / "events.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
         print(
             f"Consolidación{'(dry-run)' if dry_run else ''}: "
             f"{len(records)} → {len(deduped)} eventos ({n_removed} duplicados)"
