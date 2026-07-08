@@ -96,11 +96,12 @@ Aspiracional en su mayoría. Hoy en el código:
 - **Sí existe** `dedup_version` por fila (`spec.version`, por ejemplo
   `person-detid-v1`), pero versiona el algoritmo de la clave de dedup, no la
   forma del contrato: no confundir uno con otro.
-- La spec del contrato entidad->DB (issue #231, PR #232) existe, pero aún sin
-  versión formal ni carpeta `contracts/` poblada.
+- La spec del contrato entidad->DB (issue #231, PR #232) existía pero fue
+  eliminada en PR #258 (la forma canónica vive en `docs/schema.md`). La columna
+  `contract_version` y la carpeta `contracts/` siguen pendientes.
 
-El primer paso de implementación es declarar `contract-v1.0` sobre la spec actual
-y añadir la columna; recién entonces `vzla-deployment` puede fijar el tag.
+El primer paso de implementación sigue siendo declarar `contract-v1.0` y añadir
+la columna; recién entonces `vzla-deployment` puede fijar el tag.
 
 ---
 
