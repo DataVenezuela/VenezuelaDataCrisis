@@ -19,8 +19,8 @@ def find_candidates(
 
     Returns list of candidate dicts with keys:
         event_id: event UUID
-        left_person_record_id: left persons.person_record_id
-        right_person_record_id: right persons.person_record_id
+        left_aporte_id: left aportes.id
+        right_aporte_id: right aportes.id
         blocking_key: block key that produced the candidate
         score: float
         reasons: dict[str, float]
@@ -57,12 +57,12 @@ def find_candidates(
 
                 priority = "high" if score >= 0.95 else "medium"
 
-                left_person_record_id, right_person_record_id = sorted([left_id, right_id])
+                left_aporte_id, right_aporte_id = sorted([left_id, right_id])
 
                 candidates.append({
                     "event_id": str(left.get("event_id") or right.get("event_id") or ""),
-                    "left_person_record_id": left_person_record_id,
-                    "right_person_record_id": right_person_record_id,
+                    "left_aporte_id": left_aporte_id,
+                    "right_aporte_id": right_aporte_id,
                     "blocking_key": block_key,
                     "source_record_ids": [
                         str(value)

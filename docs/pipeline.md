@@ -649,21 +649,29 @@ upsert directo a Supabase via PostgREST.
 Responsabilidades del exporter:
 - Construir el payload del aporte usando los contratos de
   `scrapers/dedup/specs.py`: `entity_type`, `external_id`, `dedup_hash`,
-  `dedup_version`, `block_keys`, `content_hash`, `source_id` y `raw_json`
-  (el record de negocio sin claves internas con prefijo `_`). Keys en
-  snake_case. El exporter resuelve `source_id` (uuid) a partir del slug de la
-  fuente: `source_slug` no viaja al POST. Además emite algunas claves no
-  canónicas (`run_id`, `scraper_id`, `source_url`, `parser_version`) que hoy
-  no son columnas de `aportes`.
-- `external_id` es determinista (fingerprint v1 para Event/AcopioCenter,
-  `deterministic_id` para Person). PostgREST hace upsert por `external_id`
-  via `Prefer: resolution=merge-duplicates`, así que re-correr la misma
-  fuente no duplica (idempotencia).
+  `dedup_version`, `block_keys`, `content_hash`, `source_id`, `artifact_id` y
+  `raw_json` (el record de negocio sin claves internas con prefijo `_`). Keys en
+  snake_case. `source_id` (uuid) es `source.id` directo del config (ADR 0009: ya no
+  se resuelve desde un slug). Desde el cutover Bronze (#256) emite
+  `artifact_id` (FK NOT NULL, lo stampa el pipeline como `_artifact_id` tras
+  registrar la página en `raw_artifacts`) y **dejó de emitir**
+  `run_id`/`scraper_id`/`source_url`/`parser_version`: la procedencia de corrida y
+  la URL de origen viven en la capa Bronze. Ver
+  `docs/schema.md` y ADR 0008.
+- `external_id` es determinista y **por-registro-de-fuente** para todo tipo:
+  `sha256("<entity>|<source_id>|<source_record_id>")` cuando la fuente da un
+  id de registro nativo, o `sha256("<entity>|<source_id>|<content_hash>")`
+  cuando no. Ya no es el fingerprint ni el `deterministic_id`: dos registros
+  distintos de una fuente que comparten cédula o fingerprint son dos aportes,
+  no uno (la dedup vive en edges y gold, no en silver). PostgREST hace upsert
+  por `external_id` via `Prefer: resolution=merge-duplicates`, así que
+  re-correr la misma fuente no duplica (idempotencia).
 - Enviar en lotes (batch) configurables por fuente (`bulk_size` /
   `max_concurrent_posts` de `SourceConfig`). Cada batch exitoso (2xx) cuenta
   como enviado; un batch fallido se registra en `result.errors`.
-- Avanzar el watermark de la fuente (`POST /rest/v1/source_watermarks` con
-  `Prefer: resolution=merge-duplicates`, body `{"slug": "...", "watermark_at": "<ISO>"}`)
+- Avanzar el watermark de la fuente (`PATCH /rest/v1/sources?source_id=eq.<uuid>`
+  con `Prefer: return=minimal`, body `{"watermark_at": "<ISO>"}`; ADR 0009: el
+  watermark vive en `sources.watermark_at`, se retiró `source_watermarks`)
   a `max(fetched_at)` menos un margen de seguridad (`_WATERMARK_SAFETY_MARGIN`,
   ver más abajo). El watermark avanza si no hubo errores previos al export
   (parseo, PII, enriquecimiento, protección de menores) y se envió al menos un
@@ -718,15 +726,15 @@ de un fetch individual no exceda esa ventana. **Pendiente de confirmar con
 cada fuente:** si su API interpreta `updated_after` de forma inclusiva o
 exclusiva en el límite exacto.
 
-`source_slug` **no** vive en `StagingConfig`: una corrida del pipeline procesa
+El `source_id` **no** vive en `StagingConfig`: una corrida del pipeline procesa
 múltiples fuentes (`run_pipeline._run_source` itera todas las habilitadas), así
-que `source_slug` es siempre `source.id` y se pasa explícito en cada llamada a
-`StagingExporter.get_watermark(source_slug)` / `export_source(..., source_slug=...)`.
+que `source.id` (el UUID de la fuente) se pasa explícito en cada llamada a
+`StagingExporter.get_watermark(source_id)` / `export_source(..., source_id=...)`.
 Esto mantiene watermarks independientes por fuente dentro de la misma corrida.
-Como `source.id` viaja como valor `slug` hacia `/rest/v1/source_watermarks` (en
-el body del upsert y como filtro en las lecturas PostgREST),
-`validate_sources_config` exige que sea único entre fuentes y que solo contenga
-`[a-zA-Z0-9_-]`.
+Como `source.id` viaja como filtro `source_id=eq.<uuid>` hacia `/rest/v1/sources`
+(lectura y `PATCH` del `watermark_at`), `validate_sources_config` exige que sea
+único entre fuentes; en formato thin debe ser un UUID (el `source_id` de la tabla
+`sources`), en formato completo un slug `[a-zA-Z0-9_-]`.
 
 Antes de hacer el fetch, `_run_source` lee `exporter.get_watermark(source.id)`
 **dentro** del mismo `try/finally` que cierra el adapter, y lo pasa como
@@ -756,16 +764,12 @@ donde cada registro puede ser una vida, descartar automáticamente no es
 aceptable. Todo lo que el pipeline antes perdía va a la **Quarantine DB** para
 revisión humana.
 
-`scrapers/exporters/quarantine_exporter.py` (`QuarantineExporter`) espeja al
-`StagingExporter`: un `POST /api/v1/quarantine` por registro, cliente
-`httpx` inyectable, retry/backoff en 429/5xx, y **dry-run silencioso** si faltan
-`QUARANTINE_API_KEY` / `QUARANTINE_BASE_URL`. Comparte el `run_id` de la corrida
-con el staging exporter para correlacionar qué se exportó y qué se cuarentenó.
-
-> **BUG (pendiente):** ese `POST /api/v1/quarantine` apuntaba al backend HTTP que
-> ya no existe, así que el envío a cuarentena está roto. La ruta hay que
-> actualizarla: la cuarentena debe escribir directo a Supabase (como `aportes`,
-> vía PostgREST) contra la tabla `quarantined_records`.
+`scrapers/exporters/quarantine_exporter.py` (`QuarantineExporter`) escribe
+**directo a Supabase via PostgREST** (`POST /rest/v1/quarantined_records`),
+igual que `StagingExporter` con `aportes`. Mismas credenciales
+(`SUPABASE_URL` / `SUPABASE_PUBLISHABLE_KEY` / `SUPABASE_INGEST_JWT`), mismo
+patrón: cliente `httpx` inyectable, retry/backoff en 429/5xx, y dry-run silencioso
+si faltan las vars. El payload viaja en **snake_case** (columnas de la tabla).
 
 La tabla `quarantined_records` es la de `docs/schema.md`; el scraper no ejecuta SQL.
 
@@ -858,6 +862,17 @@ mapea `full_name`, `cedula_hmac`, `cedula_masked`, `identity_kind`,
 `pii_provenance`, `status`, `trust_tier`, `last_known_location`, `age_range`,
 etc., a columnas reales (ver `docs/schema.md`). No hay merge ni pérdida: las
 tablas tipadas son una vista 1:1 de `aportes` (ambas capas son silver).
+
+El materializer corre como **primera etapa del cron de consolidación**
+(`consolidate.yml`), antes de la generación de aristas (es independiente de ella,
+solo comparte la cadencia de 20 min). El upsert usa `resolution=ignore-duplicates`
+(ON CONFLICT DO NOTHING) sobre la PK compartida: re-correr no duplica ni reescribe
+filas ya proyectadas. Sin las variables `SUPABASE_*` el materializer entra en
+dry-run silencioso (no toca la red). Limitación conocida (follow-up): un aporte
+con `source_record_id` estable que se re-scrapea con contenido nuevo actualiza su
+`raw_json` in situ (mismo `id`), pero su fila tipada no se re-proyecta hasta que
+un paso gated por `content_hash` lo habilite; los aportes sin `source_record_id`
+no sufren esto (contenido nuevo produce un `aporte.id` nuevo, que sí se proyecta).
 
 ### 5.2 Consolidation job: aristas de candidatos (edges)
 
@@ -1061,7 +1076,7 @@ Ejemplo de payload (los registros se envían en batches PostgREST):
 {
   "run_id": "uuid-v4",
   "entity_type": "person",
-  "external_id": "deterministico-16-hex-o-sha256",
+  "external_id": "sha256-hex (source_id + source_record_id o content_hash)",
   "dedup_hash": "deterministico",
   "dedup_version": "person-detid-v1",
   "block_keys": ["ced:uuid-v4:hmac", "phon:uuid-v4:lara:JN"],
@@ -1090,62 +1105,52 @@ Cada aporte debe cumplir:
 
 ---
 
-## 10b. Cuarentena (POST /api/v1/quarantine)
+## 10b. Cuarentena (POST /rest/v1/quarantined_records)
 
-> **BUG (pendiente):** este endpoint HTTP apuntaba al backend removido y hoy no
-> tiene destino. La ruta hay que actualizarla a escritura directa en Supabase
-> (`quarantined_records`, vía PostgREST), igual que `aportes`. El contrato de
-> payload de abajo describe lo que el `QuarantineExporter` envía hoy, no un
-> destino vivo.
+El scraper hace un `POST /rest/v1/quarantined_records` por registro no procesable,
+directo a Supabase via PostgREST. Mismas credenciales que staging
+(`SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY`, `SUPABASE_INGEST_JWT`).
+Auth headers: `apikey` + `Authorization: Bearer` (igual que `aportes`).
 
-El scraper hace un POST por registro no procesable. `run_id` se comparte con el
-aporte de la misma corrida.
-
-Ejemplo de payload (campos que envía el `QuarantineExporter`). **Claves en
-camelCase** (contrato heredado del backend removido); al migrar a Supabase directo
-habrá que mapearlas a las columnas snake_case de `quarantined_records`:
+Ejemplo de payload (columnas **snake_case** de `quarantined_records`):
 
 ```json
 {
-  "runId": "uuid-v4",
-  "sourceSlug": "encuentralos",
-  "sourceUrl": "https://fuente.org/registro/123",
-  "reasonCode": "invalid_schema",
-  "reasonDetail": "Error parseando pagina 2: KeyError 'nombre'",
-  "riskLevel": "medium",
-  "payloadPreviewRedacted": "fragmento [IDENTITY_DOCUMENT] ...",
-  "payloadHash": "64-hex-sin-prefijo",
-  "piiFindingsSummary": {"identity_document": 1}
+  "source_slug": "encuentralos",
+  "source_url": "https://fuente.org/registro/123",
+  "reason_code": "invalid_schema",
+  "reason_detail": "Error parseando pagina 2: KeyError 'nombre'",
+  "risk_level": "medium",
+  "payload_preview_redacted": "fragmento [IDENTITY_DOCUMENT] ...",
+  "payload_hash": "64-hex-sin-prefijo",
+  "pii_findings_summary": {"identity_document": 1}
 }
 ```
 
-El backend setea por su cuenta `quarantine_id`, `review_status` (default
-`pending`), `retention_until`, `destroyed_at` y `created_at`. Autentica con
-`x-api-key` y valida que `source_slug` pertenezca al scraper de la key.
+Campos omitidos del payload: `run_id` (nullable FK a `scrape_runs`; el pipeline
+usa un UUID de correlación local que no existe en esa tabla — se omite para no
+violar la FK), `review_status` y `quarantined_at` (defaults de la DB).
 
 Respuestas que clasifica el exporter:
 
 | Status | Significado |
 |--------|-------------|
 | `200` / `201` | insertado en cuarentena |
-| `409` | ese payload ya estaba en cuarentena (dedup por `(source_slug, payload_hash)`) |
-| `403` | la fuente no existe o no pertenece al scraper (error acumulado; el run sigue) |
+| `409` | reservado para futuros índices únicos en la tabla |
+| `401` / `403` | credenciales o grants insuficientes (error acumulado; el run sigue) |
 | otro / error de red | error acumulado (no relanza; el run sigue) |
-
-> La fuente debe estar **registrada** en el backend y ser propiedad del scraper:
-> el contrato valida ownership. Una fuente no registrada recibe `403` y su
-> registro NO se preserva — queda como `quarantine_error` visible en el summary.
 
 ### Reglas del registro de cuarentena
 
 1. UTF-8, JSON válido. Un POST por registro.
 2. `reason_code` y `risk_level` dentro de los enums controlados (los valida el
-   exporter y el `CHECK` de la tabla).
-3. `payload_preview_redacted` SIN PII en claro (redactado), nunca el payload
-   completo.
-4. `pii_findings_summary` lleva conteos por tipo, nunca valores.
-5. `payload_hash` = SHA-256 hex puro (64) del payload original.
-6. Trazabilidad: `source_slug` + `source_url` + `run_id`.
+   exporter antes del POST y el tipo de columna en la DB).
+3. `payload_preview_redacted` SIN PII en claro (redactado con `redact_pii`), nunca
+   el payload completo (truncado a 500 chars).
+4. `pii_findings_summary` lleva conteos por tipo, nunca valores en claro.
+5. `payload_hash` = SHA-256 hex puro (64 chars, sin prefijo `sha256:`) del payload
+   original. Sobrevive a la purga del registro.
+6. Trazabilidad: `source_slug` + `source_url`.
 
 ### DDL de referencia (`quarantined_records`, en el backend)
 
@@ -1435,8 +1440,8 @@ python -m scrapers.cli validate --config scrapers/config/sources.demo.yaml
 | Staging exporter (`POST /rest/v1/aportes`) | ✅ Issue #81 |
 | Dedup specs + fingerprint v1 | ✅ Issue #81 |
 | Raw artifact store (R2) | ❌ bloqueado por #81 |
-| Quarantine exporter (`POST /api/v1/quarantine`) + ruteo | ⚠️ ruta rota: apunta al backend removido, hay que re-apuntar a Supabase directo |
-| Quarantine DB (tabla `quarantined_records`) | ⏳ destino de la migración (Supabase directo) |
+| Quarantine exporter (`POST /rest/v1/quarantined_records`) + ruteo | ✅ escribe directo a Supabase PostgREST, mismas credenciales que staging |
+| Quarantine DB (tabla `quarantined_records`) | ✅ destino activo en Supabase |
 | Watermark por fuente | ✅ Issue #57 |
 | Materializer (aportes → silver 1:1) | ❌ diseñado, sin writer |
 | Consolidation job (aristas `dedup_candidates`) | ⚠️ existe (`consolidation_job.py`) pero huérfano del cron y con mismatch de schema: emite el shape viejo `*_person_record_id`; la tabla real usa `*_aporte_id` + `priority` int + `touches_gold` |
@@ -1475,6 +1480,6 @@ falle, y el ciclo siguiente reenvía la ventana de overlap sin duplicar (ver
 separado.** El staging escribe directo a Supabase vía PostgREST, así que un 403
 en staging apunta al JWT/grants del rol `scraper_ingest` (`SUPABASE_INGEST_JWT`).
 El API público de lectura lo sirve un **Cloudflare Worker + D1** (proyección
-sanitizada), no el pipeline. La cuarentena (`POST /api/v1/quarantine`) apunta hoy
-a un backend removido: es un bug pendiente (ver "Capa 4b" / §10b), no una
-diferencia de env vars.
+sanitizada), no el pipeline. La cuarentena escribe directo a Supabase
+(`POST /rest/v1/quarantined_records`, mismas credenciales que staging); si falla,
+el registro queda como `quarantine_error` en el summary pero el run continúa.

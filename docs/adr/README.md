@@ -19,3 +19,5 @@ ADR que reemplaza a la anterior.
 | [0005](./0005-gobernabilidad.md) | Gobernabilidad del repositorio y quórum de mantenedores | Propuesta |
 | [0006](./0006-proteccion-pii-ingesta.md) | Protección de PII en la ingesta | Propuesta |
 | [0007](./0007-modelo-consolidacion-gold.md) | Modelo de consolidación y capa gold | Aceptada |
+| [0008](./0008-retencion-pii-bronze-raw-artifacts.md) | Retención de PII en claro en Bronze (raw_artifacts) y reaper de 12h | Propuesta |
+| [0009](./0009-fuentes-en-db-clave-source-id.md) | Definiciones de fuentes en la DB, clave por source_id (fin del slug) | Propuesta |

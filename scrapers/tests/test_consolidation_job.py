@@ -280,6 +280,62 @@ def test_person_no_admite_automerge() -> None:
         raise AssertionError("Person deberia rechazar auto-merge")
 
 
+# --- fetch_person_candidates (FakeInMemoryAdapter) --------------------------
+
+def _fake_person(aporte_id: str, block_keys: list[str]) -> Record:
+    return {
+        "id": aporte_id,
+        "entity_type": "Person",
+        "block_keys": block_keys,
+        "dedup_hash": None,
+        "trust_tier": "B",
+    }
+
+
+def test_fetch_person_candidates_retorna_aportes_con_block_key_solapante() -> None:
+    aportes = [
+        _fake_person("fp1", ["phon:ev1:abc", "ced:ev1:hmac1"]),
+        _fake_person("fp2", ["phon:ev1:abc"]),
+        _fake_person("fp3", ["phon:ev1:xyz"]),
+    ]
+    adapter = FakeInMemoryAdapter(aportes)
+    result = adapter.fetch_person_candidates(
+        block_keys=["phon:ev1:abc", "ced:ev1:hmac1"],
+    )
+    ids = {rec["id"] for rec in result}
+    assert ids == {"fp1", "fp2"}
+
+
+def test_fetch_person_candidates_excluye_ya_consolidados() -> None:
+    aportes = [
+        _fake_person("fp1", ["phon:ev1:abc"]),
+        _fake_person("fp2", ["phon:ev1:abc"]),
+    ]
+    adapter = FakeInMemoryAdapter(aportes)
+    adapter.consolidated_ids.add("fp1")
+    result = adapter.fetch_person_candidates(
+        block_keys=["phon:ev1:abc"],
+    )
+    assert [rec["id"] for rec in result] == ["fp2"]
+
+
+def test_fetch_person_candidates_excluye_otros_entity_types() -> None:
+    aportes: list[Record] = [
+        {"id": "fev1", "entity_type": "Event", "block_keys": ["phon:ev1:abc"]},
+        _fake_person("fp1", ["phon:ev1:abc"]),
+    ]
+    adapter = FakeInMemoryAdapter(aportes)
+    result = adapter.fetch_person_candidates(
+        block_keys=["phon:ev1:abc"],
+    )
+    assert [rec["id"] for rec in result] == ["fp1"]
+
+
+def test_fetch_person_candidates_block_keys_vacias_retorna_lista_vacia() -> None:
+    adapter = FakeInMemoryAdapter([_fake_person("fp1", ["phon:ev1:abc"])])
+    assert adapter.fetch_person_candidates(block_keys=[]) == []
+
+
 # --- Funciones puras --------------------------------------------------------
 
 def test_group_by_dedup_hash_preserva_orden_y_descarta_sin_hash() -> None:
@@ -462,11 +518,13 @@ def test_person_candidate_payload_matches_master_schema() -> None:
     assert len(transport.post_bodies) == 1
     assert isinstance(transport.post_bodies[0], list)
     body = transport.post_bodies[0][0]
-    assert body["event_id"] == _EVENT_ID
-    assert body["left_person_record_id"] == "person-1"
-    assert body["right_person_record_id"] == "person-2"
+    assert "event_id" not in body
+    assert body["left_aporte_id"] == "person-1"
+    assert body["right_aporte_id"] == "person-2"
     assert body["blocking_key"] == f"ced:{_EVENT_ID}:same"
     assert body["decision"] == "pending"
+    assert body["priority"] == 2
+    assert body["touches_gold"] is False
     assert "left_person" not in body
     assert "right_person" not in body
 
@@ -526,8 +584,8 @@ def test_person_existing_candidate_is_idempotent_update() -> None:
         existing=[
             {
                 "candidate_id": "cand-1",
-                "left_person_record_id": "person-2",
-                "right_person_record_id": "person-1",
+                "left_aporte_id": "person-2",
+                "right_aporte_id": "person-1",
                 "blocking_key": f"ced:{_EVENT_ID}:same",
             }
         ],
@@ -553,7 +611,7 @@ def test_person_mark_consolidated_error_is_reported() -> None:
     assert any(error.startswith("mark_error") for error in result.errors)
 
 
-@pytest.mark.parametrize("missing_field", ["event_id", "blocking_key"])
+@pytest.mark.parametrize("missing_field", ["blocking_key"])
 def test_person_invalid_candidate_payload_is_nonfatal(
     monkeypatch: pytest.MonkeyPatch,
     missing_field: str,
@@ -566,24 +624,22 @@ def test_person_invalid_candidate_payload_is_nonfatal(
     ]
     invalid = {
         "event_id": _EVENT_ID,
-        "left_person_record_id": "person-1",
-        "right_person_record_id": "person-2",
+        "left_aporte_id": "person-1",
+        "right_aporte_id": "person-2",
         "blocking_key": "bad:block",
         "source_record_ids": ["bad-1", "bad-2"],
         "score": 0.95,
         "reasons": {"nombre": 0.4},
-        "priority": "high",
     }
     del invalid[missing_field]
     valid = {
         "event_id": _EVENT_ID,
-        "left_person_record_id": "person-3",
-        "right_person_record_id": "person-4",
+        "left_aporte_id": "person-3",
+        "right_aporte_id": "person-4",
         "blocking_key": "ok:block",
         "source_record_ids": ["ok-1", "ok-2"],
         "score": 0.95,
         "reasons": {"nombre": 0.4},
-        "priority": "high",
     }
 
     monkeypatch.setattr(consolidation_job, "find_candidates", lambda *_: [invalid, valid])
