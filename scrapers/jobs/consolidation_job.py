@@ -430,6 +430,7 @@ def _source_record_ids(candidate: dict[str, Any]) -> set[str]:
 
 def _candidate_payload(candidate: dict[str, Any]) -> dict[str, Any]:
     required = (
+        "event_id",
         "left_aporte_id",
         "right_aporte_id",
         "blocking_key",
@@ -439,15 +440,14 @@ def _candidate_payload(candidate: dict[str, Any]) -> dict[str, Any]:
     missing = [key for key in required if not candidate.get(key)]
     if missing:
         raise ValueError(f"candidate payload missing required fields: {missing}")
-    priority_str = candidate.get("priority", "medium")
-    priority_int = 2 if priority_str == "high" else 1
     return {
+        "event_id": candidate["event_id"],
         "left_aporte_id": candidate["left_aporte_id"],
         "right_aporte_id": candidate["right_aporte_id"],
         "blocking_key": candidate["blocking_key"],
         "score": candidate["score"],
         "reasons": candidate["reasons"],
-        "priority": priority_int,
+        "priority": candidate.get("priority", 2),
         "touches_gold": False,
         "decision": "pending",
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -512,12 +512,13 @@ class SupabasePersonDedupAdapter:
         clauses = []
         for payload in payloads:
             left, right, blocking_key = _candidate_key(payload)
+            safe_key = blocking_key.replace('"', '\\"')
             for left_id, right_id in ((left, right), (right, left)):
                 clauses.append(
                     "and("
                     f"left_aporte_id.eq.{left_id},"
                     f"right_aporte_id.eq.{right_id},"
-                    f"blocking_key.eq.{blocking_key}"
+                    f'blocking_key.eq."{safe_key}"'
                     ")"
                 )
 

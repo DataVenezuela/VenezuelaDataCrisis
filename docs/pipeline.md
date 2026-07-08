@@ -1444,7 +1444,6 @@ python -m scrapers.cli validate --config scrapers/config/sources.demo.yaml
 | Quarantine DB (tabla `quarantined_records`) | ✅ destino activo en Supabase |
 | Watermark por fuente | ✅ Issue #57 |
 | Materializer (aportes → silver 1:1) | ❌ diseñado, sin writer |
-| Consolidation job (aristas `dedup_candidates`) | ⚠️ existe (`consolidation_job.py`) pero huérfano del cron y con mismatch de schema: emite el shape viejo `*_person_record_id`; la tabla real usa `*_aporte_id` + `priority` int + `touches_gold` |
 | Gold clustering (`gold_entities` / `gold_members` / `gold_history`) | ❌ diseñado, sin writer |
 | Build job (D1 lee gold publicado + huérfanos) | ❌ bloqueado por gold |
 | Cloudflare Worker | ❌ bloqueado por build job |

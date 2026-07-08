@@ -308,7 +308,7 @@ class TestClustering:
         assert len(candidates) == 0
 
     def test_priority_high_when_score_above_95(self) -> None:
-        """score >= 0.95 → priority='high'."""
+        """score >= 0.95 → priority=1 (high)."""
         # Use identical persons for high score
         a = _person("a", name="Juan Perez", cedula_hmac="same",
                      location="Caracas, Miranda", status="missing",
@@ -321,7 +321,7 @@ class TestClustering:
         assert len(candidates) >= 1
         # With identical everything, score should be very high
         assert candidates[0]["score"] >= 0.95
-        assert candidates[0]["priority"] == "high"
+        assert candidates[0]["priority"] == 1
 
     def test_candidate_has_expected_keys(self) -> None:
         """Candidates match dedup_candidates contract in master."""
@@ -339,7 +339,6 @@ class TestClustering:
         assert "blocking_key" in c
         assert "score" in c
         assert "reasons" in c
-        assert "priority" in c
         assert isinstance(c["reasons"], dict)
 
     def test_empty_block_no_candidates(self) -> None:
