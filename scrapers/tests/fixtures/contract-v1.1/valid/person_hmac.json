@@ -1,0 +1,9 @@
+{
+  "_comment": "Persona con cédula hmaceada: identity_kind=hmac exige cedula_hmac.",
+  "full_name": "Maria Ficticia",
+  "event_id": "8f14e45f-ceea-467e-bd5d-0a4f2e0c1a3a",
+  "fuente": "encuentralos",
+  "identity_kind": "hmac",
+  "cedula_hmac": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "pii_provenance": "cleartext"
+}

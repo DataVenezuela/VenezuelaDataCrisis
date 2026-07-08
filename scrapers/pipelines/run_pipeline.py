@@ -5,6 +5,9 @@ Orquestador principal del pipeline VZLA_DEDUP.
 
 Flujo por fuente habilitada
 ----------------------------
+0. **Bronze**    — ``ProvenanceExporter`` abre una ``scrape_run`` por fuente y
+                   registra cada pagina fetcheada en ``raw_artifacts`` (append-only);
+                   cada aporte lleva su ``artifact_id`` (issue #256)
 1. **Adapter**   — fetch del contenido raw segun ``source.type``
 2. **Parser**    — convierte raw -> list[Person | AcopioCenter | Event]
 3. **PII**       — ``tokenize_pii_fields`` sobre cada entidad (model_dump)
@@ -21,7 +24,7 @@ Cuarentena (Issue #88)
 NINGUN registro se descarta en silencio. Cada punto donde el pipeline antes
 perdia datos (parser ausente, parseo fallido, PII no tratable, fail-closed de
 proteccion de menores) ahora enruta el registro a la Quarantine DB via
-``QuarantineExporter`` (POST /api/quarantine) para revision humana. El preview
+``QuarantineExporter`` (POST /rest/v1/quarantined_records, Supabase PostgREST) para revision humana. El preview
 va redactado; el run continua con las demas fuentes.
 
 La deduplicacion ya no ocurre por fuente: el dedup_hash/external_id deterministas
@@ -66,6 +69,7 @@ from scrapers.exporters.quarantine_exporter import (
     QuarantineRecord,
     quarantine_payload_hash,
 )
+from scrapers.exporters.provenance_exporter import ProvenanceExporter
 from scrapers.exporters.staging_exporter import (
     ExportResult,
     StagingConfig,
@@ -452,15 +456,9 @@ def _apply_pii(
     errors: list[str],
     source: SourceConfig,
     quarantine_batch: list[QuarantineRecord],
-    source_url: str | None = None,
 ) -> list[dict]:
     """
     Convierte entidades tipadas a dicts y aplica tokenize_pii_fields.
-
-    ``source_url`` es la URL real de la pagina de la que salieron estas
-    entidades (el streaming procesa una pagina por llamada, asi que todas las
-    entidades comparten la misma). Se propaga como meta-campo ``_source_url``
-    para la trazabilidad del exporter (issue #236).
 
     Los campos cedula_hmac/cedula_masked ya vienen del parser concreto
     (p. ej. EncuentralosParser).  tokenize_pii_fields actua como segunda
@@ -471,6 +469,11 @@ def _apply_pii(
     igualmente — sin los campos PII crudos — en lugar de perderse.
     Esto permite que el pipeline funcione en tests offline.
     Devuelve lista de dicts listos para enriquecimiento + staging.
+
+    Nota (#256): la URL de origen ya NO se propaga como meta-campo ``_source_url``.
+    Vive en ``raw_artifacts.source_url`` (Bronze), que el pipeline registra por
+    pagina; el exporter dejo de emitir ``source_url``/``parser_version`` en el
+    aporte, asi que ese cableado quedo obsoleto.
     """
     pii_salt_available = bool(os.getenv("PII_SALT"))
 
@@ -485,11 +488,6 @@ def _apply_pii(
                 d = _strip_raw_pii(d)
             # Preservar el tipo para el router de export
             d["_entity_type"] = type(entity).__name__
-            # Trazabilidad (issue #236): el exporter lee estos meta-campos para
-            # poblar source_url/parser_version en aportes.
-            if source_url:
-                d["_source_url"] = source_url
-            d["_parser_version"] = _PIPELINE_VERSION
             # _source_record_id (prefijo _) es el meta-campo que _build_payload
             # lee para basar external_id en el UUID nativo; clean lo excluye de raw_json.
             if d.get("source_record_id"):
@@ -503,9 +501,6 @@ def _apply_pii(
             try:
                 d = _strip_raw_pii(entity.model_dump())
                 d["_entity_type"] = type(entity).__name__
-                if source_url:
-                    d["_source_url"] = source_url
-                d["_parser_version"] = _PIPELINE_VERSION
                 result.append(d)
             except Exception as rescue_exc:
                 # No se pudo ni rescatar sin PII: a cuarentena (PII no tratable),
@@ -725,6 +720,7 @@ def _run_source(
     event_id: str,
     exporter: StagingExporter,
     quarantine_batch: list[QuarantineRecord],
+    provenance: ProvenanceExporter,
 ) -> ExportResult:
     """
     Ejecuta el pipeline completo para una fuente.
@@ -738,6 +734,16 @@ def _run_source(
     (parser ausente, parseo fallido, PII no tratable, menor no redactable). El
     orquestador lo vacia a la Quarantine DB al terminar la fuente — NADA se
     descarta en silencio (Issue #88).
+
+    ``provenance`` escribe la capa Bronze (issue #256): una fila ``scrape_runs``
+    por esta fuente y una fila ``raw_artifacts`` APPEND-ONLY por pagina fetcheada.
+    Cada aporte lleva su ``artifact_id`` (meta-campo ``_artifact_id``). Si no se
+    puede crear la corrida o registrar la pagina (modo enabled), la fuente falla
+    CERRADO: no se exportan aportes sin su ``raw_artifact`` y el error se acumula
+    en ``source_errors`` para que el watermark NO avance (re-fetch la proxima
+    corrida, semantica at-least-once). Esto es deliberado: un timestamp de
+    watermark no puede expresar "todas las paginas menos la 1 estan hechas", asi
+    que ante un fallo de procedencia se retiene la fuente entera.
     """
     log.info("Iniciando fuente: %s (type=%s, parser=%s)", source.id, source.type, source.parser_asignado)
     source_errors: list[str] = []
@@ -810,11 +816,43 @@ def _run_source(
     source_fetched_ats: list[str] = []
     pages_seen = 0
     entities_seen = 0
+    artifacts_written = 0
+    run_id: str | None = None
 
     try:
         watermark_at = exporter.get_watermark(source.id)
-        for page in _fetch_pages(adapter, source, watermark_at):
+        # Bronze (issue #256): abrir la corrida de esta fuente antes de fetchear.
+        # Si no se puede crear (modo enabled), fail-closed: no exportar aportes sin
+        # su raw_artifact. Se marca error de fuente para bloquear el watermark.
+        run_id = provenance.start_run(source.id)
+        if run_id is None:
+            msg = (
+                f"no se pudo iniciar scrape_run para {source.id}; se omite el "
+                "export de la fuente (fail-closed, watermark retenido)"
+            )
+            log.error("[%s] %s", source.id, msg)
+            source_errors.append(msg)
+
+        for page in _fetch_pages(adapter, source, watermark_at) if run_id is not None else ():
             pages_seen += 1
+
+            # Registrar la pagina cruda en Bronze (append-only) ANTES de parsear:
+            # una fila raw_artifacts por pagina fetcheada, sea cual sea el numero
+            # de entidades. artifact_id viaja luego en cada aporte de esta pagina.
+            artifact_id = provenance.record_artifact(run_id, page)
+            if artifact_id is None:
+                # Sin raw_artifact no puede existir el aporte (FK NOT NULL). No se
+                # exportan los aportes de esta pagina; se marca error de fuente
+                # para retener el watermark y re-fetchear la proxima corrida.
+                msg = f"no se pudo registrar raw_artifact (pagina {page.get('page')})"
+                log.warning("[%s] %s", source.id, msg)
+                source_errors.append(msg)
+                continue
+            artifacts_written += 1
+
+            # El basis del watermark solo cuenta paginas efectivamente registradas
+            # en Bronze: el timestamp de una pagina cuyo artifact fallo NUNCA entra
+            # (defensa en profundidad sobre el gate de source_errors, #256).
             if source.cursor_field:
                 page_cursors = [
                     _strip_ms(str(item[source.cursor_field]))
@@ -837,15 +875,19 @@ def _run_source(
             if page_entities:
                 records = _apply_pii(
                     page_entities, source_errors, source, quarantine_batch,
-                    source_url=page.get("source_url"),
                 )
                 records = _check_unmapped_pii(records, source_errors, source, quarantine_batch)
                 records = _enrich_records(records, source_errors)
                 records = _apply_confidence(records, source_errors)
                 records = _apply_minor_protection(records, source_errors, source, quarantine_batch)
 
+                # Stampar el artifact_id de esta pagina en cada aporte antes de
+                # exportar: el exporter lo emite como aportes.artifact_id (#256).
+                for rec in records:
+                    rec["_artifact_id"] = artifact_id
+
                 batch_result = exporter.export_batch(
-                    records, source_slug=source.id, batch_size=source.bulk_size,
+                    records, source_id=source.id, batch_size=source.bulk_size,
                     max_concurrent_posts=source.max_concurrent_posts,
                 )
                 combined.sent += batch_result.sent
@@ -860,6 +902,17 @@ def _run_source(
                 adapter.close()
             except Exception as exc:
                 log.warning("adapter.close() fallo en %s: %s", source.id, exc)
+        # Cerrar la corrida Bronze: finished_at + stats (SOLO conteos numericos,
+        # nunca strings de error que podrian contener texto derivado de PII).
+        provenance.finish_run(
+            run_id,
+            {
+                "pages": pages_seen,
+                "artifacts": artifacts_written,
+                "entities": entities_seen,
+                "sent": combined.sent,
+            },
+        )
 
     log.info("%s: %d página(s), %d entidades", source.id, pages_seen, entities_seen)
     if entities_seen == 0 and pages_seen > 0:
@@ -893,6 +946,7 @@ def _process_source_safe(
     all_errors: list[str],
     event_id: str,
     exporter: StagingExporter,
+    provenance: ProvenanceExporter,
 ) -> tuple[ExportResult,list[QuarantineRecord], bool]:
     """Ejecuta ``_run_source`` capturando cualquier excepcion fatal de la fuente.
 
@@ -905,7 +959,9 @@ def _process_source_safe(
 
     quarantine_batch: list[QuarantineRecord] = []
     try:
-        result = _run_source(source, limit, all_errors, event_id, exporter, quarantine_batch)
+        result = _run_source(
+            source, limit, all_errors, event_id, exporter, quarantine_batch, provenance
+        )
         return result,quarantine_batch, True
     except Exception as exc:
         msg = f"[{source.id}] Error fatal en fuente: {exc}"
@@ -996,13 +1052,17 @@ def run_pipeline(
     # Dos exporters HTTP independientes (cada uno con su httpx.Client y sus env
     # vars). Ambos hacen dry-run silencioso si faltan sus credenciales.
     exporter = StagingExporter(StagingConfig.from_env(), run_id=run_id)
-    quarantine_exporter = QuarantineExporter(QuarantineConfig.from_env(), run_id=run_id)
-    
+    quarantine_exporter = QuarantineExporter(QuarantineConfig.from_env())
+    # Bronze (issue #256): escribe scrape_runs + raw_artifacts. Reusa las mismas
+    # SUPABASE_* que el staging exporter, asi que ambos entran/salen de dry-run
+    # juntos. El run_id de scrape_runs lo genera la DB por fuente (no este uuid).
+    provenance = ProvenanceExporter(StagingConfig.from_env())
+
     try:
         if max_workers <= 1 or len(enabled) <= 1:
         
             for source in enabled:
-                result,thread_quarantine_batch, ok = _process_source_safe(source, limit, all_errors, event_id, exporter)
+                result,thread_quarantine_batch, ok = _process_source_safe(source, limit, all_errors, event_id, exporter, provenance)
                 thread_quarantine_batch = thread_quarantine_batch or []
                 staging_sent += result.sent
                 staging_duplicates += result.duplicates
@@ -1012,7 +1072,7 @@ def run_pipeline(
         else:
             with ThreadPoolExecutor(max_workers=max_workers) as pool:
                 futures = [
-                    pool.submit(_process_source_safe, source, limit, all_errors, event_id, exporter)
+                    pool.submit(_process_source_safe, source, limit, all_errors, event_id, exporter, provenance)
                     for source in enabled
                 ]
                 for future in as_completed(futures):
@@ -1046,6 +1106,7 @@ def run_pipeline(
 
         exporter.close()
         quarantine_exporter.close()
+        provenance.close()
 
     summary = {
         "sources_processed": sources_processed,

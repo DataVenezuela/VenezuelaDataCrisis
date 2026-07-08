@@ -4,6 +4,20 @@
 > **Issue:** #92 — feat(consolidation): Person dedup → candidatos (reutiliza PR #79)
 > **Bloqueado por:** #90 (SQL migration), #81 (staging exporter), PR #79 (coordinar correcciones)
 > **Fecha:** 2026-06-28
+>
+> **Reconciliado (2026-07-06):** Este spec se alineó con el esquema vivo de
+> `dedup_candidates` (ver `docs/schema.md`): las aristas referencian `aportes`
+> (`left_aporte_id`/`right_aporte_id`), `priority` es entero y existe
+> `touches_gold`; no hay columna `event_id`. El código actual
+> (`scrapers/dedup/clustering.py`, `scrapers/jobs/consolidation_job.py`) todavía
+> emite la forma vieja (`*_person_record_id`, `priority` string, columna
+> `event_id`) y debe migrarse a esta forma antes de correr contra la BD real.
+>
+> **Hueco pendiente:** el cursor de §2 usa `aportes.consolidated_at`, que **no**
+> es una columna del `aportes` canónico (`docs/schema.md`). El código
+> (`consolidation_job.py`) sí la lee y escribe hoy. Es un hueco código-vs-canon a
+> cerrar contra `docs/schema.md` (añadir la columna al canon o cambiar el
+> mecanismo de cursor), a resolver junto con la migración de `aportes`.
 
 ---
 
@@ -14,6 +28,11 @@ El consolidation job para Person lee de `aportes` en Supabase, agrupa registros 
 ---
 
 ## 2. Origen de datos
+
+> Nota de canon: `consolidated_at` **no** existe en el `aportes` canónico
+> (`docs/schema.md`). El mecanismo descrito abajo refleja el código actual, que
+> depende de esa columna; es un hueco código-vs-canon pendiente (ver el banner
+> de arriba), no parte del esquema canónico.
 
 Lectura incremental con cursor blando desde `aportes`:
 
@@ -107,23 +126,24 @@ def location_score(left_loc, right_loc):
 
 | Columna | Valor |
 |---------|-------|
-| `left_person_record_id` | FK a `persons.person_record_id` de la persona izquierda |
-| `right_person_record_id` | FK a `persons.person_record_id` de la persona derecha |
-| `blocking_key` | Clave que produjo el candidato |
+| `left_aporte_id` | FK a `aportes.id` del aporte izquierdo (orden canónico, ver §6). Como `persons.person_record_id` es 1:1 con `aportes.id`, es el mismo identificador |
+| `right_aporte_id` | FK a `aportes.id` del aporte derecho |
+| `blocking_key` | Clave que produjo el candidato; lleva el `event_id` embebido (ej. `ced:{event_id}:{cedula_hmac}`), así que el contexto de evento no se pierde |
 | `score` | Score numérico (0.0 a 1.0) |
 | `reasons` | JSONB con desglose por campo: `{"nombre": 0.35, "cedula": 0.30, "ubicacion": 0.15, "edad": 0.10, "status": 0.05}` |
-| `priority` | `"high"` si score >= 0.95, `"medium"` si 0.85 <= score < 0.95 |
-| `decision` | `"pending"` — nunca otro valor |
-| `event_id` | FK al evento |
+| `priority` | Entero (mayor = más urgente). Convención propuesta: `2` si score >= 0.95, `1` si 0.85 <= score < 0.95. Confirmar los valores enteros con el backend antes de escribir |
+| `touches_gold` | Booleano NOT NULL: `true` si alguno de los dos aportes ya pertenece a una entidad gold; en la generación inicial de candidatos es `false` |
+| `decision` | `dedup_decision`, default `'pending'`. El job solo escribe `pending` |
+| `resolved_by` / `second_reviewer` / `resolved_at` | Nulos al insertar; los puebla la revisión humana, no este job |
 | `created_at` | NOW() |
 
 ---
 
 ## 6. Idempotencia
 
-- `dedup_candidates_pair_blocking_uniq` en master usa:
-  `LEAST(left_person_record_id, right_person_record_id)`,
-  `GREATEST(left_person_record_id, right_person_record_id)`, `blocking_key`.
+- El índice único de par canónico usa:
+  `LEAST(left_aporte_id, right_aporte_id)`,
+  `GREATEST(left_aporte_id, right_aporte_id)`, `blocking_key`.
 - PostgREST no puede apuntar ese índice expresivo con `on_conflict` portable.
   El job usa lookup batch `select-before-insert/update` por par canónico +
   `blocking_key`.
@@ -182,7 +202,7 @@ python -m scrapers.jobs.consolidation_job --entity-type person --batch-size 500 
   - Error al marcar consolidado → CLI non-zero
   - Cursor con mismo `created_at` e `id` mayor → no se salta registros
   - Lookup batch de candidatos existentes → no un GET por candidato
-  - Candidato sin `event_id` o `blocking_key` → error controlado, no tumba todo
+  - Aporte sin `event_id` (no puede formar block key) o candidato sin `blocking_key` → error controlado, no tumba todo
   - Fallback sin `block_keys` → genera `ced:*` y `phon:*` esperados
   - Sin `block_keys` y sin `event_id` → no genera claves inválidas
   - Batch con 0 registros → el job termina sin error
@@ -214,7 +234,7 @@ python -m scrapers.jobs.consolidation_job --entity-type person --batch-size 500 
 
 | Dependencia | Estado |
 |-------------|--------|
-| #90 (SQL migration) | `dedup_candidates` table + UNIQUE indexes |
+| Esquema `dedup_candidates` | forma viva (`*_aporte_id`, `priority` entero, `touches_gold`) + índice único de par; ver `docs/schema.md` |
 | #81 (staging exporter) | `aportes` poblada con block_keys |
 | PR #79 | Reutilizar lógica + aplicar 4 correcciones |
 | `jellyfish` | Ya en `requirements.txt` |

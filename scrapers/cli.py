@@ -6,6 +6,7 @@ import logging
 import sys
 from pathlib import Path
 
+from scrapers.models._validators import validate_uuid_str
 from scrapers.sources.loader import load_sources
 from scrapers.validators.source_validator import validate_sources_config
 
@@ -108,9 +109,43 @@ def _cmd_ingest(args: argparse.Namespace) -> None:
         raise SystemExit(1)
 
 
+def _cmd_materialize(args: argparse.Namespace) -> None:
+    """Primera etapa del consolidate: proyecta aportes -> persons/acopio_centers.
+
+    Corre antes de la generacion de aristas (es independiente de ella, solo
+    comparte la cadencia del cron). Sin SUPABASE_* entra en dry-run silencioso
+    (no-op), asi que en CI no toca la red.
+    """
+    from scrapers.exporters.staging_exporter import StagingConfig
+    from scrapers.jobs.materializer import SilverMaterializer
+
+    try:
+        project, _sources = load_sources(Path(args.config))
+        event_id = validate_uuid_str(str(project.get("event_id")))
+    except (ValueError, FileNotFoundError, KeyError) as exc:
+        print(f"WARN: no se pudo leer project.event_id de {args.config}: {exc}", file=sys.stderr)
+        return
+
+    with SilverMaterializer(StagingConfig.from_env()) as materializer:
+        result = materializer.materialize(event_id=event_id)
+    print(
+        "Materializer: "
+        f"{result.persons_projected} persons, "
+        f"{result.acopio_projected} acopio_centers proyectados; "
+        f"{result.events_seeded} eventos sembrados, "
+        f"{result.events_skipped} aportes 'event' omitidos"
+    )
+    for err in result.errors:
+        print(f"WARN materializer: {err}", file=sys.stderr)
+
+
 def _cmd_consolidate(args: argparse.Namespace) -> None:
     from scrapers.dedup.deduplicator import deduplicate_typed_entities
     from scrapers.models import AcopioCenter, Event
+
+    # Etapa 1: materializer (aportes -> silver tipado). Independiente de la
+    # generacion de aristas; solo comparte la cadencia del cron.
+    _cmd_materialize(args)
 
     output_dir = Path(args.output_dir)
     events_path = output_dir / "events.jsonl"
@@ -193,11 +228,23 @@ def main() -> None:
     consolidate_cmd.add_argument(
         "--output-dir", default="scrapers/runtime_output", help="Output directory"
     )
+    consolidate_cmd.add_argument(
+        "--config",
+        default="scrapers/config/sources.demo.yaml",
+        help="YAML config path (para project.event_id del seed del catalogo)",
+    )
 
     args = parser.parse_args()
 
     if args.verbose:
         logging.basicConfig(level=logging.DEBUG, format="%(name)s %(message)s")
+
+    # httpx/httpcore loguean la URL de cada request (httpx a INFO: "HTTP Request:
+    # GET https://...", httpcore a DEBUG con host=...). En --verbose eso filtraria
+    # la url de cada fuente, es decir su identidad, a stdout/CI logs. Se los sube a
+    # WARNING siempre: los fallos de transporte se siguen viendo, pero sin la URL.
+    for _noisy in ("httpx", "httpcore"):
+        logging.getLogger(_noisy).setLevel(logging.WARNING)
 
     commands = {
         "validate": _cmd_validate,

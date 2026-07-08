@@ -54,6 +54,13 @@ def test_person_blank_cedula_treated_as_absent() -> None:
     assert keys[0].startswith("phon:")
 
 
+def test_person_partial_identity_has_ced_partial_key() -> None:
+    keys = person_block_keys(_person(identity_kind="partial", cedula_partial="5675", cedula_partial_pattern="suffix_4"))
+    assert len(keys) == 2
+    assert keys[0] == f"ced_partial:{_EID}:suffix_4:5675"
+    assert keys[1].startswith(f"phon:{_EID}:")
+
+
 def test_acopio_block_key_is_phonetic() -> None:
     rec: dict[str, object] = {"name": "Refugio Norte", "event_id": _EID, "location_text": "Vargas"}
     assert acopio_block_keys(rec)[0].startswith(f"phon:{_EID}:")

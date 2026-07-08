@@ -1,0 +1,11 @@
+{
+  "_comment": "Persona menor: foto y ubicación removidas por protección, estado explícito.",
+  "full_name": "Menor Ficticio",
+  "event_id": "8f14e45f-ceea-467e-bd5d-0a4f2e0c1a3a",
+  "fuente": "encuentralos",
+  "is_minor": true,
+  "foto_status": "removed_minor",
+  "last_known_location_status": "removed_minor",
+  "identity_kind": "none",
+  "pii_provenance": "cleartext"
+}

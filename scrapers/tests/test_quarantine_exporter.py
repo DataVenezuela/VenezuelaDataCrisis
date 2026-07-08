@@ -5,8 +5,8 @@ Tests del QuarantineExporter, 100% offline.
 
 Ningun test hace red real: el httpx.Client se construye con un
 ``_RecordingTransport`` (subclase de httpx.BaseTransport) inyectado via el
-parametro ``client`` del constructor. El transport responde a /api/v1/quarantine
-y registra los bodies para los asserts.
+parametro ``client`` del constructor. El transport responde a
+/rest/v1/quarantined_records y registra los bodies para los asserts.
 
 Incluye un fixture por cada ``reason_code`` (criterio de aceptacion #88).
 """
@@ -32,17 +32,19 @@ from scrapers.exporters.quarantine_exporter import (
     quarantine_payload_hash,
 )
 
-_QUARANTINE_PATH = "/api/v1/quarantine"
+_QUARANTINE_PATH = "/rest/v1/quarantined_records"
 
 
 class _RecordingTransport(httpx.BaseTransport):
-    """Captura POSTs a /api/v1/quarantine y devuelve un status fijo."""
+    """Captura POSTs a /rest/v1/quarantined_records y devuelve un status fijo."""
 
     def __init__(self, status: int = 201) -> None:
         self.status = status
         self.posts: list[dict[str, Any]] = []
+        self.requests: list[httpx.Request] = []
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
         if request.url.path == _QUARANTINE_PATH:
             self.posts.append(json.loads(request.content))
             return httpx.Response(self.status, json={"ok": True})
@@ -50,7 +52,7 @@ class _RecordingTransport(httpx.BaseTransport):
 
 
 class _FlakyTransport(httpx.BaseTransport):
-    """Devuelve los status de ``sequence`` en orden para /api/v1/quarantine."""
+    """Devuelve los status de ``sequence`` en orden para /rest/v1/quarantined_records."""
 
     def __init__(self, sequence: list[int]) -> None:
         self.sequence = sequence
@@ -65,23 +67,39 @@ class _FlakyTransport(httpx.BaseTransport):
         return httpx.Response(404)
 
 
+def _cfg() -> QuarantineConfig:
+    return QuarantineConfig(
+        supabase_url="https://backend.test",
+        publishable_key="anon-key",
+        ingest_jwt="jwt-token",
+    )
+
+
 def _exporter(transport: httpx.BaseTransport) -> QuarantineExporter:
-    cfg = QuarantineConfig(api_key="k", base_url="https://backend.test")
     client = httpx.Client(base_url="https://backend.test", transport=transport)
-    return QuarantineExporter(cfg, client=client, run_id="run-1")
+    return QuarantineExporter(_cfg(), client=client)
 
 
 class TestAuthHeader:
-    def test_uses_x_api_key_not_bearer(self) -> None:
-        # El backend dataVenezuela autentica con x-api-key (authenticatePartner),
-        # no con Authorization: Bearer. El exporter debe enviarlo cuando construye
-        # su propio cliente (config presente, sin client inyectado).
-        cfg = QuarantineConfig(api_key="secret-key", base_url="https://backend.test")
-        exp = QuarantineExporter(cfg, run_id="run-1")
+    def test_uses_apikey_and_bearer(self) -> None:
+        # PostgREST Supabase autentica con apikey + Authorization: Bearer,
+        # igual que StagingExporter. Se abandona x-api-key del backend removido.
+        cfg = _cfg()
+        exp = QuarantineExporter(cfg)
         try:
             assert exp._client is not None
-            assert exp._client.headers.get("x-api-key") == "secret-key"
-            assert "authorization" not in exp._client.headers
+            assert exp._client.headers.get("apikey") == "anon-key"
+            assert exp._client.headers.get("authorization") == "Bearer jwt-token"
+            assert "x-api-key" not in exp._client.headers
+        finally:
+            exp.close()
+
+    def test_prefer_return_minimal(self) -> None:
+        cfg = _cfg()
+        exp = QuarantineExporter(cfg)
+        try:
+            assert exp._client is not None
+            assert exp._client.headers.get("prefer") == "return=minimal"
         finally:
             exp.close()
 
@@ -108,37 +126,64 @@ def _record(
 # --- payload ----------------------------------------------------------------
 
 class TestPayload:
-    def test_payload_has_all_columns(self) -> None:
+    def test_payload_has_snake_case_columns(self) -> None:
         t = _RecordingTransport()
         _exporter(t).quarantine(_record())
         body = t.posts[0]
+        # Columnas snake_case de quarantined_records (no camelCase del backend removido)
         required = {
-            "runId", "sourceSlug", "sourceUrl", "reasonCode", "reasonDetail",
-            "riskLevel", "payloadPreviewRedacted", "payloadHash",
-            "piiFindingsSummary",
+            "source_slug", "source_url", "reason_code", "reason_detail",
+            "risk_level", "payload_preview_redacted", "payload_hash",
+            "pii_findings_summary",
         }
         assert required.issubset(body.keys())
 
-    def test_run_id_propagated(self) -> None:
+    def test_no_camel_case_keys(self) -> None:
         t = _RecordingTransport()
         _exporter(t).quarantine(_record())
-        assert t.posts[0]["runId"] == "run-1"
+        body = t.posts[0]
+        camel_keys = {"runId", "sourceSlug", "sourceUrl", "reasonCode", "reasonDetail",
+                      "riskLevel", "payloadPreviewRedacted", "payloadHash", "piiFindingsSummary"}
+        assert not camel_keys.intersection(body.keys()), \
+            f"Claves camelCase encontradas: {camel_keys.intersection(body.keys())}"
+
+    def test_no_run_id_in_payload(self) -> None:
+        # run_id es nullable FK a scrape_runs; el pipeline usa un UUID local que
+        # no existe en esa tabla. Se omite para no violar la FK.
+        t = _RecordingTransport()
+        _exporter(t).quarantine(_record())
+        assert "run_id" not in t.posts[0]
 
     def test_pii_summary_is_object(self) -> None:
         t = _RecordingTransport()
         _exporter(t).quarantine(_record())
-        assert t.posts[0]["piiFindingsSummary"] == {"cedulas": 1, "telefonos": 0}
+        assert t.posts[0]["pii_findings_summary"] == {"cedulas": 1, "telefonos": 0}
 
     def test_preview_truncated_to_max(self) -> None:
         t = _RecordingTransport()
         long_preview = "x" * (_PREVIEW_MAX_CHARS + 50)
         _exporter(t).quarantine(_record(payload_preview_redacted=long_preview))
-        assert len(t.posts[0]["payloadPreviewRedacted"]) == _PREVIEW_MAX_CHARS
+        assert len(t.posts[0]["payload_preview_redacted"]) == _PREVIEW_MAX_CHARS
 
     def test_short_preview_not_truncated(self) -> None:
         t = _RecordingTransport()
         _exporter(t).quarantine(_record(payload_preview_redacted="corto"))
-        assert t.posts[0]["payloadPreviewRedacted"] == "corto"
+        assert t.posts[0]["payload_preview_redacted"] == "corto"
+
+    def test_none_fields_omitted(self) -> None:
+        # Campos None no van al payload para no pisar defaults del servidor.
+        t = _RecordingTransport()
+        rec = QuarantineRecord(source_slug="demo", reason_code="invalid_schema", risk_level="low")
+        _exporter(t).quarantine(rec)
+        body = t.posts[0]
+        for key in ("source_url", "reason_detail", "payload_preview_redacted",
+                    "payload_hash", "pii_findings_summary"):
+            assert key not in body, f"{key} no deberia estar en el payload"
+
+    def test_posts_to_postgrest_path(self) -> None:
+        t = _RecordingTransport()
+        _exporter(t).quarantine(_record())
+        assert t.requests[0].url.path == _QUARANTINE_PATH
 
 
 # --- hash -------------------------------------------------------------------
@@ -166,14 +211,14 @@ class TestReasonCodeFixtures:
         res = _exporter(t).quarantine(_record(reason_code=reason_code))
         assert res.sent == 1
         assert res.errors == []
-        assert t.posts[0]["reasonCode"] == reason_code
+        assert t.posts[0]["reason_code"] == reason_code
 
     @pytest.mark.parametrize("risk_level", sorted(RISK_LEVELS))
     def test_each_risk_level_is_sent(self, risk_level: str) -> None:
         t = _RecordingTransport(status=201)
         res = _exporter(t).quarantine(_record(risk_level=risk_level))
         assert res.sent == 1
-        assert t.posts[0]["riskLevel"] == risk_level
+        assert t.posts[0]["risk_level"] == risk_level
 
 
 # --- validacion -------------------------------------------------------------
@@ -184,7 +229,7 @@ class TestValidation:
         res = _exporter(t).quarantine(_record(reason_code="no_existe"))
         assert res.sent == 0
         assert res.errors
-        assert t.posts == []  # no se POSTeo nada invalido
+        assert t.posts == []
 
     def test_invalid_risk_level_is_error(self) -> None:
         t = _RecordingTransport()
@@ -203,8 +248,8 @@ class TestValidation:
         res = _exporter(t).quarantine_many(
             [_record(), _record(reason_code="no_existe"), _record()]
         )
-        assert res.sent == 2  # los dos validos pasaron
-        assert len(res.errors) == 1  # el invalido se acumulo
+        assert res.sent == 2
+        assert len(res.errors) == 1
 
 
 # --- clasificacion de respuesta ---------------------------------------------
@@ -236,9 +281,8 @@ class TestResponseClassification:
 class TestPostRetry:
     def test_503_then_201_ends_as_sent(self) -> None:
         t = _FlakyTransport([503, 201])
-        cfg = QuarantineConfig(api_key="k", base_url="https://backend.test")
         client = httpx.Client(base_url="https://backend.test", transport=t)
-        exp = QuarantineExporter(cfg, client=client, run_id="run-1")
+        exp = QuarantineExporter(_cfg(), client=client)
         with patch("scrapers.exporters.quarantine_exporter.time.sleep", lambda *_: None):
             res = exp.quarantine(_record())
         assert res.sent == 1
@@ -247,9 +291,8 @@ class TestPostRetry:
 
     def test_persistent_503_ends_as_error(self) -> None:
         t = _FlakyTransport([503])
-        cfg = QuarantineConfig(api_key="k", base_url="https://backend.test")
         client = httpx.Client(base_url="https://backend.test", transport=t)
-        exp = QuarantineExporter(cfg, client=client, run_id="run-1")
+        exp = QuarantineExporter(_cfg(), client=client)
         with patch("scrapers.exporters.quarantine_exporter.time.sleep", lambda *_: None):
             res = exp.quarantine(_record())
         assert res.sent == 0
@@ -260,14 +303,13 @@ class TestPostRetry:
 
 class TestDryRun:
     def test_dry_run_disabled_sends_nothing(self) -> None:
-        exp = QuarantineExporter(None, run_id="run-1")
+        exp = QuarantineExporter(None)
         assert exp.enabled is False
         res = exp.quarantine(_record())
         assert isinstance(res, QuarantineResult)
         assert res.sent == 0 and res.duplicates == 0 and res.errors == []
 
     def test_dry_run_still_validates(self) -> None:
-        # En dry-run un registro invalido igual se reporta como error (no POST).
         exp = QuarantineExporter(None)
         res = exp.quarantine(_record(reason_code="no_existe"))
         assert res.errors
@@ -286,21 +328,35 @@ class TestDryRun:
 
     def test_from_env_partial_config_logs_error(self, caplog: Any) -> None:
         logger = "scrapers.exporters.quarantine_exporter"
-        env = {"QUARANTINE_API_KEY": "k"}  # falta QUARANTINE_BASE_URL
+        env = {"SUPABASE_URL": "https://x.supabase.co"}  # faltan KEY y JWT
         with patch.dict(os.environ, env, clear=True):
             with caplog.at_level("ERROR", logger=logger):
                 assert QuarantineConfig.from_env() is None
         errors = [r for r in caplog.records if r.levelname == "ERROR"]
         assert errors
-        assert "QUARANTINE_BASE_URL" in errors[0].getMessage()
+
+    def test_from_env_http_url_logs_error(self, caplog: Any) -> None:
+        logger = "scrapers.exporters.quarantine_exporter"
+        env = {
+            "SUPABASE_URL": "http://insecure.supabase.co",
+            "SUPABASE_PUBLISHABLE_KEY": "k",
+            "SUPABASE_INGEST_JWT": "jwt",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            with caplog.at_level("ERROR", logger=logger):
+                assert QuarantineConfig.from_env() is None
+        errors = [r for r in caplog.records if r.levelname == "ERROR"]
+        assert errors
 
     def test_from_env_full_config(self) -> None:
         env = {
-            "QUARANTINE_API_KEY": "k",
-            "QUARANTINE_BASE_URL": "https://backend.test/",
+            "SUPABASE_URL": "https://x.supabase.co/",
+            "SUPABASE_PUBLISHABLE_KEY": "anon-key",
+            "SUPABASE_INGEST_JWT": "jwt-token",
         }
         with patch.dict(os.environ, env, clear=True):
             cfg = QuarantineConfig.from_env()
         assert cfg is not None
-        assert cfg.api_key == "k"
-        assert cfg.base_url == "https://backend.test"  # rstrip de la barra final
+        assert cfg.supabase_url == "https://x.supabase.co"  # rstrip "/"
+        assert cfg.publishable_key == "anon-key"
+        assert cfg.ingest_jwt == "jwt-token"
