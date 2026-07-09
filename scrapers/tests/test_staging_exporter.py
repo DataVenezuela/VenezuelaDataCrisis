@@ -887,6 +887,74 @@ class TestBatchFallback:
         assert bad_external_id in res.errors[0]
 
 
+# --- claves heterogeneas: homogeneizacion en el cliente ----------------------
+
+class TestHeterogeneousKeysGrouping:
+    """PGRST102: PostgREST rechaza un bulk cuyas filas no comparten el mismo set de
+    claves. Cada payload emite solo las columnas opcionales presentes (``source_record_id``,
+    ``source_url``, ...), asi que las filas de un chunk difieren. ``Prefer:
+    missing=default`` deberia permitir el batch heterogeneo, pero el PostgREST
+    DESPLEGADO no lo honra (se observo el batch de 100 rechazado en prod, cayendo a
+    fila-a-fila). El exporter debe homogeneizar en el cliente (agrupar por set de
+    claves) y proyectar todo sin caer a fila-a-fila.
+    """
+
+    class _RejectsHeterogeneous(_RecordingTransport):
+        """Modela el PostgREST desplegado: rechaza un bulk con claves dispares
+        AUNQUE lleve ``missing=default`` (el preferente no se honra en prod)."""
+
+        def handle_request(self, request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/rest/v1/aportes":
+                body = json.loads(request.content)
+                if isinstance(body, list) and len({frozenset(r.keys()) for r in body}) > 1:
+                    return httpx.Response(
+                        400, json={"code": "PGRST102", "message": "All object keys must match"}
+                    )
+            return super().handle_request(request)
+
+    def test_projects_all_when_missing_default_is_ignored(self, caplog: Any) -> None:
+        # Dos shapes: con y sin ``source_record_id`` => sets de claves distintos.
+        a = _person("A", det="detA")
+        a["_source_record_id"] = "rec-a"
+        b = _person("B", det="detB")  # sin source_record_id
+        c = _person("C", det="detC")
+        c["_source_record_id"] = "rec-c"  # misma shape que A
+        t = self._RejectsHeterogeneous()
+        with caplog.at_level("WARNING", logger="scrapers.exporters.staging_exporter"):
+            res = _exporter(t).export_source(
+                [a, b, c], source_id="demo",
+                source_fetched_ats=["2026-06-24T15:00:00Z"], batch_size=10,
+            )
+        # Todo se envia pese a que el server rechaza batches heterogeneos, y sin
+        # caer a fila-a-fila: el cliente ya mando grupos homogeneos.
+        assert res.sent == 3
+        assert res.errors == []
+        assert not any(
+            "reintentando individualmente" in r.getMessage() for r in caplog.records
+        )
+        # Cada POST registrado es homogeneo (un solo set de claves) y hay exactamente
+        # 2 grupos (2 shapes), no 3 POSTs fila-a-fila.
+        assert t.batch_posts
+        assert all(len({frozenset(r.keys()) for r in body}) == 1 for body in t.batch_posts)
+        assert len(t.batch_posts) == 2
+
+    def test_missing_default_on_prefer_header(self) -> None:
+        prefers: list[str] = []
+
+        class _Capture(_RecordingTransport):
+            def handle_request(self, request: httpx.Request) -> httpx.Response:
+                if request.url.path == "/rest/v1/aportes":
+                    prefers.append(request.headers.get("Prefer", ""))
+                return super().handle_request(request)
+
+        t = _Capture()
+        _exporter(t).export_source(
+            [_person("Juan")], source_id="demo",
+            source_fetched_ats=["2026-06-24T15:00:00Z"],
+        )
+        assert prefers and all("missing=default" in p for p in prefers)
+
+
 # --- dry-run ----------------------------------------------------------------
 
 class TestDryRun:
