@@ -143,6 +143,8 @@ def _cmd_consolidate(args: argparse.Namespace) -> None:
     from scrapers.dedup.deduplicator import deduplicate_typed_entities
     from scrapers.models import AcopioCenter, Event
 
+    dry_run: bool = getattr(args, "dry_run", False)
+
     # Etapa 1: materializer (aportes -> silver tipado). Independiente de la
     # generacion de aristas; solo comparte la cadencia del cron.
     _cmd_materialize(args)
@@ -174,9 +176,15 @@ def _cmd_consolidate(args: argparse.Namespace) -> None:
 
     if events:
         deduped, n_removed = deduplicate_typed_entities(events)
-        lines = [json.dumps(e.model_dump(mode="json"), ensure_ascii=False) for e in deduped]
-        events_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        print(f"Consolidación: {len(records)} → {len(deduped)} eventos ({n_removed} duplicados)")
+        if not dry_run:
+            consolidated_dir = output_dir / "consolidated"
+            consolidated_dir.mkdir(exist_ok=True)
+            lines = [json.dumps(e.model_dump(mode="json"), ensure_ascii=False) for e in deduped]
+            (consolidated_dir / "events.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        print(
+            f"Consolidación{'(dry-run)' if dry_run else ''}: "
+            f"{len(records)} → {len(deduped)} eventos ({n_removed} duplicados)"
+        )
     else:
         print("0 eventos válidos para consolidar")
 
@@ -232,6 +240,11 @@ def main() -> None:
         "--config",
         default="scrapers/config/sources.demo.yaml",
         help="YAML config path (para project.event_id del seed del catalogo)",
+    )
+    consolidate_cmd.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Calcula el plan de deduplicacion pero no escribe eventos.jsonl.",
     )
 
     args = parser.parse_args()

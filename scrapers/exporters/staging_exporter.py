@@ -32,7 +32,6 @@ import hashlib
 import json
 import logging
 import os
-import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -40,7 +39,7 @@ from datetime import datetime, timedelta, timezone
 
 import httpx
 
-from scrapers.adapters._shared import backoff_delay, sha256_hex
+from scrapers.adapters._shared import retry_post, sha256_hex
 from scrapers.adapters.http_client import USER_AGENT
 from scrapers.dedup import specs
 
@@ -58,8 +57,6 @@ _DRYRUN_ARTIFACT_ID = "00000000-0000-0000-0000-000000000000"
 _WATERMARK_SAFETY_MARGIN = timedelta(minutes=5)
 _FETCHED_AT_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
-_RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
-_MAX_POST_RETRIES = 4
 _DEFAULT_BATCH_SIZE = 100
 
 
@@ -86,10 +83,13 @@ class StagingConfig:
         loguea a INFO, la segunda a ERROR listando las faltantes. En ambos casos
         devuelve None (gatilla el dry-run) sin abortar el pipeline.
         """
+        # SUPABASE_CONSOLIDATION_JWT (rol consolidation_job, #264) tiene
+        # prioridad; SUPABASE_INGEST_JWT sirve de fallback para el flujo ingest.
+        jwt = os.getenv("SUPABASE_CONSOLIDATION_JWT") or os.getenv("SUPABASE_INGEST_JWT")
         values = {
             "SUPABASE_URL": os.getenv("SUPABASE_URL"),
             "SUPABASE_PUBLISHABLE_KEY": os.getenv("SUPABASE_PUBLISHABLE_KEY"),
-            "SUPABASE_INGEST_JWT": os.getenv("SUPABASE_INGEST_JWT"),
+            "SUPABASE_INGEST_JWT": jwt,
         }
         present = [k for k, v in values.items() if v]
         if not present:
@@ -310,14 +310,13 @@ class StagingExporter:
         # las filas afectadas. Un PATCH que no matchea ninguna fila (p.ej. un
         # source_id que no es un UUID valido) devuelve 200 con un array vacio; ese
         # caso NO es exito: el watermark no avanzo y debe reportarse, no tragarse.
-        try:
-            resp = self._post_with_retry(
-                f"{_SOURCES_PATH}?source_id=eq.{source_id}",
-                {"watermark_at": watermark_at},
-                method="PATCH",
-                headers={"Prefer": "return=representation"},
-            )
-        except httpx.HTTPError:
+        resp = self._post_with_retry(
+            f"{_SOURCES_PATH}?source_id=eq.{source_id}",
+            {"watermark_at": watermark_at},
+            method="PATCH",
+            headers={"Prefer": "return=representation"},
+        )
+        if resp is None:
             return False
         if resp.status_code in (401, 403):
             raise PermissionError(
@@ -341,38 +340,12 @@ class StagingExporter:
         method: str = "POST",
         timeout: httpx.Timeout | None = None,
         headers: dict[str, str] | None = None,
-    ) -> httpx.Response:
+    ) -> httpx.Response | None:
         assert self._client is not None
-        last_exc: httpx.HTTPError | None = None
-        resp: httpx.Response | None = None
-        for attempt in range(1, _MAX_POST_RETRIES + 1):
-            try:
-                resp = self._client.request(
-                    method, path, json=payload, timeout=timeout, headers=headers
-                )
-            except (httpx.TimeoutException, httpx.NetworkError) as exc:
-                last_exc = exc
-                if attempt < _MAX_POST_RETRIES:
-                    delay = backoff_delay(attempt)
-                    log.warning(
-                        "%s en POST %s intento %d/%d — reintento en %.1fs",
-                        type(exc).__name__, path, attempt, _MAX_POST_RETRIES, delay,
-                    )
-                    time.sleep(delay)
-                continue
-            if resp.status_code in _RETRYABLE_STATUS and attempt < _MAX_POST_RETRIES:
-                delay = backoff_delay(attempt)
-                log.warning(
-                    "HTTP %s en POST %s intento %d/%d — reintento en %.1fs",
-                    resp.status_code, path, attempt, _MAX_POST_RETRIES, delay,
-                )
-                time.sleep(delay)
-                continue
-            return resp
-        if resp is not None:
-            return resp
-        assert last_exc is not None
-        raise last_exc
+        return retry_post(
+            self._client, path, payload,
+            method=method, timeout=timeout, headers=headers, log=log,
+        )
 
     def advance_watermark(
         self, source_id: str, source_fetched_ats: list[str], source_errors: bool, sent: int
@@ -440,14 +413,14 @@ class StagingExporter:
 
         chunks = [payloads[i : i + size] for i in range(0, len(payloads), size)]
         _batch_timeout = httpx.Timeout(connect=10.0, read=120.0, write=120.0, pool=10.0)
-        # ``missing=default``: los aportes de un chunk no comparten el mismo set de
+        # ``missing=default``: los aportes de un batch no comparten el mismo set de
         # claves (cada registro trae solo los campos que la fuente reporto), asi que
-        # PostgREST rechazaria el bulk con 400 PGRST102 ("All object keys must match").
-        # PERO el PostgREST desplegado NO honra este preferente (se observo el batch
-        # aun rechazado en prod), asi que la garantia real es del lado del cliente:
-        # ``_post_chunk`` agrupa por set de claves y postea grupos homogeneos. Este
-        # preferente queda como optimizacion best-effort, no como la defensa principal.
-        batch_headers = {"Prefer": "resolution=merge-duplicates,return=minimal,missing=default"}
+        # sin este preferente PostgREST rechaza el lote con 400 PGRST102 ("All object
+        # keys must match") y el fallback cae a fila-a-fila. Con el, toma la union de
+        # claves y rellena las ausentes con el DEFAULT de la columna.
+        batch_headers = {
+            "Prefer": "resolution=merge-duplicates,return=minimal,missing=default"
+        }
 
         workers = max(1, max_concurrent_posts or 1)
 
@@ -519,15 +492,11 @@ class StagingExporter:
         sent = 0
         errors: list[str] = []
         try:
-            try:
-                resp = self._post_with_retry(
-                    _APORTES_UPSERT_PATH, chunk, timeout=timeout, headers=headers,
-                )
-            except httpx.HTTPError as exc:
-                errors.append(f"POST {_APORTES_UPSERT_PATH} batch fallo: {exc}")
-                return sent, errors
-            except Exception as exc:
-                errors.append(f"POST {_APORTES_UPSERT_PATH} batch error inesperado: {exc}")
+            resp = self._post_with_retry(
+                _APORTES_UPSERT_PATH, chunk, timeout=timeout, headers=headers,
+            )
+            if resp is None:
+                errors.append(f"POST {_APORTES_UPSERT_PATH} batch fallo: reintentos agotados")
                 return sent, errors
 
             if resp.status_code in (200, 201):
@@ -540,16 +509,12 @@ class StagingExporter:
                     _APORTES_UPSERT_PATH, resp.status_code, resp.text[:500], len(chunk),
                 )
                 for single in chunk:
-                    try:
-                        r = self._post_with_retry(
-                            _APORTES_UPSERT_PATH, [single],
-                            timeout=timeout, headers=headers,
-                        )
-                    except httpx.HTTPError as exc:
-                        errors.append(f"POST individual fallo: {exc}")
-                        continue
-                    except Exception as exc:
-                        errors.append(f"POST individual error inesperado: {exc}")
+                    r = self._post_with_retry(
+                        _APORTES_UPSERT_PATH, [single],
+                        timeout=timeout, headers=headers,
+                    )
+                    if r is None:
+                        errors.append("POST individual fallo: reintentos agotados")
                         continue
                     if r.status_code in (200, 201):
                         sent += 1

@@ -225,6 +225,39 @@ class TestConsolidate:
         assert result.returncode == 0
         assert "Materializer:" in result.stdout
 
+    def test_dry_run_does_not_write_events(self, tmp_path: Path) -> None:
+        event = {"event_type": "flood", "description": "Inundación ficticia", "fuente": "test"}
+        (tmp_path / "events.jsonl").write_text(json.dumps(event) + "\n")
+
+        result = _run_cli(
+            "consolidate", "--dry-run",
+            "--config", str(_SAMPLE_CONFIG),
+            "--output-dir", str(tmp_path),
+        )
+        assert result.returncode == 0
+        assert "dry-run" in result.stdout
+        assert not (tmp_path / "consolidated").exists(), "dry-run no debe crear consolidated/"
+
+    def test_consolidation_writes_to_consolidated_subdir(self, tmp_path: Path) -> None:
+        event = {"event_type": "flood", "description": "Inundación ficticia", "fuente": "test"}
+        (tmp_path / "events.jsonl").write_text(json.dumps(event) + "\n")
+
+        result = _run_cli(
+            "consolidate",
+            "--config", str(_SAMPLE_CONFIG),
+            "--output-dir", str(tmp_path),
+        )
+        assert result.returncode == 0
+        assert (tmp_path / "consolidated" / "events.jsonl").exists()
+
+    def test_dry_run_flag_accepted(self, tmp_path: Path) -> None:
+        result = _run_cli(
+            "consolidate", "--dry-run",
+            "--config", str(_SAMPLE_CONFIG),
+            "--output-dir", str(tmp_path),
+        )
+        assert result.returncode == 0
+
 
 # ── existing commands still work ──────────────────────────────────
 

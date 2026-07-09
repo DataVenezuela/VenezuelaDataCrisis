@@ -139,7 +139,7 @@ class TestStartRun:
 
     def test_returns_none_on_persistent_500(self) -> None:
         t = _RecordingTransport(runs_status=500)
-        with patch("scrapers.exporters.provenance_exporter.time.sleep", lambda *_: None):
+        with patch("scrapers.adapters._shared.time.sleep", lambda *_: None):
             assert _exporter(t).start_run(_SOURCE_UUID) is None
 
     def test_retries_transient_then_succeeds(self) -> None:
@@ -156,7 +156,7 @@ class TestStartRun:
                 return httpx.Response(404)
 
         t = _Flaky()
-        with patch("scrapers.exporters.provenance_exporter.time.sleep", lambda *_: None):
+        with patch("scrapers.adapters._shared.time.sleep", lambda *_: None):
             assert _exporter(t).start_run(_SOURCE_UUID) == "run-ok"
         assert t.calls == 2
 
@@ -232,7 +232,7 @@ class TestRecordArtifact:
 
     def test_returns_none_on_persistent_500(self) -> None:
         t = _RecordingTransport(artifacts_status=500)
-        with patch("scrapers.exporters.provenance_exporter.time.sleep", lambda *_: None):
+        with patch("scrapers.adapters._shared.time.sleep", lambda *_: None):
             assert _exporter(t).record_artifact("run-1", _page()) is None
 
 
@@ -250,7 +250,7 @@ class TestNoRawTextInLogs:
     def test_failed_artifact_post_does_not_log_raw_text(self, caplog: Any) -> None:
         t = _RecordingTransport(artifacts_status=500)
         with caplog.at_level("DEBUG", logger="scrapers.exporters.provenance_exporter"):
-            with patch("scrapers.exporters.provenance_exporter.time.sleep", lambda *_: None):
+            with patch("scrapers.adapters._shared.time.sleep", lambda *_: None):
                 _exporter(t).record_artifact("run-1", _page(raw_content=_PII_MARKER))
         for rec in caplog.records:
             assert _PII_MARKER not in rec.getMessage()

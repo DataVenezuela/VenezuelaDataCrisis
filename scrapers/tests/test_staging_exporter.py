@@ -642,7 +642,7 @@ class TestPostRetry:
         cfg = StagingConfig(supabase_url="https://project.supabase.co", publishable_key="k", ingest_jwt=_TEST_JWT)
         client = httpx.Client(base_url="https://project.supabase.co", transport=t)
         exp = StagingExporter(cfg, client=client, run_id="run-1")
-        with patch("scrapers.exporters.staging_exporter.time.sleep", lambda *_: None):
+        with patch("scrapers.adapters._shared.time.sleep", lambda *_: None):
             res = exp.export_source(
                 [_person("Juan")], source_id="demo", source_fetched_ats=["2026-06-24T15:00:00Z"]
             )
@@ -655,7 +655,7 @@ class TestPostRetry:
         cfg = StagingConfig(supabase_url="https://project.supabase.co", publishable_key="k", ingest_jwt=_TEST_JWT)
         client = httpx.Client(base_url="https://project.supabase.co", transport=t)
         exp = StagingExporter(cfg, client=client, run_id="run-1")
-        with patch("scrapers.exporters.staging_exporter.time.sleep", lambda *_: None):
+        with patch("scrapers.adapters._shared.time.sleep", lambda *_: None):
             res = exp.export_source(
                 [_person("Juan")], source_id="demo", source_fetched_ats=["2026-06-24T15:00:00Z"]
             )
@@ -1001,6 +1001,31 @@ class TestDryRun:
         assert cfg.supabase_url == "https://project.supabase.co"
         assert cfg.publishable_key == "sb_publishable_test"
         assert cfg.ingest_jwt == _TEST_JWT
+
+    def test_from_env_uses_consolidation_jwt_when_present(self) -> None:
+        consolidation_jwt = "eyJhbGciOiJIUzI1NiJ9.consolidation"
+        env = {
+            "SUPABASE_URL": "https://project.supabase.co",
+            "SUPABASE_PUBLISHABLE_KEY": "sb_publishable_test",
+            "SUPABASE_CONSOLIDATION_JWT": consolidation_jwt,
+        }
+        with patch.dict(os.environ, env, clear=True):
+            cfg = StagingConfig.from_env()
+        assert cfg is not None
+        assert cfg.ingest_jwt == consolidation_jwt
+
+    def test_from_env_consolidation_jwt_takes_priority_over_ingest(self) -> None:
+        consolidation_jwt = "eyJhbGciOiJIUzI1NiJ9.consolidation"
+        env = {
+            "SUPABASE_URL": "https://project.supabase.co",
+            "SUPABASE_PUBLISHABLE_KEY": "sb_publishable_test",
+            "SUPABASE_CONSOLIDATION_JWT": consolidation_jwt,
+            "SUPABASE_INGEST_JWT": _TEST_JWT,
+        }
+        with patch.dict(os.environ, env, clear=True):
+            cfg = StagingConfig.from_env()
+        assert cfg is not None
+        assert cfg.ingest_jwt == consolidation_jwt
 
     def test_from_env_rejects_plain_http(self, caplog: Any) -> None:
         env = {
