@@ -699,7 +699,7 @@ class TestWatermarkEndToEnd:
     def test_watermark_not_advanced_on_failure(self, tmp_path: Path, demo_config: Path) -> None:
         transport = _StagingTransport(aportes_status=500)
         with patch.dict(os.environ, _SUPABASE_ENV, clear=False), _patch_exporter(transport), patch(
-            "scrapers.exporters.staging_exporter.time.sleep", lambda *_: None
+            "scrapers.adapters._shared.time.sleep", lambda *_: None
         ), patch(
             "scrapers.pipelines.run_pipeline._get_adapter", return_value=_mock_adapter()
         ), patch(
@@ -1655,6 +1655,31 @@ class TestBronzeProvenance:
         self._run(tmp_path, demo_config, prov)
         assert prov.run_posts[0]["source_id"] == "encuentralos_tecnosoft"
 
+    def test_scrape_run_posts_source_id_thin_format(self, tmp_path: Path) -> None:
+        # Cuando source.id ya tiene formato UUID (producción real), se usa
+        # directamente como scrape_runs.source_id sin ninguna resolución.
+        # Cubre el path thin que demo_config (slug) no ejercita.
+        uuid_id = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        cfg = _make_demo_config(
+            tmp_path,
+            f"""project:
+  event_id: 8f14e45f-ceea-467e-bd5d-0a4f2e0c1a3a
+  default_country: Venezuela
+sources:
+  - id: {uuid_id}
+    name: Encuentralos tecnosoft
+    type: api_json
+    enabled: true
+    trust_tier: C
+    url: "https://encuentralos.tecnosoft.dev/api/personas"
+    refresh_minutes: 30
+    parser_asignado: encuentralos
+""",
+        )
+        prov = _ProvenanceTransport()
+        self._run(tmp_path, cfg, prov)
+        assert prov.run_posts[0]["source_id"] == uuid_id
+
     def test_provenance_failure_blocks_export_and_watermark(
         self, tmp_path: Path, demo_config: Path
     ) -> None:
@@ -1666,7 +1691,7 @@ class TestBronzeProvenance:
         with patch.dict(os.environ, _SUPABASE_ENV, clear=False), _patch_exporter(
             transport
         ), _patch_provenance_exporter(prov), patch(
-            "scrapers.exporters.provenance_exporter.time.sleep", lambda *_: None
+            "scrapers.adapters._shared.time.sleep", lambda *_: None
         ), patch(
             "scrapers.pipelines.run_pipeline._get_adapter", return_value=_mock_adapter()
         ), patch(
@@ -1717,7 +1742,7 @@ class TestBronzeProvenance:
         with patch.dict(os.environ, _SUPABASE_ENV, clear=False), _patch_exporter(
             transport
         ), _patch_provenance_exporter(prov), patch(
-            "scrapers.exporters.provenance_exporter.time.sleep", lambda *_: None
+            "scrapers.adapters._shared.time.sleep", lambda *_: None
         ), patch(
             "scrapers.pipelines.run_pipeline._get_adapter", return_value=_TwoPageAdapter()
         ), patch(
@@ -1743,7 +1768,7 @@ class TestBronzeProvenance:
         with patch.dict(os.environ, _SUPABASE_ENV, clear=False), _patch_exporter(
             transport
         ), _patch_provenance_exporter(prov), patch(
-            "scrapers.exporters.provenance_exporter.time.sleep", lambda *_: None
+            "scrapers.adapters._shared.time.sleep", lambda *_: None
         ), patch(
             "scrapers.pipelines.run_pipeline._get_adapter", return_value=adapter
         ), patch(

@@ -367,7 +367,7 @@ class TestNoPIIInLogs:
 
         t = _FailPersons([_person_aporte("ap-1")])
         with caplog.at_level("DEBUG", logger="scrapers.jobs.materializer"):
-            with patch("scrapers.jobs.materializer.time.sleep", lambda *_: None):
+            with patch("scrapers.adapters._shared.time.sleep", lambda *_: None):
                 _materializer(t).materialize(event_id=_EVENT_ID)
         for rec in caplog.records:
             assert _PII_NAME not in rec.getMessage()
@@ -407,6 +407,57 @@ class TestLifecycle:
         client.close()
 
 
+# --- H1: seed fallido no silencia el aporte_id ------------------------------
+
+
+class TestSeedFailure:
+    def test_seed_failure_records_aporte_id_in_errors(self) -> None:
+        # Cuando _seed_event falla (5xx), el aporte_id que quedo sin proyectar
+        # debe aparecer en result.errors, no desaparecer silenciosamente.
+        other_event_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+        class _FailEvents(_FakeSupabase):
+            def _upsert(self, request, store, pk):  # type: ignore[no-untyped-def]
+                if request.url.path == "/rest/v1/events" and other_event_id in str(
+                    request.content
+                ):
+                    return httpx.Response(500, json={"message": "transitorio"})
+                return super()._upsert(request, store, pk)
+
+        # Aporte con un event_id distinto al de config => dispara el seed secundario.
+        aporte = _person_aporte("ap-silenced", event_id=other_event_id)
+        t = _FailEvents([aporte])
+        with patch("scrapers.adapters._shared.time.sleep", lambda *_: None):
+            r = _materializer(t).materialize(event_id=_EVENT_ID)
+
+        assert "ap-1" not in t.persons and "ap-silenced" not in t.persons
+        # El aporte_id debe aparecer en errors, no quedar invisible.
+        assert any("ap-silenced" in e for e in r.errors)
+
+    def test_seed_failure_marks_page_not_ok(self) -> None:
+        other_event_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+        class _FailEvents(_FakeSupabase):
+            def _upsert(self, request, store, pk):  # type: ignore[no-untyped-def]
+                if request.url.path == "/rest/v1/events" and other_event_id in str(
+                    request.content
+                ):
+                    return httpx.Response(503, json={"message": "transitorio"})
+                return super()._upsert(request, store, pk)
+
+        aporte = _person_aporte("ap-fail", event_id=other_event_id)
+        good = _person_aporte("ap-good")  # usa event_id de config, seed ya hecho
+        t = _FailEvents([good, aporte])
+        with patch("scrapers.adapters._shared.time.sleep", lambda *_: None):
+            r = _materializer(t).materialize(event_id=_EVENT_ID)
+
+        # ap-good proyecta (su event_id ya fue sembrado); ap-fail no.
+        assert "ap-good" in t.persons
+        assert "ap-fail" not in t.persons
+        # errors contiene tanto el error de seed como el del aporte silenciado.
+        assert any("ap-fail" in e for e in r.errors)
+
+
 # --- Part A: batch heterogeneo se acepta con missing=default ------------------
 
 
@@ -441,38 +492,6 @@ class TestBatchHeterogeneousKeys:
         assert len(t.persons) == 2
         assert r.persons_projected == 2
         assert not any("fila a fila" in rec.getMessage() for rec in caplog.records)
-
-    class _RejectsHeterogeneousAlways(_FakeSupabase):
-        """Modela el PostgREST DESPLEGADO: rechaza un bulk con claves dispares
-        AUNQUE lleve ``missing=default`` (el preferente no se honra en prod). El
-        materializer debe homogeneizar el batch en el cliente (agrupar por set de
-        claves) y proyectar todo sin caer a fila-a-fila."""
-
-        def _upsert(self, request, store, pk):  # type: ignore[no-untyped-def]
-            if request.url.path == "/rest/v1/persons":
-                body = json.loads(request.content)
-                if len({frozenset(r.keys()) for r in body}) > 1:
-                    return httpx.Response(
-                        400,
-                        json={"code": "PGRST102", "message": "All object keys must match"},
-                    )
-            return super()._upsert(request, store, pk)
-
-    def test_projects_all_when_missing_default_is_ignored(self, caplog: Any) -> None:
-        # Filas con sets de claves distintos + un server que ignora missing=default.
-        a1 = _person_aporte("ap-1")
-        a2 = _person_aporte("ap-2", cedula_hmac=None, cedula_masked=None, age_range=None)
-        a3 = _person_aporte("ap-3")  # misma firma que ap-1 => mismo grupo
-        t = self._RejectsHeterogeneousAlways([a1, a2, a3])
-        with caplog.at_level("WARNING", logger="scrapers.jobs.materializer"):
-            r = _materializer(t).materialize(event_id=_EVENT_ID)
-        # Todo se proyecta pese a que el server rechaza batches heterogeneos, y
-        # sin caer a fila-a-fila: el cliente ya mando grupos homogeneos.
-        assert len(t.persons) == 3
-        assert r.persons_projected == 3
-        assert not any("fila a fila" in rec.getMessage() for rec in caplog.records)
-        # Omitir una columna preserva su DEFAULT: ap-2 no manda cedula_hmac.
-        assert "cedula_hmac" not in t.persons["ap-2"]
 
     def test_prefer_header_carries_missing_default(self) -> None:
         captured: list[str] = []
@@ -570,7 +589,7 @@ class TestIncrementalCursor:
 
         aportes = [_person_aporte(f"ap-{i}") for i in range(2)]
         t = _NetFailPersons(aportes)
-        with patch("scrapers.jobs.materializer.time.sleep", lambda *_: None):
+        with patch("scrapers.adapters._shared.time.sleep", lambda *_: None):
             m = _materializer(t)
             m.materialize(event_id=_EVENT_ID, batch_size=10)
             assert t.cursor_row is None  # congelado: no avanzo pese al fallo

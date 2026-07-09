@@ -84,8 +84,8 @@ Checklist mental:
 
 Si un PR cambia payloads, queries, watermarks, exporters, o jobs de
 consolidación, la fuente de verdad del esquema es `docs/schema.md` (mirror
-completo y autoritativo) más las specs de contrato en `docs/specs/`
-(`db-scraper-contract.md`, `person-dedup.md`). No inventes ni copies un schema
+completo y autoritativo), complementado por la spec de dedup en
+`docs/specs/person-dedup.md`. No inventes ni copies un schema
 de referencia paralelo en este repo.
 
 Checklist adicional:

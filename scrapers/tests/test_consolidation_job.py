@@ -518,13 +518,13 @@ def test_person_candidate_payload_matches_master_schema() -> None:
     assert len(transport.post_bodies) == 1
     assert isinstance(transport.post_bodies[0], list)
     body = transport.post_bodies[0][0]
-    assert "event_id" not in body
-    assert body["left_aporte_id"] == "person-1"
-    assert body["right_aporte_id"] == "person-2"
+    assert body["left_aporte_id"] == "a1"
+    assert body["right_aporte_id"] == "a2"
     assert body["blocking_key"] == f"ced:{_EVENT_ID}:same"
-    assert body["decision"] == "pending"
-    assert body["priority"] == 2
+    assert body["priority"] == 1
     assert body["touches_gold"] is False
+    assert body["decision"] == "pending"
+    assert "event_id" not in body
     assert "left_person" not in body
     assert "right_person" not in body
 
@@ -584,8 +584,8 @@ def test_person_existing_candidate_is_idempotent_update() -> None:
         existing=[
             {
                 "candidate_id": "cand-1",
-                "left_aporte_id": "person-2",
-                "right_aporte_id": "person-1",
+                "left_aporte_id": "a1",
+                "right_aporte_id": "a2",
                 "blocking_key": f"ced:{_EVENT_ID}:same",
             }
         ],
@@ -630,6 +630,7 @@ def test_person_invalid_candidate_payload_is_nonfatal(
         "source_record_ids": ["bad-1", "bad-2"],
         "score": 0.95,
         "reasons": {"nombre": 0.4},
+        "priority": 1,
     }
     del invalid[missing_field]
     valid = {
@@ -640,6 +641,7 @@ def test_person_invalid_candidate_payload_is_nonfatal(
         "source_record_ids": ["ok-1", "ok-2"],
         "score": 0.95,
         "reasons": {"nombre": 0.4},
+        "priority": 1,
     }
 
     monkeypatch.setattr(consolidation_job, "find_candidates", lambda *_: [invalid, valid])

@@ -34,6 +34,8 @@ def protect_minor_fields(record: Mapping[str, Any]) -> dict[str, Any]:
     for field in MINOR_REDACTED_FIELDS:
         if field in sanitized:
             sanitized[field] = None
+    if record.get("foto") is not None:
+        sanitized["foto_status"] = "removed_minor"
 
     location = sanitized.get("last_known_location")
     if isinstance(location, str) and "," in location:
@@ -49,5 +51,8 @@ def protect_minor_fields(record: Mapping[str, Any]) -> dict[str, Any]:
             sanitized["last_known_location"] = parts[1]
         else:
             sanitized["last_known_location"] = None
+        sanitized["last_known_location_status"] = "removed_minor"
+    elif isinstance(location, str):
+        sanitized["last_known_location_status"] = "present"
 
     return sanitized

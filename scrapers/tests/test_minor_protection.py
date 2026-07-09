@@ -24,6 +24,7 @@ def test_minor_record_redacts_foto_and_cedula_masked():
     sanitized = protect_minor_fields(_record())
     assert sanitized["foto"] is None
     assert sanitized["cedula_masked"] is None
+    assert sanitized["foto_status"] == "removed_minor"
 
 
 def test_minor_record_keeps_cedula_hmac_for_matching():
@@ -34,16 +35,19 @@ def test_minor_record_keeps_cedula_hmac_for_matching():
 def test_minor_record_coarsens_location_to_estado():
     sanitized = protect_minor_fields(_record())
     assert sanitized["last_known_location"] == "Lara"
+    assert sanitized["last_known_location_status"] == "removed_minor"
 
 
 def test_minor_record_location_without_comma_is_unchanged():
     sanitized = protect_minor_fields(_record(last_known_location="Lara"))
     assert sanitized["last_known_location"] == "Lara"
+    assert sanitized["last_known_location_status"] == "present"
 
 
 def test_minor_record_with_none_location_is_unchanged():
     sanitized = protect_minor_fields(_record(last_known_location=None))
     assert sanitized["last_known_location"] is None
+    assert sanitized.get("last_known_location_status") is None
 
 
 def test_minor_record_multi_comma_location_is_fully_redacted():
@@ -54,11 +58,13 @@ def test_minor_record_multi_comma_location_is_fully_redacted():
         _record(last_known_location="Maracaibo, Zulia, Venezuela")
     )
     assert sanitized["last_known_location"] is None
+    assert sanitized["last_known_location_status"] == "removed_minor"
 
 
 def test_minor_record_trailing_comma_location_is_fully_redacted():
     sanitized = protect_minor_fields(_record(last_known_location="Maracaibo,"))
     assert sanitized["last_known_location"] is None
+    assert sanitized["last_known_location_status"] == "removed_minor"
 
 
 def test_non_minor_record_is_untouched():

@@ -1,0 +1,9 @@
+{
+  "_comment": "INVÁLIDO: identity_kind=partial con cedula_partial pero sin cedula_partial_pattern.",
+  "_expected_error": "identity_kind='partial' requires cedula_partial_pattern",
+  "full_name": "Test Ficticio",
+  "event_id": "8f14e45f-ceea-467e-bd5d-0a4f2e0c1a3a",
+  "fuente": "encuentralos",
+  "identity_kind": "partial",
+  "cedula_partial": "5675"
+}

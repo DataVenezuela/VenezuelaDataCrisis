@@ -1,8 +1,15 @@
 from __future__ import annotations
 
+import logging
 import re
+from unittest.mock import patch
 
-from scrapers.adapters._shared import backoff_delay, now_utc, sha256_hex
+import httpx
+import pytest
+
+from scrapers.adapters._shared import backoff_delay, now_utc, retry_post, sha256_hex
+
+log = logging.getLogger(__name__)
 
 
 class TestNowUtc:
@@ -50,3 +57,90 @@ class TestBackoffDelay:
         for attempt in range(1, 10):
             delay = backoff_delay(attempt)
             assert delay >= 0.0
+
+
+class TestRetryPost:
+    """retry_post: backoff en status retriables, None en agotamiento de red."""
+
+    def _client(self, transport: httpx.BaseTransport) -> httpx.Client:
+        return httpx.Client(base_url="https://example.test", transport=transport)
+
+    @pytest.mark.parametrize("status", [429, 500, 502, 503, 504])
+    def test_retries_on_retriable_status_then_succeeds(self, status: int) -> None:
+        calls: list[int] = []
+
+        class _FirstFail(httpx.BaseTransport):
+            def handle_request(self, request: httpx.Request) -> httpx.Response:
+                calls.append(1)
+                if len(calls) == 1:
+                    return httpx.Response(status)
+                return httpx.Response(201, json=[])
+
+        with patch("scrapers.adapters._shared.time.sleep", lambda *_: None):
+            resp = retry_post(
+                self._client(_FirstFail()), "/path", [{"x": 1}],
+                retries=3, log=log,
+            )
+        assert resp is not None
+        assert resp.status_code == 201
+        assert len(calls) == 2
+
+    def test_exhausted_retries_on_retriable_status_returns_last_response(self) -> None:
+        class _AlwaysFail(httpx.BaseTransport):
+            def handle_request(self, request: httpx.Request) -> httpx.Response:
+                return httpx.Response(503)
+
+        with patch("scrapers.adapters._shared.time.sleep", lambda *_: None):
+            resp = retry_post(
+                self._client(_AlwaysFail()), "/path", [{}],
+                retries=3, log=log,
+            )
+        assert resp is not None
+        assert resp.status_code == 503
+
+    def test_network_error_returns_none_after_exhaustion(self) -> None:
+        class _AlwaysNetErr(httpx.BaseTransport):
+            def handle_request(self, request: httpx.Request) -> httpx.Response:
+                raise httpx.ConnectError("red caida")
+
+        with patch("scrapers.adapters._shared.time.sleep", lambda *_: None):
+            resp = retry_post(
+                self._client(_AlwaysNetErr()), "/path", [{}],
+                retries=3, log=log,
+            )
+        assert resp is None
+
+    def test_non_retriable_status_returns_immediately(self) -> None:
+        calls: list[int] = []
+
+        class _BadRequest(httpx.BaseTransport):
+            def handle_request(self, request: httpx.Request) -> httpx.Response:
+                calls.append(1)
+                return httpx.Response(400, json={"error": "bad"})
+
+        resp = retry_post(
+            self._client(_BadRequest()), "/path", [{}],
+            retries=3, log=log,
+        )
+        assert resp is not None
+        assert resp.status_code == 400
+        assert len(calls) == 1
+
+    def test_custom_retryable_statuses_respected(self) -> None:
+        calls: list[int] = []
+
+        class _Returns408(httpx.BaseTransport):
+            def handle_request(self, request: httpx.Request) -> httpx.Response:
+                calls.append(1)
+                return httpx.Response(408)
+
+        with patch("scrapers.adapters._shared.time.sleep", lambda *_: None):
+            resp = retry_post(
+                self._client(_Returns408()), "/path", [{}],
+                retries=3,
+                retryable_statuses=frozenset({408}),
+                log=log,
+            )
+        assert resp is not None
+        assert resp.status_code == 408
+        assert len(calls) == 3

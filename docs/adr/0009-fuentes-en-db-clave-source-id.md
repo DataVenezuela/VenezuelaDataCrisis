@@ -7,7 +7,7 @@
 | Decisores | Mantenedores (mathiasaiva, mayerlim), equipo de pipeline |
 | Reemplaza a | (ninguno) |
 | Complementa | ADR 0002 (endurecimiento del borde), ADR 0006 (protección de PII en la ingesta) |
-| Relacionado con | `docs/schema.md`, `docs/specs/db-scraper-contract.md`, `docs/source_config.md` |
+| Relacionado con | `docs/schema.md`, `docs/source_config.md` |
 
 ---
 
@@ -174,6 +174,6 @@ opaco; ni el repo ni los logs deben poder reconstruir la lista de fuentes.
 
 - ADR 0002 (endurecimiento del borde), ADR 0006 (protección de PII en la ingesta).
 - `docs/schema.md` (columnas de `sources`, `source_watermarks` retirada).
-- `docs/specs/db-scraper-contract.md`, `docs/source_config.md`.
+- `docs/source_config.md`.
 - `scrapers/sources/loader.py`, `scrapers/exporters/staging_exporter.py`,
   `scrapers/exporters/provenance_exporter.py`, `scrapers/cli.py`.
