@@ -23,20 +23,16 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
-import time
 from dataclasses import dataclass, field
 
 import httpx
 
-from scrapers.adapters._shared import backoff_delay
+from scrapers.adapters._shared import retry_post
 from scrapers.adapters.http_client import USER_AGENT
 
 log = logging.getLogger(__name__)
 
 _QUARANTINE_PATH = "/rest/v1/quarantined_records"
-
-_RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
-_MAX_POST_RETRIES = 4
 
 # Fragmento maximo del payload redactado que se envia. NUNCA el payload completo.
 _PREVIEW_MAX_CHARS = 500
@@ -239,36 +235,9 @@ class QuarantineExporter:
 
     def _post_with_retry(
         self, path: str, payload: dict[str, object]
-    ) -> httpx.Response:
+    ) -> httpx.Response | None:
         assert self._client is not None
-        last_exc: httpx.HTTPError | None = None
-        resp: httpx.Response | None = None
-        for attempt in range(1, _MAX_POST_RETRIES + 1):
-            try:
-                resp = self._client.post(path, json=payload)
-            except (httpx.TimeoutException, httpx.NetworkError) as exc:
-                last_exc = exc
-                if attempt < _MAX_POST_RETRIES:
-                    delay = backoff_delay(attempt)
-                    log.warning(
-                        "%s en POST %s intento %d/%d — reintento en %.1fs",
-                        type(exc).__name__, path, attempt, _MAX_POST_RETRIES, delay,
-                    )
-                    time.sleep(delay)
-                continue
-            if resp.status_code in _RETRYABLE_STATUS and attempt < _MAX_POST_RETRIES:
-                delay = backoff_delay(attempt)
-                log.warning(
-                    "HTTP %s en POST %s intento %d/%d — reintento en %.1fs",
-                    resp.status_code, path, attempt, _MAX_POST_RETRIES, delay,
-                )
-                time.sleep(delay)
-                continue
-            return resp
-        if resp is not None:
-            return resp
-        assert last_exc is not None
-        raise last_exc
+        return retry_post(self._client, path, payload, log=log)
 
     # -- export ---------------------------------------------------------------
 
@@ -301,10 +270,9 @@ class QuarantineExporter:
             except ValueError as exc:
                 result.errors.append(f"registro invalido: {exc}")
                 continue
-            try:
-                resp = self._post_with_retry(_QUARANTINE_PATH, payload)
-            except httpx.HTTPError as exc:
-                result.errors.append(f"POST {_QUARANTINE_PATH} fallo: {exc}")
+            resp = self._post_with_retry(_QUARANTINE_PATH, payload)
+            if resp is None:
+                result.errors.append(f"POST {_QUARANTINE_PATH} fallo: reintentos agotados")
                 continue
             if resp.status_code in (200, 201):
                 result.sent += 1

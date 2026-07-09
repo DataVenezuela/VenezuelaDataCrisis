@@ -367,7 +367,7 @@ class TestNoPIIInLogs:
 
         t = _FailPersons([_person_aporte("ap-1")])
         with caplog.at_level("DEBUG", logger="scrapers.jobs.materializer"):
-            with patch("scrapers.jobs.materializer.time.sleep", lambda *_: None):
+            with patch("scrapers.adapters._shared.time.sleep", lambda *_: None):
                 _materializer(t).materialize(event_id=_EVENT_ID)
         for rec in caplog.records:
             assert _PII_NAME not in rec.getMessage()
@@ -405,6 +405,57 @@ class TestLifecycle:
         resp = client.get("/rest/v1/aportes")
         assert resp.status_code == 200
         client.close()
+
+
+# --- H1: seed fallido no silencia el aporte_id ------------------------------
+
+
+class TestSeedFailure:
+    def test_seed_failure_records_aporte_id_in_errors(self) -> None:
+        # Cuando _seed_event falla (5xx), el aporte_id que quedo sin proyectar
+        # debe aparecer en result.errors, no desaparecer silenciosamente.
+        other_event_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+        class _FailEvents(_FakeSupabase):
+            def _upsert(self, request, store, pk):  # type: ignore[no-untyped-def]
+                if request.url.path == "/rest/v1/events" and other_event_id in str(
+                    request.content
+                ):
+                    return httpx.Response(500, json={"message": "transitorio"})
+                return super()._upsert(request, store, pk)
+
+        # Aporte con un event_id distinto al de config => dispara el seed secundario.
+        aporte = _person_aporte("ap-silenced", event_id=other_event_id)
+        t = _FailEvents([aporte])
+        with patch("scrapers.adapters._shared.time.sleep", lambda *_: None):
+            r = _materializer(t).materialize(event_id=_EVENT_ID)
+
+        assert "ap-1" not in t.persons and "ap-silenced" not in t.persons
+        # El aporte_id debe aparecer en errors, no quedar invisible.
+        assert any("ap-silenced" in e for e in r.errors)
+
+    def test_seed_failure_marks_page_not_ok(self) -> None:
+        other_event_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+        class _FailEvents(_FakeSupabase):
+            def _upsert(self, request, store, pk):  # type: ignore[no-untyped-def]
+                if request.url.path == "/rest/v1/events" and other_event_id in str(
+                    request.content
+                ):
+                    return httpx.Response(503, json={"message": "transitorio"})
+                return super()._upsert(request, store, pk)
+
+        aporte = _person_aporte("ap-fail", event_id=other_event_id)
+        good = _person_aporte("ap-good")  # usa event_id de config, seed ya hecho
+        t = _FailEvents([good, aporte])
+        with patch("scrapers.adapters._shared.time.sleep", lambda *_: None):
+            r = _materializer(t).materialize(event_id=_EVENT_ID)
+
+        # ap-good proyecta (su event_id ya fue sembrado); ap-fail no.
+        assert "ap-good" in t.persons
+        assert "ap-fail" not in t.persons
+        # errors contiene tanto el error de seed como el del aporte silenciado.
+        assert any("ap-fail" in e for e in r.errors)
 
 
 # --- Part A: batch heterogeneo se acepta con missing=default ------------------
@@ -538,7 +589,7 @@ class TestIncrementalCursor:
 
         aportes = [_person_aporte(f"ap-{i}") for i in range(2)]
         t = _NetFailPersons(aportes)
-        with patch("scrapers.jobs.materializer.time.sleep", lambda *_: None):
+        with patch("scrapers.adapters._shared.time.sleep", lambda *_: None):
             m = _materializer(t)
             m.materialize(event_id=_EVENT_ID, batch_size=10)
             assert t.cursor_row is None  # congelado: no avanzo pese al fallo

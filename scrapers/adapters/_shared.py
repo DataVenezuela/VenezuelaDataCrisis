@@ -12,11 +12,14 @@ implementacion para que cada adapter no reinvente la misma logica.
 from __future__ import annotations
 
 import hashlib
+import logging
 import random
 import time
 from collections import deque
 from collections.abc import Callable
 from datetime import datetime, timezone
+
+import httpx
 
 
 def now_utc() -> str:
@@ -86,3 +89,54 @@ class RateLimiter:
                 now = self._monotonic()
                 self._purge(now)
         self._hits.append(now)
+
+
+_DEFAULT_RETRYABLE: frozenset[int] = frozenset({429, 500, 502, 503, 504})
+_DEFAULT_RETRIES: int = 4
+
+
+def retry_post(
+    client: httpx.Client,
+    path: str,
+    payload: list[dict[str, object]] | dict[str, object],
+    *,
+    headers: dict[str, str] | None = None,
+    method: str = "POST",
+    timeout: httpx.Timeout | None = None,
+    retries: int = _DEFAULT_RETRIES,
+    retryable_statuses: frozenset[int] = _DEFAULT_RETRYABLE,
+    log: logging.Logger,
+) -> httpx.Response | None:
+    """HTTP con backoff exponencial en status transitorios y errores de red.
+
+    Devuelve None si se agotan los reintentos por error de transporte (el
+    servidor nunca fue alcanzado o la conexión se perdió). Nunca propaga la
+    excepción de red: el caller decide si tratar None como error fatal o
+    transitorio.
+    NUNCA loguear el payload desde aquí: puede contener PII.
+    """
+    resp: httpx.Response | None = None
+    for attempt in range(1, retries + 1):
+        try:
+            resp = client.request(method, path, json=payload, timeout=timeout, headers=headers)
+        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            if attempt < retries:
+                delay = backoff_delay(attempt)
+                log.warning(
+                    "%s en %s %s intento %d/%d — reintento en %.1fs",
+                    type(exc).__name__, method, path, attempt, retries, delay,
+                )
+                time.sleep(delay)
+                continue
+            log.warning("%s %s agoto reintentos por error de red: %s", method, path, exc)
+            return None
+        if resp.status_code in retryable_statuses and attempt < retries:
+            delay = backoff_delay(attempt)
+            log.warning(
+                "HTTP %s en %s %s intento %d/%d — reintento en %.1fs",
+                resp.status_code, method, path, attempt, retries, delay,
+            )
+            time.sleep(delay)
+            continue
+        return resp
+    return resp
