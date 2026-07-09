@@ -454,11 +454,40 @@ class StagingExporter:
         timeout: httpx.Timeout,
         headers: dict[str, str],
     ) -> tuple[int, list[str]]:
-        """POSTea un solo chunk; reintenta registro a registro si el batch es rechazado.
+        """POSTea un chunk homogeneizandolo por su set de claves.
+
+        Cada payload copia solo los campos que la fuente reporto, asi que las filas
+        de un chunk NO comparten el mismo set de claves y PostgREST rechaza el bulk
+        con ``400 PGRST102``. ``Prefer: missing=default`` deberia permitirlo, pero el
+        PostgREST desplegado no lo honra (se observo el batch de 100 rechazado en
+        prod, cayendo a fila-a-fila). Por eso agrupamos por set de claves en el
+        cliente y posteamos cada grupo homogeneo en un unico bulk que PostgREST
+        acepta sin depender del preferente. Cada grupo mantiene su propio fallback
+        fila-a-fila para aislar una fila-poison (p.ej. enum invalido).
 
         Returns
         -------
         Tuple de (sent, errors) para este chunk.
+        """
+        sent = 0
+        errors: list[str] = []
+        for group in _group_by_key_signature(chunk):
+            _sent, _errors = self._post_group(group, timeout, headers)
+            sent += _sent
+            errors.extend(_errors)
+        return sent, errors
+
+    def _post_group(
+        self,
+        chunk: list[dict[str, object]],
+        timeout: httpx.Timeout,
+        headers: dict[str, str],
+    ) -> tuple[int, list[str]]:
+        """POSTea un grupo homogeneo; reintenta registro a registro si es rechazado.
+
+        Returns
+        -------
+        Tuple de (sent, errors) para este grupo.
         """
         sent = 0
         errors: list[str] = []
@@ -560,6 +589,23 @@ class StagingExporter:
 
     def __exit__(self, *_: object) -> None:
         self.close()
+
+
+def _group_by_key_signature(
+    rows: list[dict[str, object]],
+) -> list[list[dict[str, object]]]:
+    """Parte las filas en grupos que comparten exactamente el mismo set de claves.
+
+    Cada grupo es un bulk homogeneo que PostgREST acepta sin ``missing=default``
+    (evita el 400 PGRST102 cuando las filas traen campos distintos). Preserva el
+    orden de primera aparicion, asi que el resultado es determinista dado el orden
+    de entrada. El numero de grupos = numero de shapes distintos (tipicamente
+    unos pocos), no el numero de filas.
+    """
+    groups: dict[frozenset[str], list[dict[str, object]]] = {}
+    for row in rows:
+        groups.setdefault(frozenset(row.keys()), []).append(row)
+    return list(groups.values())
 
 
 def _opt_str(value: object) -> str | None:
