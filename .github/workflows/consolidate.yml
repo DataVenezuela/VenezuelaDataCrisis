@@ -15,7 +15,7 @@ permissions:
 jobs:
   consolidate:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -31,12 +31,14 @@ jobs:
       - name: Download latest ingest artifacts
         uses: actions/download-artifact@v4
         with:
+          pattern: ingest-*
           path: scrapers/runtime_output
           merge-multiple: true
         continue-on-error: true
 
       - name: Run consolidation
         env:
+          PYTHONUNBUFFERED: "1"
           PII_SALT: ${{ secrets.PII_HMAC_SECRET }}
           PII_HMAC_SECRET: ${{ secrets.PII_HMAC_SECRET }}
           # SUPABASE_* habilitan la etapa 1 (materializer: aportes -> silver
@@ -44,7 +46,17 @@ jobs:
           SUPABASE_URL: ${{ vars.SUPABASE_URL }}
           SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
           SUPABASE_INGEST_JWT: ${{ secrets.SUPABASE_INGEST_JWT }}
+          SUPABASE_CONSOLIDATION_JWT: ${{ secrets.SUPABASE_CONSOLIDATION_JWT }}
         run: |
           python -m scrapers.cli consolidate \
             --output-dir scrapers/runtime_output \
             --config scrapers/config/sources.custom.yaml
+
+      - name: Upload consolidation artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: consolidation-output
+          path: scrapers/runtime_output/
+          retention-days: 7
+          if-no-files-found: ignore
