@@ -83,10 +83,13 @@ class StagingConfig:
         loguea a INFO, la segunda a ERROR listando las faltantes. En ambos casos
         devuelve None (gatilla el dry-run) sin abortar el pipeline.
         """
+        # SUPABASE_CONSOLIDATION_JWT (rol consolidation_job, #264) tiene
+        # prioridad; SUPABASE_INGEST_JWT sirve de fallback para el flujo ingest.
+        jwt = os.getenv("SUPABASE_CONSOLIDATION_JWT") or os.getenv("SUPABASE_INGEST_JWT")
         values = {
             "SUPABASE_URL": os.getenv("SUPABASE_URL"),
             "SUPABASE_PUBLISHABLE_KEY": os.getenv("SUPABASE_PUBLISHABLE_KEY"),
-            "SUPABASE_INGEST_JWT": os.getenv("SUPABASE_INGEST_JWT"),
+            "SUPABASE_INGEST_JWT": jwt,
         }
         present = [k for k, v in values.items() if v]
         if not present:
