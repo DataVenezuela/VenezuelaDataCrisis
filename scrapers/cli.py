@@ -120,7 +120,13 @@ def _cmd_materialize(args: argparse.Namespace) -> None:
     from scrapers.jobs.materializer import SilverMaterializer
 
     try:
-        project, _sources = load_sources(Path(args.config))
+        # El materializer solo necesita project.event_id (una constante del YAML),
+        # SELECT sobre aportes e INSERT sobre persons. Nunca toca `sources`, asi
+        # que leemos el event_id directo del config validado en vez de load_sources
+        # (que resuelve las fuentes thin contra la DB y puede 403ear por un grant
+        # que esta proyeccion no usa).
+        payload = validate_sources_config(Path(args.config))
+        project = payload.get("project", {})
         event_id = validate_uuid_str(str(project.get("event_id")))
     except (ValueError, FileNotFoundError, KeyError) as exc:
         print(f"WARN: no se pudo leer project.event_id de {args.config}: {exc}", file=sys.stderr)

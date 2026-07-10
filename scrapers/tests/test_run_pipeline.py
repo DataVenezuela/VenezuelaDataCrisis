@@ -1778,3 +1778,58 @@ sources:
                 run_pipeline(config_path=demo_config, output_dir=tmp_path / "out")
         for rec in caplog.records:
             assert marker not in rec.getMessage()
+
+
+# ---------------------------------------------------------------------------
+# _cmd_materialize desacoplado de la resolucion de fuentes (thin -> DB)
+# ---------------------------------------------------------------------------
+
+
+class TestMaterializeDecoupledFromSources:
+    """El materializer solo necesita ``project.event_id`` (constante del YAML),
+    nunca la definicion de las fuentes. Debe correr aunque la resolucion de las
+    fuentes thin fallaria (config thin sin env SUPABASE_*): antes, un solo grant
+    faltante en ``sources`` tumbaba toda la proyeccion via ``load_sources``."""
+
+    _THIN_CONFIG = f"""project:
+  event_id: {_EVENT_ID}
+  default_country: Venezuela
+sources:
+  - id: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+    parser_asignado: encuentralos
+    enabled: true
+"""
+
+    def test_materialize_runs_when_sources_resolution_would_fail(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
+    ) -> None:
+        import argparse
+
+        from scrapers import cli
+
+        # Sin env SUPABASE_*: load_sources fallaria cerrado al resolver la fuente
+        # thin contra la DB. Confirmamos primero esa premisa.
+        for key in _SUPABASE_ENV:
+            monkeypatch.delenv(key, raising=False)
+        cfg = _make_demo_config(tmp_path, self._THIN_CONFIG)
+        with pytest.raises(ValueError):
+            cli.load_sources(cfg)
+
+        mock_result = MagicMock()
+        mock_result.persons_projected = 0
+        mock_result.acopio_projected = 0
+        mock_result.events_seeded = 0
+        mock_result.events_skipped = 0
+        mock_result.errors = []
+        mock_cls = MagicMock()
+        instance = mock_cls.return_value.__enter__.return_value
+        instance.materialize.return_value = mock_result
+
+        args = argparse.Namespace(config=str(cfg))
+        with patch("scrapers.jobs.materializer.SilverMaterializer", mock_cls):
+            cli._cmd_materialize(args)
+
+        # El materializer se ejecuto con el event_id del YAML: no hubo return
+        # temprano por fallo de resolucion de fuentes.
+        instance.materialize.assert_called_once_with(event_id=_EVENT_ID)
+        assert "no se pudo leer project.event_id" not in capsys.readouterr().err

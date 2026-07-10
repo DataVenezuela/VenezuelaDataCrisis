@@ -493,6 +493,38 @@ class TestBatchHeterogeneousKeys:
         assert r.persons_projected == 2
         assert not any("fila a fila" in rec.getMessage() for rec in caplog.records)
 
+    class _RejectsHeterogeneousAlways(_FakeSupabase):
+        """Modela el PostgREST DESPLEGADO: rechaza un bulk con claves dispares
+        AUNQUE lleve ``missing=default`` (el preferente no se honra en prod). El
+        materializer debe homogeneizar el batch en el cliente (agrupar por set de
+        claves) y proyectar todo sin caer a fila-a-fila."""
+
+        def _upsert(self, request, store, pk):  # type: ignore[no-untyped-def]
+            if request.url.path == "/rest/v1/persons":
+                body = json.loads(request.content)
+                if len({frozenset(r.keys()) for r in body}) > 1:
+                    return httpx.Response(
+                        400,
+                        json={"code": "PGRST102", "message": "All object keys must match"},
+                    )
+            return super()._upsert(request, store, pk)
+
+    def test_projects_all_when_missing_default_is_ignored(self, caplog: Any) -> None:
+        # Filas con sets de claves distintos + un server que ignora missing=default.
+        a1 = _person_aporte("ap-1")
+        a2 = _person_aporte("ap-2", cedula_hmac=None, cedula_masked=None, age_range=None)
+        a3 = _person_aporte("ap-3")  # misma firma que ap-1 => mismo grupo
+        t = self._RejectsHeterogeneousAlways([a1, a2, a3])
+        with caplog.at_level("WARNING", logger="scrapers.jobs.materializer"):
+            r = _materializer(t).materialize(event_id=_EVENT_ID)
+        # Todo se proyecta pese a que el server rechaza batches heterogeneos, y
+        # sin caer a fila-a-fila: el cliente ya mando grupos homogeneos.
+        assert len(t.persons) == 3
+        assert r.persons_projected == 3
+        assert not any("fila a fila" in rec.getMessage() for rec in caplog.records)
+        # Omitir una columna preserva su DEFAULT: ap-2 no manda cedula_hmac.
+        assert "cedula_hmac" not in t.persons["ap-2"]
+
     def test_prefer_header_carries_missing_default(self) -> None:
         captured: list[str] = []
 
