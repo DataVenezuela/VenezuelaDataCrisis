@@ -340,6 +340,18 @@ class SilverMaterializer:
                 "description": _EVENT_DESCRIPTION,
             }],
         )
+        if resp is not None and resp.status_code in (401, 403):
+            # Sin permiso de escritura sobre events es un fallo PERMANENTE, no
+            # transitorio. Tratarlo como los 5xx (append + return False) haria que
+            # el seed defensivo por-aporte lo reintente una vez por aporte (miles de
+            # 403) y, al marcar cada pagina como no-ok, congele el cursor durable:
+            # cada corrida del cron reproyecta el mismo backlog y CD queda trabado.
+            # Fallamos rapido, igual que _fetch_aportes_page.
+            raise PermissionError(
+                f"seed events {event_id}: sin permiso (status {resp.status_code}); "
+                "verificar SUPABASE_INGEST_JWT y el grant INSERT del rol scraper_ingest "
+                "sobre la tabla events"
+            )
         if resp is None or resp.status_code not in (200, 201):
             result.errors.append(
                 f"seed events {event_id}: status {getattr(resp, 'status_code', 'n/a')}"
@@ -374,9 +386,6 @@ class SilverMaterializer:
             return result
 
         seeded: set[str] = set()
-        # La fila de catalogo de config debe existir antes que cualquier proyeccion.
-        self._seed_event(event_id, seeded, result)
-
         size = max(1, batch_size)
         cursor = self._read_cursor()
         # Solo se persiste el cursor mientras las paginas confirmen en orden
@@ -384,6 +393,10 @@ class SilverMaterializer:
         # (aunque el cursor en memoria siga avanzando para intentar mas esta corrida).
         contiguous = True
         try:
+            # La fila de catalogo de config debe existir antes que cualquier
+            # proyeccion. Dentro del try para que un 403 (grant faltante) aborte
+            # la corrida con un solo error en vez de tumbarla con un traceback.
+            self._seed_event(event_id, seeded, result)
             for page_num in range(_MAX_PAGES):
                 page = self._fetch_aportes_page(size, cursor)
                 if not page:
