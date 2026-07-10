@@ -176,12 +176,15 @@ class SilverMaterializer:
         """
         assert self._client is not None
         # ``missing=default``: cada aporte copia solo sus columnas presentes
-        # (``_typed_payload``), asi que las filas de un batch NO comparten el mismo
-        # set de claves. Sin este preferente PostgREST rechaza el lote entero con
-        # 400 PGRST102 ("All object keys must match") y el fallback cae a fila-a-fila
-        # (lento: satura el timeout del cron con 100k aportes). Con el, PostgREST
-        # toma la union de claves y rellena las ausentes con el DEFAULT de cada
-        # columna, aceptando el batch heterogeneo de una sola vez.
+        # (``_typed_payload``), asi que las filas de un batch podrian NO compartir el
+        # mismo set de claves y PostgREST las rechazaria con 400 PGRST102 ("All object
+        # keys must match"). ``missing=default`` pide tomar la union de claves y
+        # rellenar las ausentes con el DEFAULT de cada columna. PERO el PostgREST
+        # desplegado NO lo honra (los logs del cron mostraban el batch aun rechazado),
+        # asi que la garantia real es del lado del cliente: ``_upsert_rows`` agrupa las
+        # filas por set de claves y postea grupos homogeneos. Este preferente queda como
+        # optimizacion best-effort (si el server lo honra, ahorra grupos), no como la
+        # defensa principal.
         headers = {
             "Prefer": "resolution=ignore-duplicates,return=representation,missing=default"
         }
@@ -470,7 +473,51 @@ class SilverMaterializer:
         kind: str,
         result: MaterializeResult,
     ) -> bool:
-        """Upserta un lote; si el batch es rechazado, reintenta fila a fila.
+        """Upserta filas homogeneizando el batch por su set de claves.
+
+        PostgREST rechaza con ``400 PGRST102`` ("All object keys must match") un
+        bulk insert cuyas filas no comparten el mismo set de claves. ``Prefer:
+        missing=default`` deberia permitir el batch heterogeneo, pero el PostgREST
+        DESPLEGADO no lo honra: los logs del cron muestran el batch de 500 aun
+        rechazado con 400, cayendo a fila-a-fila (~38s/pagina) y agotando el
+        timeout de 10 min tras ~16k de ~109k aportes. Por eso homogeneizamos en el
+        cliente: se agrupan las filas por su set de claves (``_typed_payload`` copia
+        solo las columnas presentes de cada ``raw_json``, asi que difieren) y se
+        upserta cada grupo en un unico bulk que PostgREST acepta sin depender de
+        ``missing=default``. OMITIR una columna (en vez de mandar ``null``) preserva
+        su DEFAULT en la BD; un ``null`` explicito rompe las columnas NOT NULL con
+        DEFAULT (``status``, ``trust_tier``, ``confidence_score``...).
+
+        Devuelve True si cada fila fue atendida de forma definitiva por la BD
+        (insertada, ya-presente, o rechazo permanente tipo enum). Devuelve False
+        solo ante un fallo transitorio de red (``_post`` -> None) que impidio
+        atender alguna fila: el llamador no debe avanzar el cursor durable.
+        """
+        ok = True
+        for group in self._group_by_key_signature(rows):
+            ok = self._upsert_group(path, group, kind, result) and ok
+        return ok
+
+    @staticmethod
+    def _group_by_key_signature(
+        rows: list[dict[str, object]],
+    ) -> list[list[dict[str, object]]]:
+        """Parte las filas en grupos que comparten exactamente el mismo set de
+        claves, para que cada POST sea un bulk homogeneo. Preserva el orden de
+        primera aparicion (determinista dado el orden de entrada)."""
+        groups: dict[frozenset[str], list[dict[str, object]]] = {}
+        for row in rows:
+            groups.setdefault(frozenset(row.keys()), []).append(row)
+        return list(groups.values())
+
+    def _upsert_group(
+        self,
+        path: str,
+        rows: list[dict[str, object]],
+        kind: str,
+        result: MaterializeResult,
+    ) -> bool:
+        """Upserta un grupo homogeneo; si el batch es rechazado, reintenta fila a fila.
 
         Aisla la fila mala (p.ej. un valor de enum que la BD rechaza) para no
         perder las filas buenas del lote, como ``StagingExporter._post_chunk``.
