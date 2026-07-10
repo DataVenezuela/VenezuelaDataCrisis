@@ -808,9 +808,21 @@ cuarentenar (nunca se hizo fetch), pero la omisión queda **visible** en
 como `pending`, `in_review`, `approved_for_staging`, `needs_manual_redaction`,
 `rejected`). `approved_for_staging` permite reintroducir el registro al pipeline;
 `approved_at` y `review_decision` registran la resolución humana, y
-`retention_until` controla la ventana de retención. La purga auditable borra
-`payload_preview_redacted` y `pii_findings_summary` pero conserva la fila y su
-`payload_hash`.
+`retention_until` controla la ventana de retención.
+
+La purga auditable (Issue #273) la ejecuta el job `quarantine-destroy`
+(`scrapers/jobs/quarantine_destroyer.py`, CLI `python -m scrapers.cli
+quarantine-destroy`). Al destruir una fila borra `payload_preview_redacted` y
+`pii_findings_summary` (los únicos campos con contenido sensible), estampa
+`destroyed_at = now()` y conserva la fila con su `payload_hash` y metadatos
+(`source_slug`, `reason_code`, `quarantined_at`), de modo que el hash sigue
+probando que ese payload exacto se vio y se destruyó a propósito. La destrucción
+solo procede si `review_status = 'rejected'` o `retention_until < now()`: esa
+guarda la aplica el propio `PATCH` filtrado a PostgREST (atómico, sin condición
+de carrera), con `destroyed_at=is.null` en el filtro para que re-destruir sea un
+no-op idempotente. Modos: `--id <uuid>` destruye un registro puntual, `--expired`
+barre todas las filas elegibles. Sin `SUPABASE_*` entra en dry-run (no toca la
+red). Cada destrucción se traza a INFO con `id` y `payload_hash` (nunca PII).
 
 ---
 
@@ -1191,6 +1203,7 @@ CREATE TABLE public.quarantined_records (
   review_decision          text,
   retention_until          timestamptz,
   approved_at              timestamptz,
+  destroyed_at             timestamptz,             -- purga auditable (#273): se estampa al destruir
   quarantined_at           timestamptz NOT NULL DEFAULT now()
 );
 ```
