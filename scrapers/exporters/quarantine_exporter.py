@@ -23,7 +23,9 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import urllib.parse
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 import httpx
 
@@ -175,6 +177,19 @@ def _truncate_preview(preview: str | None) -> str | None:
     return preview[:_PREVIEW_MAX_CHARS]
 
 
+def _destroy_payload(now_iso: str) -> dict[str, object]:
+    """Payload del PATCH para destruir un registro de cuarentena.
+    payload_preview_redacted y pii_findings_summary se ponen a NULL;
+    destroyed_at registra el momento de la destruccion. La fila
+    se preserva con payload_hash y metadata para trazabilidad.
+    """
+    return {
+        "payload_preview_redacted": None,
+        "pii_findings_summary": None,
+        "destroyed_at": now_iso,
+    }
+
+
 class QuarantineExporter:
     """Inserta registros no procesables en quarantined_records via PostgREST."""
 
@@ -287,6 +302,116 @@ class QuarantineExporter:
                     f"reason_code={payload['reason_code']}"
                 )
         return result
+
+    # -- destruccion de registros --------------------------------------------
+
+    def destroy_record(self, record_id: str) -> bool:
+        """Marcar un registro de cuarentena como destruido.
+        payload_preview_redacted y pii_findings_summary se ponen a NULL;
+        destroyed_at = now(). La fila se preserva con payload_hash y
+        metadata (source_slug, reason_code, quarantined_at) para trazabilidad.
+        Guard conditions (server-side via URL filters):
+          review_status = 'rejected' OR retention_until < now()
+          destroyed_at IS NULL (idempotencia)
+        """
+        if not self.enabled or self._client is None:
+            log.info(
+                "DRY-RUN destroy_record(%s): saltando, exporter deshabilitado",
+                record_id,
+            )
+            return False
+
+        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        params = {
+            "id": f"eq.{record_id}",
+            "destroyed_at": "is.null",
+            "or": f"(review_status.eq.rejected,retention_until.lt.{now_iso})",
+        }
+        url = f"{_QUARANTINE_PATH}?{urllib.parse.urlencode(params)}"
+        payload = _destroy_payload(now_iso)
+
+        resp = retry_post(
+            self._client, url, payload,
+            method="PATCH",
+            headers={"Prefer": "return=representation"},
+            log=log,
+        )
+        if resp is None:
+            log.error("destroy_record(%s): reintentos agotados", record_id)
+            return False
+        if resp.status_code == 200:
+            affected = resp.json()
+            if affected:
+                log.info("Registro %s destruido a las %s", record_id, now_iso)
+                return True
+            log.warning(
+                "destroy_record(%s): condiciones no cumplidas "
+                "(review_status != rejected y retention_until >= now, "
+                "o ya destruido)", record_id
+            )
+            return False
+        log.error(
+            "destroy_record(%s): status inesperado %s", record_id, resp.status_code
+        )
+        return False
+
+    def destroy_expired(self, *, dry_run: bool = False) -> int:
+        """Destruir registros expirados (retention_until < now, destroyed_at IS NULL).
+        En dry-run: GET con select, loguea candidatos, no muta.
+        En real: batch PATCH, parsea Content-Range del header para el conteo
+        (evita transferir miles de filas en la respuesta).
+        Returns: numero de registros destruidos (o que se destruirian).
+        """
+        if not self.enabled or self._client is None:
+            return 0
+
+        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        params: dict[str, str] = {
+            "retention_until": f"lt.{now_iso}",
+            "destroyed_at": "is.null",
+        }
+
+        if dry_run:
+            params["select"] = "id,source_slug,reason_code,retention_until"
+            url = f"{_QUARANTINE_PATH}?{urllib.parse.urlencode(params)}"
+            assert self._client is not None
+            try:
+                resp = self._client.get(url)
+                resp.raise_for_status()
+            except httpx.HTTPError as exc:
+                log.error("destroy_expired(dry-run): GET fallo: %s", exc)
+                return 0
+            expired = resp.json()
+            for rec in expired:
+                log.info(
+                    "DRY-RUN: se destruiria %s (source_slug=%s, "
+                    "reason_code=%s, retention_until=%s)",
+                    rec["id"], rec["source_slug"], rec["reason_code"],
+                    rec.get("retention_until"),
+                )
+            return len(expired)
+
+        url = f"{_QUARANTINE_PATH}?{urllib.parse.urlencode(params)}"
+        payload = _destroy_payload(now_iso)
+        resp = retry_post(
+            self._client, url, payload,
+            method="PATCH",
+            headers={"Prefer": "count=exact,return=minimal"},
+            log=log,
+        )
+        if resp is None:
+            log.error("destroy_expired: reintentos agotados")
+            return 0
+        if resp.status_code == 204:
+            cr = (resp.headers.get("content-range") or "")
+            if cr.startswith("*/"):
+                count = int(cr[2:])
+                log.info("destroy_expired: %d registros purgados", count)
+                return count
+            log.warning("destroy_expired: Content-Range inesperado %r", cr)
+            return 0
+        log.warning("destroy_expired: status inesperado %s", resp.status_code)
+        return 0
 
     # -- ciclo de vida --------------------------------------------------------
 
