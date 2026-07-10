@@ -457,6 +457,32 @@ class TestSeedFailure:
         # errors contiene tanto el error de seed como el del aporte silenciado.
         assert any("ap-fail" in e for e in r.errors)
 
+    def test_permission_denied_on_seed_fails_fast_without_storm(self) -> None:
+        # Regresion CD trabado: un 403 al sembrar events (grant INSERT faltante en
+        # scraper_ingest) es PERMANENTE, no transitorio. Debe abortar la corrida
+        # con UN solo intento, no reintentar el seed una vez por aporte (miles de
+        # 403) ni congelar el cursor en un loop que el cron reproyecta cada vez.
+        class _DenyEvents(_FakeSupabase):
+            def _upsert(self, request, store, pk):  # type: ignore[no-untyped-def]
+                if request.url.path == "/rest/v1/events":
+                    return httpx.Response(
+                        403, json={"message": "permission denied for table events"}
+                    )
+                return super()._upsert(request, store, pk)
+
+        # Varios aportes con el event_id de config: bajo el bug, cada uno dispara
+        # su propio seed => storm de 403.
+        aportes = [_person_aporte(f"ap-{i}") for i in range(5)]
+        t = _DenyEvents(aportes)
+        with patch("scrapers.adapters._shared.time.sleep", lambda *_: None):
+            r = _materializer(t).materialize(event_id=_EVENT_ID)
+
+        # Un unico POST a events (el seed de config), no uno por aporte.
+        assert t.post_order.count("/rest/v1/events") == 1
+        # Nada se proyecta y el error nombra el grant que falta (accionable).
+        assert t.persons == {}
+        assert any("grant INSERT" in e and "events" in e for e in r.errors)
+
 
 # --- Part A: batch heterogeneo se acepta con missing=default ------------------
 
