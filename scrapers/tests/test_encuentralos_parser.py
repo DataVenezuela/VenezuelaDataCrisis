@@ -10,7 +10,7 @@ estructura real de la API (campos reales, datos 100% ficticios).
 Cobertura
 ---------
 - Mapeo de todos los campos de la API a Person
-- Mapeo completo del enum status (missing/found/injured/deceased/unknown)
+- Mapeo completo del enum status (missing/deceased/unknown; encontrado/herido colapsan a missing)
 - Cédula pre-mascarada: cedula_hmac=None, cedula_masked=None permanente
 - normalize_location aplicado sobre ultima_ubicacion (string libre)
 - age_range desde edad puntual
@@ -236,15 +236,15 @@ class TestStatusMapping:
         # registro 0: estado="desaparecido"
         assert persons[0].status == "missing"
 
-    def test_encontrado_maps_to_found(self) -> None:
+    def test_encontrado_maps_to_missing(self) -> None:
         persons = self._parse_all()
-        # registro 1: estado="encontrado"
-        assert persons[1].status == "found"
+        # registro 1: estado="encontrado" -> person_status no tiene "found"
+        assert persons[1].status == "missing"
 
-    def test_herido_maps_to_injured(self) -> None:
+    def test_herido_maps_to_missing(self) -> None:
         persons = self._parse_all()
-        # registro 2: estado="herido"
-        assert persons[2].status == "injured"
+        # registro 2: estado="herido" -> person_status no tiene "injured"
+        assert persons[2].status == "missing"
 
     def test_fallecido_maps_to_deceased(self) -> None:
         persons = self._parse_all()
@@ -264,13 +264,13 @@ class TestStatusMapping:
 
     def test_female_variants(self) -> None:
         assert _map_status("desaparecida") == "missing"
-        assert _map_status("encontrada") == "found"
-        assert _map_status("herida") == "injured"
+        assert _map_status("encontrada") == "missing"
+        assert _map_status("herida") == "missing"
         assert _map_status("fallecida") == "deceased"
 
     def test_case_insensitive(self) -> None:
         assert _map_status("DESAPARECIDO") == "missing"
-        assert _map_status("Encontrado") == "found"
+        assert _map_status("Encontrado") == "missing"
 
 
 # ---------------------------------------------------------------------------

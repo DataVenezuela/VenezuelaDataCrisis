@@ -312,7 +312,7 @@ def _mock_parser(persons: list[Person] | None = None) -> MagicMock:
         Person(
             full_name="ANA DEMO GARCIA",
             event_id=_EVENT_ID,
-            status="found",
+            status="deceased",
             fuente="encuentralos_tecnosoft",
             age_range={"min": 25, "max": 35},
             last_known_location="Zulia, Venezuela",
@@ -864,7 +864,7 @@ sources:
             Person(
                 full_name=f"PERSONA DOS {suffix}",
                 event_id=_EVENT_ID,
-                status="found",
+                status="deceased",
                 fuente=f"fuente_{suffix}",
                 last_known_location=f"Zulia{suffix}, Venezuela",
             ),

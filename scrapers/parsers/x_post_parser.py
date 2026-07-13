@@ -21,10 +21,13 @@ SOURCE_KEY = "x_posts"
 FUENTE_LABEL = "X/Twitter public recent search"
 DEFAULT_TRUST_TIER = "D"
 
+# person_status desplegado solo tiene missing/deceased/unknown: found/injured
+# nunca se agregaron (el proyecto decidio no rastrearlos como estados propios),
+# asi que ambas senales colapsan a "missing".
 _STATUS_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("missing", re.compile(r"\b(desaparecid[oa]|se busca|no aparece)\b", re.IGNORECASE)),
-    ("found", re.compile(r"\b(encontrad[oa]|apareci[oó]|localizad[oa])\b", re.IGNORECASE)),
-    ("injured", re.compile(r"\b(herid[oa]|lesionad[oa])\b", re.IGNORECASE)),
+    ("missing", re.compile(r"\b(encontrad[oa]|apareci[oó]|localizad[oa])\b", re.IGNORECASE)),
+    ("missing", re.compile(r"\b(herid[oa]|lesionad[oa])\b", re.IGNORECASE)),
     ("deceased", re.compile(r"\b(fallecid[oa]|muri[oó])\b", re.IGNORECASE)),
 )
 _NAME_AFTER_SIGNAL = re.compile(
