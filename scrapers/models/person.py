@@ -6,7 +6,7 @@ from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 from scrapers.models._validators import validate_score_range, validate_uuid_str
 
-_PERSON_STATUS = {"missing", "found", "injured", "deceased", "unknown"}
+_PERSON_STATUS = {"missing", "deceased", "unknown"}
 _TRUST_TIERS = {"A", "B", "C", "D"}
 _IDENTITY_KIND = {"hmac", "partial", "none"}
 _PII_PROVENANCE = {"cleartext", "source_masked_lossy", "source_hashed"}

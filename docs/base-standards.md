@@ -120,7 +120,7 @@ pip install -r scrapers/requirements.txt
 | `cedula_hmac` | Pure 64-char hex, **no prefix**. Never `hmac_sha256:...` |
 | `trust_tier` (scrapers) | Letters `A`/`B`/`C`/`D`, never integers |
 | `trust_tier` (DB) | Same letter enum `A`/`B`/`C`/`D` (`trust_tier` type). No integer representation, no conversion in the exporter |
-| `Person.status` | English: `missing`/`found`/`injured`/`deceased`/`unknown` |
+| `Person.status` | English: `missing`/`deceased`/`unknown` (DB enum has no `found`/`injured`; both collapse to `missing`) |
 | `is_minor` | Always declare. `None` if unknown — never omit the field |
 | PII timing | HMAC before creating the entity, never after |
 | No JSONL on disk | Output goes to staging in Supabase, not local files |

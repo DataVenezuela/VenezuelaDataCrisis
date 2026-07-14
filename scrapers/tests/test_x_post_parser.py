@@ -50,7 +50,8 @@ def test_parser_maps_missing_post_to_person() -> None:
     assert person.nota == "[tweet_id:100]"
 
 
-def test_parser_maps_found_post_to_person() -> None:
+def test_parser_maps_encontrada_signal_to_missing() -> None:
+    # person_status desplegado no tiene "found"; la senal colapsa a "missing".
     parser = XPostParser(event_id=EVENT_ID)
     people = parser.parse(
         _raw(
@@ -65,7 +66,7 @@ def test_parser_maps_found_post_to_person() -> None:
 
     assert len(people) == 1
     assert people[0].full_name == "Maria Fernanda Demo"
-    assert people[0].status == "found"
+    assert people[0].status == "missing"
 
 
 def test_parser_ignores_posts_without_clear_person_signal() -> None:
