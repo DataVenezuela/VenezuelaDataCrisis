@@ -602,6 +602,28 @@ class _CursorFake(_FakeSupabase):
         return super().handle_request(request)
 
 
+class _CursorPermissionDeniedFake(_FakeSupabase):
+    """Tabla silver_materialize_state existe pero el GRANT/POLICY esta mal: 403."""
+
+    def __init__(self, aportes: list[dict[str, Any]], *, deny_get: bool = False) -> None:
+        super().__init__(aportes)
+        self.deny_get = deny_get
+        self.cursor_posts = 0
+        self.cursor_gets = 0
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/rest/v1/silver_materialize_state":
+            if request.method == "GET":
+                self.cursor_gets += 1
+                if self.deny_get:
+                    return httpx.Response(403, json={"message": "permission denied"})
+                return httpx.Response(200, json=[])
+            if request.method == "POST":
+                self.cursor_posts += 1
+                return httpx.Response(403, json={"message": "permission denied"})
+        return super().handle_request(request)
+
+
 class TestIncrementalCursor:
     def test_persists_cursor_at_last_projected_aporte(self) -> None:
         aportes = [_person_aporte(f"ap-{i}") for i in range(5)]
@@ -682,3 +704,19 @@ class TestIncrementalCursor:
         t = _CursorFake([_person_aporte("ap-1")])
         r = _materializer(t).materialize(event_id=_EVENT_ID)
         assert r.cursor_table_missing is False
+
+    def test_write_cursor_stops_retrying_after_permission_denied(self) -> None:
+        # GRANT/POLICY mal aplicado: la tabla existe (no 404) pero cada POST
+        # devuelve 403. No debe reintentar en cada pagina (storm de warnings).
+        aportes = [_person_aporte(f"ap-{i}") for i in range(3)]
+        t = _CursorPermissionDeniedFake(aportes)
+        r = _materializer(t).materialize(event_id=_EVENT_ID, batch_size=1)
+        assert t.cursor_posts == 1
+        assert r.cursor_permission_denied is True
+        assert len(t.persons) == 3  # la proyeccion no se ve afectada (best-effort)
+
+    def test_read_cursor_permission_denied_flags_result(self) -> None:
+        t = _CursorPermissionDeniedFake([_person_aporte("ap-1")], deny_get=True)
+        r = _materializer(t).materialize(event_id=_EVENT_ID)
+        assert r.cursor_permission_denied is True
+        assert len(t.persons) == 1
