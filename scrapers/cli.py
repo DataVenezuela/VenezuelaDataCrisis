@@ -147,6 +147,12 @@ def _cmd_materialize(args: argparse.Namespace) -> None:
             "completo cada vez (aplicar el DDL pendiente en Supabase)",
             file=sys.stderr,
         )
+    if result.cursor_permission_denied:
+        print(
+            "WARN materializer: sin permiso sobre silver_materialize_state; corriendo "
+            "scan completo cada vez (verificar GRANT/POLICY del rol scraper_ingest)",
+            file=sys.stderr,
+        )
     for err in result.errors:
         print(f"WARN materializer: {err}", file=sys.stderr)
 

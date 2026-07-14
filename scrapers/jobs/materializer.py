@@ -129,6 +129,7 @@ class MaterializeResult:
     events_skipped: int = 0
     errors: list[str] = field(default_factory=list)
     cursor_table_missing: bool = False
+    cursor_permission_denied: bool = False
 
 
 def _typed_payload(raw: dict[str, object], fields: tuple[str, ...]) -> dict[str, object]:
@@ -158,9 +159,11 @@ class SilverMaterializer:
         self.config = config
         self.enabled = config is not None
         self._owns_client = client is None
-        # Se vuelve True si la tabla del cursor no existe (DDL pendiente): a partir
-        # de ahi no se reintenta persistir el cursor y se opera en scan completo.
+        # Se vuelve True si la tabla del cursor no existe (DDL pendiente) o el rol
+        # no tiene permiso (GRANT/POLICY faltante): a partir de ahi no se reintenta
+        # persistir el cursor y se opera en scan completo.
         self._cursor_unavailable = False
+        self._cursor_permission_denied = False
         self._client: httpx.Client | None = client
         if self.enabled and config is not None and client is None:
             self._client = httpx.Client(
@@ -280,6 +283,15 @@ class SilverMaterializer:
             )
             self._cursor_unavailable = True
             return None
+        if resp.status_code in (401, 403):
+            log.warning(
+                "materializer: sin permiso para leer el cursor (status %s); scan completo "
+                "(verificar GRANT/POLICY del rol scraper_ingest sobre silver_materialize_state)",
+                resp.status_code,
+            )
+            self._cursor_unavailable = True
+            self._cursor_permission_denied = True
+            return None
         if resp.status_code != 200:
             log.warning("materializer: lectura de cursor status %s; scan completo", resp.status_code)
             return None
@@ -320,6 +332,16 @@ class SilverMaterializer:
                 "(aplicar el DDL del PR)"
             )
             self._cursor_unavailable = True
+            return False
+        if resp.status_code in (401, 403):
+            log.warning(
+                "materializer: sin permiso para persistir el cursor (status %s); "
+                "sin paginado incremental el resto de esta corrida "
+                "(verificar GRANT/POLICY del rol scraper_ingest sobre silver_materialize_state)",
+                resp.status_code,
+            )
+            self._cursor_unavailable = True
+            self._cursor_permission_denied = True
             return False
         if resp.status_code not in (200, 201, 204):
             log.warning("materializer: no se pudo persistir el cursor (status %s)", resp.status_code)
@@ -436,7 +458,8 @@ class SilverMaterializer:
         except PermissionError as exc:
             log.error("%s", exc)
             result.errors.append(str(exc))
-        result.cursor_table_missing = self._cursor_unavailable
+        result.cursor_permission_denied = self._cursor_permission_denied
+        result.cursor_table_missing = self._cursor_unavailable and not self._cursor_permission_denied
         return result
 
     def _project_page(
