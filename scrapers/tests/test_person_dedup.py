@@ -161,7 +161,7 @@ class TestSimilarity:
 
     def test_status_mismatch(self) -> None:
         a = _person("1", status="missing")
-        b = _person("2", status="found")
+        b = _person("2", status="deceased")
         _, reasons = similarity_score(a, b)
         assert reasons["status"] == 0.0
 

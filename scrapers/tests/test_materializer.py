@@ -221,6 +221,18 @@ class TestProjectPerson:
         row = t.persons["ap-1"]
         assert not any(k.startswith("_") for k in row)
 
+    def test_remaps_found_and_injured_status_to_missing(self) -> None:
+        # person_status desplegado no tiene found/injured (400 "invalid input
+        # value for enum person_status"); aportes staged con esos valores
+        # (backlog previo al fix de parsers) deben remapearse a missing.
+        t = _FakeSupabase([
+            _person_aporte("ap-1", status="found"),
+            _person_aporte("ap-2", status="injured"),
+        ])
+        _materializer(t).materialize(event_id=_EVENT_ID)
+        assert t.persons["ap-1"]["status"] == "missing"
+        assert t.persons["ap-2"]["status"] == "missing"
+
 
 # --- proyeccion acopio_centers ----------------------------------------------
 

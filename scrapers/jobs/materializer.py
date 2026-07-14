@@ -72,7 +72,8 @@ _EVENT_DESCRIPTION = "Terremoto Venezuela 2026-06-24"
 
 # Columnas de raw_json que se copian tal cual a cada tabla tipada (ver
 # docs/schema.md). Se incluye solo la clave presente y no-nula; el resto queda en
-# el DEFAULT de la BD. Proyeccion casi-pura: sin transformar valores.
+# el DEFAULT de la BD. Proyeccion casi-pura: sin transformar valores, salvo la
+# excepcion documentada en ``_PERSON_STATUS_REMAP`` (persons.status).
 _PERSON_FIELDS = (
     "full_name",
     "alternate_names",
@@ -103,6 +104,16 @@ _ACOPIO_FIELDS = (
     "contact_public",
     "current_load",
 )
+
+# El enum ``person_status`` desplegado en Supabase solo tiene
+# missing/deceased/unknown: found/injured nunca se agregaron y este proyecto
+# decidio no rastrearlos como estados propios. Los parsers y el modelo Person
+# ya no los emiten, pero aportes staged ANTES de ese cambio pueden traer
+# raw_json.status="found"/"injured" (asi es como se disparaba el 400
+# "invalid input value for enum person_status"). Se remapean aqui, en la
+# proyeccion, para cubrir tanto el backlog ya staged como cualquier scrape
+# futuro que aun no pase por el parser corregido.
+_PERSON_STATUS_REMAP = {"found": "missing", "injured": "missing"}
 
 _DEFAULT_BATCH_SIZE = 500
 _MAX_PAGES = 100_000  # backstop anti-loop; el cron real nunca se acerca.
@@ -605,6 +616,9 @@ class SilverMaterializer:
             "event_id": _row_event_id(raw, default_event_id),
         }
         row.update(_typed_payload(raw, _PERSON_FIELDS))
+        status = row.get("status")
+        if status in _PERSON_STATUS_REMAP:
+            row["status"] = _PERSON_STATUS_REMAP[status]
         return row
 
     @staticmethod

@@ -25,11 +25,16 @@ ultima_vez         (descartado)
 
 Mapeo de status
 ---------------
+El enum ``person_status`` desplegado en Supabase solo tiene
+missing/deceased/unknown (found/injured nunca se agregaron y el proyecto
+decidio no rastrearlos como estados propios), asi que ambos colapsan a
+``missing``.
+
 API value          → Person.status enum
 -----------------  ----------------------
 desaparecido       missing
-encontrado         found
-herido             injured
+encontrado         missing
+herido             missing
 fallecido          deceased
 *cualquier otro*   unknown
 
@@ -73,13 +78,15 @@ FUENTE_LABEL = "encuentralos.tecnosoft.dev"
 DEFAULT_TRUST_TIER = "C"   # voluntario/comunidad con ownership visible
 
 # Mapeo de los valores de status que devuelve la API al enum de Person.
+# encontrado/herido colapsan a "missing": el enum person_status desplegado no
+# tiene found/injured (el proyecto decidio no rastrearlos como estados propios).
 _STATUS_MAP: dict[str, str] = {
     "desaparecido":  "missing",
     "desaparecida":  "missing",
-    "encontrado":    "found",
-    "encontrada":    "found",
-    "herido":        "injured",
-    "herida":        "injured",
+    "encontrado":    "missing",
+    "encontrada":    "missing",
+    "herido":        "missing",
+    "herida":        "missing",
     "fallecido":     "deceased",
     "fallecida":     "deceased",
     "muerto":        "deceased",
