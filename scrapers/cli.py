@@ -141,6 +141,12 @@ def _cmd_materialize(args: argparse.Namespace) -> None:
         f"{result.events_seeded} eventos sembrados, "
         f"{result.events_skipped} aportes 'event' omitidos"
     )
+    if result.cursor_table_missing:
+        print(
+            "WARN materializer: silver_materialize_state ausente; corriendo scan "
+            "completo cada vez (aplicar el DDL pendiente en Supabase)",
+            file=sys.stderr,
+        )
     for err in result.errors:
         print(f"WARN materializer: {err}", file=sys.stderr)
 
