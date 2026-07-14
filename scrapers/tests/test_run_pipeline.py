@@ -39,7 +39,7 @@ from scrapers.models.source import SourceConfig
 from scrapers.pipelines import run_pipeline as rp
 from scrapers.pipelines.run_pipeline import _get_adapter, run_pipeline
 from scrapers.exporters.quarantine_exporter import (
-   
+    REASON_CODES as QUARANTINE_REASON_CODES,
     QuarantineRecord,
 )
 
@@ -1778,6 +1778,52 @@ sources:
                 run_pipeline(config_path=demo_config, output_dir=tmp_path / "out")
         for rec in caplog.records:
             assert marker not in rec.getMessage()
+
+
+# ---------------------------------------------------------------------------
+# PII cruda en `unmapped` -> cuarentena (regresion: reason_code valido)
+# ---------------------------------------------------------------------------
+
+
+class TestUnmappedPiiQuarantine:
+    """`_check_unmapped_pii` debe enrutar a cuarentena con un reason_code que el
+    exporter acepte. Un reason_code fuera de REASON_CODES haria que
+    ``QuarantineRecord.validate()`` lanzara y el registro se perdiera en
+    silencio (viola "nada se descarta en silencio")."""
+
+    def test_raw_pii_in_unmapped_is_quarantined_with_valid_reason_code(self) -> None:
+        source = _api_source("https://example.org/x")
+        errors: list[str] = []
+        quarantine_batch: list[QuarantineRecord] = []
+        rec = {"nombre": "REDACTED", "unmapped": {"tel": "0414-1234567"}}
+
+        clean = rp._check_unmapped_pii([rec], errors, source, quarantine_batch)
+
+        # El registro con PII cruda NO pasa a staging.
+        assert clean == []
+        assert len(quarantine_batch) == 1
+        qrec = quarantine_batch[0]
+        assert qrec.reason_code == "pii_untreatable"
+        assert qrec.risk_level == "high"
+        # Guarda de regresion: el registro debe ser aceptable para el exporter,
+        # de lo contrario quarantine_many lo convertiria en error y se perderia.
+        qrec.validate()  # no debe lanzar
+        assert qrec.reason_code in QUARANTINE_REASON_CODES
+        # La traza del campo `unmapped` se conserva en el detalle.
+        assert "unmapped" in (qrec.reason_detail or "")
+        # El preview no filtra el telefono en claro.
+        assert "0414-1234567" not in (qrec.payload_preview_redacted or "")
+
+    def test_clean_unmapped_passes_through(self) -> None:
+        source = _api_source("https://example.org/x")
+        errors: list[str] = []
+        quarantine_batch: list[QuarantineRecord] = []
+        rec = {"nombre": "REDACTED", "unmapped": {"color_ojos": "cafe"}}
+
+        clean = rp._check_unmapped_pii([rec], errors, source, quarantine_batch)
+
+        assert clean == [rec]
+        assert quarantine_batch == []
 
 
 # ---------------------------------------------------------------------------

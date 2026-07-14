@@ -652,8 +652,9 @@ def _check_unmapped_pii(
 ) -> list[dict]:
     """Scan the `unmapped` dict in each record for raw PII before export.
 
-    If raw PII is found the record is quarantined (pii_in_unmapped, high risk)
-    and excluded from staging. Records where unmapped is absent, empty, or
+    If raw PII is found the record is quarantined (pii_untreatable, high risk;
+    detail records that the PII was in the `unmapped` field) and excluded from
+    staging. Records where unmapped is absent, empty, or
     contains only masked/non-PII values pass through unchanged.
     """
     clean: list[dict] = []
@@ -676,7 +677,7 @@ def _check_unmapped_pii(
                 _quarantine_from_text(
                     source=source,
                     text=_to_text(rec),
-                    reason_code="pii_in_unmapped",
+                    reason_code="pii_untreatable",
                     risk_level="high",
                     detail=detail,
                 )
