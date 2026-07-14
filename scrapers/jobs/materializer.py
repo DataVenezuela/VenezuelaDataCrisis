@@ -32,9 +32,12 @@ perder las filas buenas del lote.
 Espeja el patron de ``ProvenanceExporter`` / ``StagingExporter``: reusa
 ``StagingConfig`` (mismas SUPABASE_*), el ``httpx.Client`` es inyectable para
 tests sin red, entra en dry-run silencioso si falta la config, exige HTTPS y no
-sigue redirects, y reintenta con backoff en status transitorios. El rol
-``scraper_ingest`` necesita SELECT sobre ``aportes`` e INSERT sobre ``events`` /
-``persons`` / ``acopio_centers``.
+sigue redirects, y reintenta con backoff en status transitorios. El rol activo
+depende del JWT que ``StagingConfig.from_env()`` resuelva:
+``SUPABASE_CONSOLIDATION_JWT`` => ``consolidation_job`` (el caso real en
+``consolidate.yml``, que tiene prioridad) o ``SUPABASE_INGEST_JWT`` =>
+``scraper_ingest`` (fallback). Ese rol necesita SELECT sobre ``aportes`` e
+INSERT sobre ``events`` / ``persons`` / ``acopio_centers``.
 
 Seguridad: ``raw_json`` puede llevar PII (``full_name``, ``cedula_masked``). Este
 job NUNCA la loguea: solo ids de aporte, conteos y status HTTP.
@@ -63,6 +66,17 @@ _ACOPIO_UPSERT_PATH = "/rest/v1/acopio_centers?on_conflict=acopio_id"
 # del PR), se degrada a scan completo (Part A ya lo hace terminar dentro del cron).
 _CURSOR_PATH = "/rest/v1/silver_materialize_state"
 _CURSOR_UPSERT_PATH = "/rest/v1/silver_materialize_state?on_conflict=singleton"
+
+# Hint compartido para errores 401/403: el rol Postgres que ejecuta las queries
+# depende del JWT que StagingConfig.from_env() resolvio, NO es siempre
+# scraper_ingest. En consolidate.yml solo hay SUPABASE_CONSOLIDATION_JWT, asi que
+# el materializer corre como consolidation_job (el incidente de silver_materialize_state
+# de 2026-07 se diagnostico mal justo porque el mensaje culpaba a scraper_ingest).
+_ROLE_HINT = (
+    "verificar GRANT/POLICY del rol del JWT activo "
+    "(SUPABASE_CONSOLIDATION_JWT => consolidation_job, tiene prioridad; "
+    "SUPABASE_INGEST_JWT => scraper_ingest)"
+)
 
 # events.event_type es integer NOT NULL. Fase 1 tiene un unico evento real (el
 # terremoto del 2026-06-24), asi que se siembra con este codigo fijo. No hay aun
@@ -245,8 +259,8 @@ class SilverMaterializer:
         resp = self._client.get(_APORTES_PATH, params=params)
         if resp.status_code in (401, 403):
             raise PermissionError(
-                f"fetch aportes: sin permiso (status {resp.status_code}); verificar "
-                "SUPABASE_INGEST_JWT y el grant SELECT del rol scraper_ingest sobre aportes"
+                f"fetch aportes: sin permiso (status {resp.status_code}); "
+                f"{_ROLE_HINT} — grant SELECT sobre aportes"
             )
         if resp.status_code != 200:
             log.warning("fetch aportes: status inesperado %s (cursor=%s)", resp.status_code, cursor)
@@ -286,8 +300,9 @@ class SilverMaterializer:
         if resp.status_code in (401, 403):
             log.warning(
                 "materializer: sin permiso para leer el cursor (status %s); scan completo "
-                "(verificar GRANT/POLICY del rol scraper_ingest sobre silver_materialize_state)",
+                "(%s sobre silver_materialize_state)",
                 resp.status_code,
+                _ROLE_HINT,
             )
             self._cursor_unavailable = True
             self._cursor_permission_denied = True
@@ -337,8 +352,9 @@ class SilverMaterializer:
             log.warning(
                 "materializer: sin permiso para persistir el cursor (status %s); "
                 "sin paginado incremental el resto de esta corrida "
-                "(verificar GRANT/POLICY del rol scraper_ingest sobre silver_materialize_state)",
+                "(%s sobre silver_materialize_state)",
                 resp.status_code,
+                _ROLE_HINT,
             )
             self._cursor_unavailable = True
             self._cursor_permission_denied = True
@@ -383,8 +399,7 @@ class SilverMaterializer:
             # Fallamos rapido, igual que _fetch_aportes_page.
             raise PermissionError(
                 f"seed events {event_id}: sin permiso (status {resp.status_code}); "
-                "verificar SUPABASE_INGEST_JWT y el grant INSERT del rol scraper_ingest "
-                "sobre la tabla events"
+                f"{_ROLE_HINT} — grant INSERT sobre la tabla events"
             )
         if resp is None or resp.status_code not in (200, 201):
             result.errors.append(

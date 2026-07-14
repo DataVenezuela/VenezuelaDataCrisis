@@ -150,7 +150,9 @@ def _cmd_materialize(args: argparse.Namespace) -> None:
     if result.cursor_permission_denied:
         print(
             "WARN materializer: sin permiso sobre silver_materialize_state; corriendo "
-            "scan completo cada vez (verificar GRANT/POLICY del rol scraper_ingest)",
+            "scan completo cada vez (verificar GRANT/POLICY del rol del JWT activo: "
+            "SUPABASE_CONSOLIDATION_JWT => consolidation_job, tiene prioridad; "
+            "SUPABASE_INGEST_JWT => scraper_ingest)",
             file=sys.stderr,
         )
     for err in result.errors:
