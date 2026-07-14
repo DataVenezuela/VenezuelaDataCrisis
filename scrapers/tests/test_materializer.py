@@ -670,3 +670,15 @@ class TestIncrementalCursor:
         assert len(t.persons) == 2
         assert r2.persons_projected == 2
         assert t.cursor_row is not None
+
+    def test_flags_cursor_table_missing_when_absent(self) -> None:
+        # _FakeSupabase (sin override) responde 404 a silver_materialize_state:
+        # el resultado debe declararlo, no solo degradar en silencio.
+        t = _FakeSupabase([_person_aporte("ap-1")])
+        r = _materializer(t).materialize(event_id=_EVENT_ID)
+        assert r.cursor_table_missing is True
+
+    def test_does_not_flag_cursor_table_missing_when_present(self) -> None:
+        t = _CursorFake([_person_aporte("ap-1")])
+        r = _materializer(t).materialize(event_id=_EVENT_ID)
+        assert r.cursor_table_missing is False

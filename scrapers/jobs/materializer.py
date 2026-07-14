@@ -128,6 +128,7 @@ class MaterializeResult:
     events_seeded: int = 0
     events_skipped: int = 0
     errors: list[str] = field(default_factory=list)
+    cursor_table_missing: bool = False
 
 
 def _typed_payload(raw: dict[str, object], fields: tuple[str, ...]) -> dict[str, object]:
@@ -435,6 +436,7 @@ class SilverMaterializer:
         except PermissionError as exc:
             log.error("%s", exc)
             result.errors.append(str(exc))
+        result.cursor_table_missing = self._cursor_unavailable
         return result
 
     def _project_page(
