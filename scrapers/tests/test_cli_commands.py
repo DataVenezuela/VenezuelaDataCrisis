@@ -202,57 +202,63 @@ class TestConsolidate:
     # completa evita que un futuro cambio a formato thin haga que load_sources
     # lance ValueError (SUPABASE_* ausentes en CI), que _cmd_materialize traga
     # antes de imprimir "Materializer:", rompiendo el test sin mensaje obvio.
-    def test_consolidate_without_data(self, tmp_path: Path) -> None:
-        result = _run_cli(
-            "consolidate", "--config", str(_SAMPLE_CONFIG), "--output-dir", str(tmp_path)
-        )
-        assert result.returncode == 0
-        assert "No hay" in result.stdout
-
-    def test_consolidate_with_empty_events(self, tmp_path: Path) -> None:
-        (tmp_path / "events.jsonl").write_text("")
-        result = _run_cli(
-            "consolidate", "--config", str(_SAMPLE_CONFIG), "--output-dir", str(tmp_path)
-        )
-        assert result.returncode == 0
-
+    #
+    # Ninguno de estos tests setea SUPABASE_*, asi que las 3 etapas (materializer,
+    # auto-merge Event/Acopio, candidatos Person) corren en su modo no-op/dry-run
+    # implicito (FakeInMemoryAdapter / PersonConsolidationConfig.from_env() -> None):
+    # cero red, cero writes, deterministico.
     def test_materializer_runs_as_first_stage(self, tmp_path: Path) -> None:
-        # El materializer (etapa 1) corre siempre, antes de la generacion de
-        # aristas; en dry-run (sin SUPABASE_*) es un no-op silencioso.
+        # El materializer (etapa 1) corre siempre, antes de las etapas de
+        # consolidacion; en dry-run (sin SUPABASE_*) es un no-op silencioso.
         result = _run_cli(
             "consolidate", "--config", str(_SAMPLE_CONFIG), "--output-dir", str(tmp_path)
         )
         assert result.returncode == 0
         assert "Materializer:" in result.stdout
 
-    def test_dry_run_does_not_write_events(self, tmp_path: Path) -> None:
-        event = {"event_type": "flood", "description": "Inundación ficticia", "fuente": "test"}
-        (tmp_path / "events.jsonl").write_text(json.dumps(event) + "\n")
+    def test_automerge_stages_run_for_event_and_acopio(self, tmp_path: Path) -> None:
+        # Etapa 2: sin SUPABASE_*, build_port() cae a FakeInMemoryAdapter (vacio),
+        # asi que cada entity_type reporta un summary en cero, sin tocar la red.
+        result = _run_cli(
+            "consolidate", "--config", str(_SAMPLE_CONFIG), "--output-dir", str(tmp_path)
+        )
+        assert result.returncode == 0
+        assert "Consolidation[Event]:" in result.stdout
+        assert "Consolidation[AcopioCenter]:" in result.stdout
 
+    def test_person_stage_skipped_without_credentials(self, tmp_path: Path) -> None:
+        # Etapa 3: sin SUPABASE_*, PersonConsolidationConfig.from_env() es None,
+        # asi que la etapa se omite explicitamente en vez de intentar un write.
+        result = _run_cli(
+            "consolidate", "--config", str(_SAMPLE_CONFIG), "--output-dir", str(tmp_path)
+        )
+        assert result.returncode == 0
+        assert "Consolidation[Person]: sin credenciales Supabase, omitido" in result.stdout
+
+    def test_dry_run_skips_person_stage_entirely(self, tmp_path: Path) -> None:
+        # run_person_consolidation no soporta dry-run propio, asi que --dry-run
+        # omite la etapa Person por completo (nunca llega a preguntar por
+        # credenciales) en vez de arriesgar un write real pese al flag.
         result = _run_cli(
             "consolidate", "--dry-run",
             "--config", str(_SAMPLE_CONFIG),
             "--output-dir", str(tmp_path),
         )
         assert result.returncode == 0
-        assert "dry-run" in result.stdout
-        assert not (tmp_path / "consolidated").exists(), "dry-run no debe crear consolidated/"
-
-    def test_consolidation_writes_to_consolidated_subdir(self, tmp_path: Path) -> None:
-        event = {"event_type": "flood", "description": "Inundación ficticia", "fuente": "test"}
-        (tmp_path / "events.jsonl").write_text(json.dumps(event) + "\n")
-
-        result = _run_cli(
-            "consolidate",
-            "--config", str(_SAMPLE_CONFIG),
-            "--output-dir", str(tmp_path),
-        )
-        assert result.returncode == 0
-        assert (tmp_path / "consolidated" / "events.jsonl").exists()
+        assert "Consolidation[Person]: omitido en --dry-run" in result.stdout
+        assert "sin credenciales Supabase" not in result.stdout
 
     def test_dry_run_flag_accepted(self, tmp_path: Path) -> None:
         result = _run_cli(
             "consolidate", "--dry-run",
+            "--config", str(_SAMPLE_CONFIG),
+            "--output-dir", str(tmp_path),
+        )
+        assert result.returncode == 0
+
+    def test_batch_size_flag_accepted(self, tmp_path: Path) -> None:
+        result = _run_cli(
+            "consolidate", "--batch-size", "10",
             "--config", str(_SAMPLE_CONFIG),
             "--output-dir", str(tmp_path),
         )

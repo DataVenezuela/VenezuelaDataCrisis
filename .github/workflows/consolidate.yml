@@ -56,13 +56,6 @@ jobs:
             --config scrapers/config/sources.custom.yaml \
             2>&1 | tee consolidation.log
 
-      - name: Upload consolidation output
-        uses: actions/upload-artifact@v4
-        with:
-          name: consolidation-output
-          path: scrapers/runtime_output/consolidated
-          retention-days: 7
-
       - name: Upload consolidation log
         if: always()
         uses: actions/upload-artifact@v4

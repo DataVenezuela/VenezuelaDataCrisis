@@ -160,53 +160,64 @@ def _cmd_materialize(args: argparse.Namespace) -> None:
 
 
 def _cmd_consolidate(args: argparse.Namespace) -> None:
-    from scrapers.dedup.deduplicator import deduplicate_typed_entities
-    from scrapers.models import AcopioCenter, Event
+    """Consolidacion completa: materializer + auto-merge Event/Acopio + candidatos Person.
+
+    Etapa 1: materializer (aportes -> persons/acopio_centers silver).
+    Etapa 2: auto-merge exacto de Event/AcopioCenter por `dedup_hash` via
+    `consolidation_job.consolidate_entity_type` (#91). En --dry-run solo
+    loguea el plan, no upserta ni marca.
+    Etapa 3: candidatos de dedup para Person hacia `dedup_candidates` via
+    `consolidation_job.run_person_consolidation` (#92). Person nunca
+    auto-funde: solo emite candidatos `pending` para revision humana.
+    `run_person_consolidation` no tiene modo dry-run propio (escribiria
+    candidatos reales pese al flag), asi que en --dry-run esta etapa se omite
+    por completo en vez de arriesgar un write no deseado.
+    """
+    from scrapers.jobs.consolidation_job import (
+        AUTOMERGE_ENTITY_TYPES,
+        PersonConsolidationConfig,
+        build_port,
+        consolidate_entity_type,
+        run_person_consolidation,
+    )
 
     dry_run: bool = getattr(args, "dry_run", False)
+    batch_size: int = getattr(args, "batch_size", 500)
 
     # Etapa 1: materializer (aportes -> silver tipado). Independiente de la
     # generacion de aristas; solo comparte la cadencia del cron.
     _cmd_materialize(args)
 
-    output_dir = Path(args.output_dir)
-    events_path = output_dir / "events.jsonl"
+    # Etapa 2: auto-merge exacto Event/AcopioCenter por dedup_hash.
+    port = build_port()
+    try:
+        for entity_type in AUTOMERGE_ENTITY_TYPES:
+            summary = consolidate_entity_type(
+                port=port,
+                entity_type=entity_type,
+                batch_size=batch_size,
+                dry_run=dry_run,
+            )
+            print(f"Consolidation[{entity_type}]: {summary}")
+    finally:
+        port.close()
 
-    if not events_path.exists():
-        print("No hay events.jsonl para consolidar")
+    # Etapa 3: candidatos Person -> dedup_candidates (nunca auto-funde).
+    if dry_run:
+        print("Consolidation[Person]: omitido en --dry-run (run_person_consolidation no soporta dry-run)")
         return
 
-    records: list[dict] = []
-    with open(events_path) as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                records.append(json.loads(line))
-
-    if not records:
-        print("0 registros para consolidar")
+    person_config = PersonConsolidationConfig.from_env(batch_size=batch_size)
+    if person_config is None:
+        print("Consolidation[Person]: sin credenciales Supabase, omitido")
         return
 
-    events: list[Event | AcopioCenter] = []
-    for rec in records:
-        try:
-            events.append(Event(**rec))
-        except Exception as exc:
-            print(f"WARN: registro no se pudo parsear como Event: {exc}", file=sys.stderr)
-
-    if events:
-        deduped, n_removed = deduplicate_typed_entities(events)
-        if not dry_run:
-            consolidated_dir = output_dir / "consolidated"
-            consolidated_dir.mkdir(exist_ok=True)
-            lines = [json.dumps(e.model_dump(mode="json"), ensure_ascii=False) for e in deduped]
-            (consolidated_dir / "events.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
-        print(
-            f"Consolidación{'(dry-run)' if dry_run else ''}: "
-            f"{len(records)} → {len(deduped)} eventos ({n_removed} duplicados)"
-        )
-    else:
-        print("0 eventos válidos para consolidar")
+    result = run_person_consolidation(person_config)
+    print(
+        f"Consolidation[Person]: {result.records_read} aportes leidos, "
+        f"{result.candidates_inserted_or_updated} candidatos, "
+        f"{len(result.errors)} errores"
+    )
 
 
 def main() -> None:
@@ -264,7 +275,13 @@ def main() -> None:
     consolidate_cmd.add_argument(
         "--dry-run",
         action="store_true",
-        help="Calcula el plan de deduplicacion pero no escribe eventos.jsonl.",
+        help=(
+            "Solo loguea el plan de auto-merge Event/AcopioCenter; no upserta "
+            "ni marca nada. Omite por completo la etapa de candidatos Person."
+        ),
+    )
+    consolidate_cmd.add_argument(
+        "--batch-size", type=int, default=500, help="Aportes por batch (default: 500)"
     )
 
     args = parser.parse_args()
