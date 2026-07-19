@@ -94,10 +94,21 @@ def test_aportes_tiene_columnas_que_el_adapter_lee() -> None:
             f"columna aportes.{column} usada por el adapter NO existe en el "
             f"schema real; columnas: {sorted(aportes_cols)}"
         )
-    # Filtros clave del fetch / mark tambien deben ser columnas reales.
-    assert "consolidated_at" in aportes_cols
+    # Columnas del cursor keyset (created_at, id) y del filtro por tipo deben ser
+    # reales: son los unicos campos que la paginacion de fetch_aportes_page usa.
     assert "entity_type" in aportes_cols
     assert "id" in aportes_cols
+    assert "created_at" in aportes_cols
+
+
+def test_aportes_consolidated_at_ausente_en_schema_real() -> None:
+    # DOCUMENTADO: el schema DESPLEGADO no tiene aportes.consolidated_at (probe en
+    # vivo 2026-07-19: GET ...consolidated_at=is.null -> 400 42703). La
+    # consolidacion NO la usa (pagina por cursor keyset, no por estado). Este test
+    # fija ese hecho: si una migracion futura la agrega y se actualiza el fixture,
+    # rompe y avisa que el adapter puede volver a referenciarla.
+    aportes_cols = _columns_of_table(_read_schema(), "aportes")
+    assert "consolidated_at" not in aportes_cols
 
 
 def test_aportes_trust_tier_ausente_en_schema_real() -> None:

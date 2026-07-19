@@ -44,11 +44,18 @@ class ConsolidationDataPort(Protocol):
     otro dev y su consolidacion exige revision humana (nunca auto-merge).
     """
 
-    def fetch_unconsolidated(self, entity_type: str, batch_size: int) -> list[Record]:
-        """Devuelve hasta ``batch_size`` aportes NO consolidados de ``entity_type``.
+    def fetch_aportes_page(
+        self, entity_type: str, batch_size: int, cursor: tuple[str, str]
+    ) -> list[Record]:
+        """Devuelve hasta ``batch_size`` aportes de ``entity_type`` tras ``cursor``.
 
-        El orden debe ser estable entre llamadas para que la seleccion de
-        ganador sea determinista. Una lista vacia indica que no queda pendiente.
+        Pagina por cursor keyset ``(created_at, id)``: devuelve las filas cuyo
+        ``(created_at, id)`` es estrictamente mayor que ``cursor``, ordenadas
+        ascendentemente por ese par (orden total estable => ``pick_winner``
+        determinista). NO filtra por ``consolidated_at`` (columna inexistente en
+        el schema real): el cursor es lo unico que pagina y cada corrida re-escanea
+        el set completo desde ``cursor=("", "")`` (o el sentinela inicial). Una
+        lista vacia indica que no quedan mas filas tras el cursor.
         """
         ...
 
@@ -57,13 +64,6 @@ class ConsolidationDataPort(Protocol):
 
         Idempotente por ``dedup_hash``: re-upsertar el mismo hash con el mismo
         ganador no debe duplicar filas.
-        """
-        ...
-
-    def mark_consolidated(self, aporte_ids: list[str]) -> None:
-        """Marca los aportes ``aporte_ids`` como consolidados (consolidated_at).
-
-        Idempotente: re-marcar un aporte ya consolidado no es un error.
         """
         ...
 
@@ -91,35 +91,38 @@ class ConsolidationDataPort(Protocol):
 class FakeInMemoryAdapter:
     """Implementacion en memoria de `ConsolidationDataPort` para tests offline.
 
-    Guarda los aportes, las filas canonicas (indexadas por (entity_type,
-    dedup_hash)) y el conjunto de aportes consolidados. Sin red ni DB real.
+    Guarda los aportes y las filas canonicas (indexadas por (entity_type,
+    dedup_hash)). Sin red ni DB real.
 
     Semantica clave para los tests de #91:
-      - ``fetch_unconsolidated`` solo devuelve aportes de ese tipo cuyo id NO
-        esta en ``consolidated_ids`` (incremental / idempotente al re-correr).
+      - ``fetch_aportes_page`` pagina por cursor keyset ``(created_at, id)``:
+        devuelve las filas del tipo cuyo par es estrictamente mayor que el cursor,
+        ordenadas ascendentemente. NO hay estado de "consolidado"; cada corrida
+        re-escanea desde el cursor inicial (idempotencia via ``upsert_canonical``).
       - ``upsert_canonical`` reemplaza por (entity_type, dedup_hash): una sola
         fila canonica por hash sin importar cuantas veces se upserte.
-      - ``mark_consolidated`` acumula ids en un set (re-marcar no duplica).
     """
 
     def __init__(self, aportes: list[Record] | None = None) -> None:
         self.aportes: list[Record] = list(aportes or [])
         # Fila canonica por (entity_type, dedup_hash).
         self.canonical: dict[tuple[str, str], Record] = {}
-        # Ids de aportes ya consolidados.
-        self.consolidated_ids: set[str] = set()
-        # Contadores de auditoria para asserts en tests.
+        # Contador de auditoria para asserts en tests.
         self.upsert_calls: int = 0
-        self.mark_calls: int = 0
 
-    def fetch_unconsolidated(self, entity_type: str, batch_size: int) -> list[Record]:
-        pending = [
-            rec
-            for rec in self.aportes
-            if rec.get("entity_type") == entity_type
-            and str(rec.get("id")) not in self.consolidated_ids
-        ]
-        return pending[:batch_size]
+    @staticmethod
+    def _keyset(rec: Record) -> tuple[str, str]:
+        return (str(rec.get("created_at", "")), str(rec.get("id", "")))
+
+    def fetch_aportes_page(
+        self, entity_type: str, batch_size: int, cursor: tuple[str, str]
+    ) -> list[Record]:
+        ordered = sorted(
+            (rec for rec in self.aportes if rec.get("entity_type") == entity_type),
+            key=self._keyset,
+        )
+        after = [rec for rec in ordered if self._keyset(rec) > cursor]
+        return after[:batch_size]
 
     def upsert_canonical(self, entity_type: str, record: Record) -> None:
         dedup_hash = record.get("dedup_hash")
@@ -127,10 +130,6 @@ class FakeInMemoryAdapter:
             raise ValueError("upsert_canonical requiere un dedup_hash no vacio")
         self.canonical[(entity_type, dedup_hash)] = record
         self.upsert_calls += 1
-
-    def mark_consolidated(self, aporte_ids: list[str]) -> None:
-        self.consolidated_ids.update(aporte_ids)
-        self.mark_calls += 1
 
     def fetch_person_candidates(self, block_keys: list[str]) -> list[Record]:
         if not block_keys:
@@ -140,7 +139,6 @@ class FakeInMemoryAdapter:
             rec
             for rec in self.aportes
             if rec.get("entity_type") == "Person"
-            and str(rec.get("id")) not in self.consolidated_ids
             and any(k in key_set for k in (rec.get("block_keys") or []))
         ]
 

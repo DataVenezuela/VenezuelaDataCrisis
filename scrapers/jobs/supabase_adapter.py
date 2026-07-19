@@ -34,7 +34,7 @@ DEPENDENCIA DE BACKEND (critico)
 Este auth depende de una migracion de backend (en DataVenezuela/dataVenezuela)
 que cree el rol ``consolidation_job`` (NOBYPASSRLS + grant al authenticator +
 policies dedicadas TO consolidation_job sobre events/acopio_centers/
-dedup_candidates/dedup_decisions y aportes.consolidated_at) y de la credencial
+dedup_candidates/dedup_decisions y SELECT sobre aportes) y de la credencial
 ``SUPABASE_CONSOLIDATION_JWT``, ambos AUN INEXISTENTES. Sin esa migracion los
 requests contra Supabase real dan permission-denied. El cambio de credencial NO
 altera el criterio de winner-selection/trust_tier ni el schema.
@@ -43,7 +43,7 @@ FIDELIDAD DE SCHEMA (critico)
 -----------------------------
 El mapeo se construye contra el schema REAL del backend
 (DataVenezuela/dataVenezuela supabase/migrations 0001/0004/0008/0009), NO contra
-supuestos. Ver ``_CANONICAL_COLUMNS`` y ``fetch_unconsolidated`` para las
+supuestos. Ver ``_CANONICAL_COLUMNS`` y ``fetch_aportes_page`` para las
 columnas exactas. IMPORTANTE: ``aportes.trust_tier`` NO existe en ninguna
 migracion publicada; la decision del equipo (tier como columna de aportes,
 A=1..D=4, menor gana) DEPENDE de una migracion de backend aun pendiente. El
@@ -62,7 +62,7 @@ from dataclasses import dataclass
 
 import httpx
 
-from scrapers.adapters._shared import backoff_delay, now_utc
+from scrapers.adapters._shared import backoff_delay
 from scrapers.adapters.http_client import USER_AGENT
 from scrapers.jobs.ports import Record
 
@@ -151,9 +151,6 @@ _MISSING_TRUST_TIER = ""
 _RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
 _MAX_RETRIES = 4
 _DEFAULT_TIMEOUT = 30.0
-# Tamano de chunk para el PATCH de mark_consolidated: acota el largo de la URL
-# (id=in.(...)) para no pasarse del limite practico de PostgREST.
-_MARK_CHUNK_SIZE = 100
 
 
 @dataclass(frozen=True)
@@ -335,23 +332,32 @@ class SupabaseConsolidationAdapter:
 
     # -- ConsolidationDataPort ------------------------------------------------
 
-    def fetch_unconsolidated(self, entity_type: str, batch_size: int) -> list[Record]:
-        """GET aportes NO consolidados de ``entity_type``, orden estable.
+    def fetch_aportes_page(
+        self, entity_type: str, batch_size: int, cursor: tuple[str, str]
+    ) -> list[Record]:
+        """GET una pagina de aportes de ``entity_type`` tras ``cursor``, orden estable.
 
-        Filtra ``consolidated_at=is.null`` y ``entity_type=eq.<slug>``, ordena por
-        ``created_at.asc,id.asc`` (orden total estable => pick_winner determinista)
-        y limita a ``batch_size``. El job es incremental: cada batch se relee tras
-        marcar el anterior, asi que basta el filtro por consolidated_at (no hay
-        cursor keyset explicito, igual que el flujo Event/Acopio del FakeAdapter).
+        Pagina por cursor keyset ``(created_at, id)``: filtra ``entity_type=eq.<slug>``
+        y ``(created_at, id) > cursor`` (via ``or=(created_at.gt.X,and(created_at.eq.X,
+        id.gt.Y))``), ordena por ``created_at.asc,id.asc`` (orden total estable =>
+        pick_winner determinista) y limita a ``batch_size``. NO filtra por
+        ``consolidated_at`` (columna inexistente en el schema real, ver
+        docs/schema.md): el cursor es lo unico que pagina y el caller re-escanea el
+        set completo desde el sentinela inicial en cada corrida. La idempotencia la
+        da ``upsert_canonical`` (on_conflict=dedup_hash).
         """
         slug, _ = _entity_tables(entity_type)
+        last_created_at, last_id = cursor
         resp = self._request_with_retry(
             "GET",
             _APORTES_PATH,
             params={
                 "select": "*",
-                "consolidated_at": "is.null",
                 "entity_type": f"eq.{slug}",
+                "or": (
+                    f"(created_at.gt.{last_created_at},"
+                    f"and(created_at.eq.{last_created_at},id.gt.{last_id}))"
+                ),
                 "order": "created_at.asc,id.asc",
                 "limit": str(batch_size),
             },
@@ -381,27 +387,6 @@ class SupabaseConsolidationAdapter:
         )
         resp.raise_for_status()
 
-    def mark_consolidated(self, aporte_ids: list[str]) -> None:
-        """PATCH aportes ``aporte_ids`` -> consolidated_at=now (en chunks).
-
-        Idempotente: re-marcar un aporte ya consolidado reescribe el timestamp sin
-        error. Se chunkea para no pasar el limite practico de largo de URL de
-        ``id=in.(...)``.
-        """
-        if not aporte_ids:
-            return
-        now = now_utc()
-        for start in range(0, len(aporte_ids), _MARK_CHUNK_SIZE):
-            chunk = aporte_ids[start : start + _MARK_CHUNK_SIZE]
-            ids = ",".join(chunk)
-            resp = self._request_with_retry(
-                "PATCH",
-                f"{_APORTES_PATH}?id=in.({ids})",
-                json={"consolidated_at": now},
-                headers={"Prefer": "return=minimal"},
-            )
-            resp.raise_for_status()
-
     # -- Person: candidatos por block keys para el scorer (#92) ---------------
 
     def fetch_person_candidates(
@@ -410,8 +395,10 @@ class SupabaseConsolidationAdapter:
     ) -> list[Record]:
         """GET aportes de tipo person cuyo block_keys solapa con los dados.
 
-        Filtra entity_type='person', consolidated_at IS NULL, y block_keys
-        contiene al menos una de las claves dadas (OR sobre cs PostgREST).
+        Filtra entity_type='person' y block_keys contiene al menos una de las
+        claves dadas (OR sobre cs PostgREST). NO filtra por ``consolidated_at``
+        (columna inexistente en el schema real): el dedup DEBE ver todos los
+        aportes del bloque, incluidos los ya procesados en corridas previas.
         Si block_keys esta vacio devuelve lista vacia sin red.
 
         block_keys es jsonb (array de strings). PostgREST requiere sintaxis de
@@ -426,7 +413,6 @@ class SupabaseConsolidationAdapter:
             _APORTES_PATH,
             params={
                 "select": "*",
-                "consolidated_at": "is.null",
                 "entity_type": "eq.person",
                 "or": f"({cs_clauses})",
             },

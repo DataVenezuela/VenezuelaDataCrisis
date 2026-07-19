@@ -13,11 +13,13 @@
 > emite la forma vieja (`*_person_record_id`, `priority` string, columna
 > `event_id`) y debe migrarse a esta forma antes de correr contra la BD real.
 >
-> **Hueco pendiente:** el cursor de §2 usa `aportes.consolidated_at`, que **no**
-> es una columna del `aportes` canónico (`docs/schema.md`). El código
-> (`consolidation_job.py`) sí la lee y escribe hoy. Es un hueco código-vs-canon a
-> cerrar contra `docs/schema.md` (añadir la columna al canon o cambiar el
-> mecanismo de cursor), a resolver junto con la migración de `aportes`.
+> **Resuelto (2026-07-19):** el cursor de §2 ya **no** usa
+> `aportes.consolidated_at` (columna inexistente en el `aportes` canónico,
+> `docs/schema.md`; un probe en vivo confirmó `400 42703`). El código
+> (`consolidation_job.py`) pagina ahora por cursor keyset puro `(created_at, id)`
+> y re-escanea el set completo en cada corrida; la idempotencia la da
+> `find_existing_candidates` (no re-inserta aristas ya presentes). No hay marcado
+> de estado en `aportes`.
 
 ---
 
@@ -29,16 +31,15 @@ El consolidation job para Person lee de `aportes` en Supabase, agrupa registros 
 
 ## 2. Origen de datos
 
-> Nota de canon: `consolidated_at` **no** existe en el `aportes` canónico
-> (`docs/schema.md`). El mecanismo descrito abajo refleja el código actual, que
-> depende de esa columna; es un hueco código-vs-canon pendiente (ver el banner
-> de arriba), no parte del esquema canónico.
+> Nota de canon: la paginación usa **solo** el cursor keyset `(created_at, id)`,
+> columnas que sí existen en el `aportes` canónico (`docs/schema.md`). No se
+> filtra ni se escribe `consolidated_at` (columna inexistente).
 
-Lectura incremental con cursor blando desde `aportes`:
+Lectura por páginas con cursor keyset desde `aportes`:
 
 ```sql
 SELECT * FROM aportes
-WHERE consolidated_at IS NULL AND entity_type = 'person'
+WHERE entity_type = 'person'
   AND (created_at, id) > (:last_created_at, :last_id)
 ORDER BY created_at ASC, id ASC
 LIMIT :batch_size;
@@ -46,11 +47,14 @@ LIMIT :batch_size;
 
 - **Cursor inicial:** `('1970-01-01T00:00:00Z', '00000000-0000-0000-0000-000000000000')`
 - **Batch size default:** 500, configurable
-- **Avance del cursor:** después de cada batch, los aportes sanos se marcan
-  `consolidated_at = NOW()`. Si un candidato puntual falla, los aportes
-  relacionados con ese candidato no se marcan; el resto del batch puede avanzar.
-  El cursor se reconstruye desde el último id leído.
-- **Resiliencia:** si el job se cae, los registros con `consolidated_at = NULL` se re-encuentran en la próxima corrida. El cursor es en memoria, no persiste — no hace falta
+- **Avance del cursor:** después de cada página, el cursor avanza al último
+  `(created_at, id)` leído. No se marca ningún estado en `aportes`.
+- **Re-escaneo completo:** cada corrida parte del cursor inicial y recorre todo
+  el set. La idempotencia la da `find_existing_candidates`, que no re-inserta una
+  arista `(left, right, blocking_key)` ya presente. Ver el hueco de completitud
+  (blocking cross-página) en la nota al pie de §3.
+- **Resiliencia:** si el job se cae, la próxima corrida vuelve a recorrer todo
+  desde el inicio; nada queda a medias. El cursor es en memoria, no persiste.
 
 ---
 
@@ -76,6 +80,14 @@ Para cada persona, se generan hasta dos block keys:
   desde `event_id`, `cedula_hmac` y `phonetic_hash` para compatibilidad. En
   producción, `aportes.block_keys` es la fuente de verdad.
 - Una persona puede pertenecer a múltiples bloques (uno por cada block key)
+
+> **Hueco de completitud conocido (follow-up):** el blocking se arma por página
+> (`build_blocks` sobre un batch de `batch_size`), no sobre el set completo. Dos
+> personas del mismo bloque que caen en páginas distintas del cursor keyset no se
+> comparan en esa corrida. El re-escaneo completo por corrida (§2) no lo resuelve:
+> las páginas se recomponen igual entre corridas. Cerrar esto exige blocking sobre
+> el set completo (fetch server-side por block_keys, o acumulación en memoria).
+> Rastreado como seguimiento; no bloquea la meta de producir candidatos.
 
 ---
 

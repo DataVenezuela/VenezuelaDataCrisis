@@ -2,9 +2,10 @@
 
 Todo corre contra `FakeInMemoryAdapter`, sin red ni DB real. Cubre los
 criterios de aceptacion de #91: 3 aportes con el mismo dedup_hash producen 1
-fila canonica y los 3 quedan marcados; gana el de mayor tier; re-correr es
-idempotente; --dry-run no muta el fake; interrupcion+reintento procesa solo lo
-pendiente.
+fila canonica; gana el de menor tier; re-correr es idempotente (cada corrida
+re-escanea el set completo via cursor keyset y re-upserta el mismo ganador sin
+cambiar el resultado); --dry-run no muta el fake. NO hay estado de "consolidado":
+el schema real no tiene ``consolidated_at`` y la paginacion la lleva el cursor.
 """
 
 from __future__ import annotations
@@ -62,7 +63,7 @@ def test_fake_adapter_satisface_el_protocolo() -> None:
     assert isinstance(adapter, ConsolidationDataPort)
 
 
-def test_tres_aportes_mismo_hash_una_fila_y_tres_marcados() -> None:
+def test_tres_aportes_mismo_hash_una_fila() -> None:
     aportes = [_event_aporte(f"a{i}") for i in range(3)]
     adapter = FakeInMemoryAdapter(aportes)
 
@@ -70,11 +71,10 @@ def test_tres_aportes_mismo_hash_una_fila_y_tres_marcados() -> None:
 
     assert summary["groups"] == 1
     assert summary["aportes"] == 3
+    assert summary["upserts"] == 1
     # Una sola fila canonica por dedup_hash.
     assert len(adapter.canonical) == 1
     assert ("Event", _HASH) in adapter.canonical
-    # Los tres aportes quedan marcados como consolidados.
-    assert adapter.consolidated_ids == {"a0", "a1", "a2"}
 
 
 def test_gana_el_de_menor_tier() -> None:
@@ -91,8 +91,6 @@ def test_gana_el_de_menor_tier() -> None:
 
     canonical = adapter.canonical[("Event", _HASH)]
     assert canonical["winner_aporte_id"] == "alta"
-    # Aun asi los tres aportes del grupo quedan marcados.
-    assert adapter.consolidated_ids == {"baja", "alta", "media"}
 
 
 def test_recorrer_dos_veces_es_idempotente() -> None:
@@ -101,16 +99,16 @@ def test_recorrer_dos_veces_es_idempotente() -> None:
 
     first = consolidate_entity_type(adapter, "Event", batch_size=10)
     canonical_after_first = dict(adapter.canonical)
-    upserts_after_first = adapter.upsert_calls
 
     second = consolidate_entity_type(adapter, "Event", batch_size=10)
 
     assert first["groups"] == 1
-    # La segunda corrida no encuentra pendientes: no agrupa, no upserta, no marca.
-    assert second["groups"] == 0
-    assert second["upserts"] == 0
-    assert second["marked"] == 0
-    assert adapter.upsert_calls == upserts_after_first
+    # Sin estado de "consolidado", la segunda corrida RE-ESCANEA todo y re-upserta
+    # el mismo ganador (idempotente por on_conflict=dedup_hash): re-hacer el
+    # trabajo no cambia el resultado. La idempotencia es "mismo estado final",
+    # no "saltarse el trabajo ya hecho".
+    assert second["groups"] == 1
+    assert second["upserts"] == 1
     assert adapter.canonical == canonical_after_first
     assert len(adapter.canonical) == 1
 
@@ -124,16 +122,14 @@ def test_dry_run_no_muta_el_fake() -> None:
     # Se planifico el grupo pero NO se escribio nada.
     assert summary["groups"] == 1
     assert summary["upserts"] == 0
-    assert summary["marked"] == 0
     assert adapter.canonical == {}
-    assert adapter.consolidated_ids == set()
     assert adapter.upsert_calls == 0
-    assert adapter.mark_calls == 0
 
 
-def test_interrupcion_y_reintento_procesa_solo_lo_pendiente() -> None:
-    # Grupo 1 ya consolidado (simula una corrida previa interrumpida tras el
-    # primer grupo); grupo 2 pendiente.
+def test_corrida_previa_se_reprocesa_idempotente() -> None:
+    # Grupo 1 ya tenia su fila canonica (simula una corrida previa); grupo 2 es
+    # nuevo. Sin estado de "consolidado", la corrida RE-ESCANEA todo: reprocesa el
+    # grupo 1 (re-upsert idempotente, mismo ganador) y consolida el grupo 2.
     aportes = [
         _event_aporte("g1a", dedup_hash=_HASH),
         _event_aporte("g1b", dedup_hash=_HASH),
@@ -141,21 +137,18 @@ def test_interrupcion_y_reintento_procesa_solo_lo_pendiente() -> None:
         _event_aporte("g2b", dedup_hash=_HASH_B),
     ]
     adapter = FakeInMemoryAdapter(aportes)
-    adapter.mark_consolidated(["g1a", "g1b"])
-    # Simula que la fila canonica del grupo 1 ya existia.
+    # Simula que la fila canonica del grupo 1 ya existia de una corrida previa.
     adapter.canonical[("Event", _HASH)] = {"dedup_hash": _HASH, "winner_aporte_id": "g1a"}
-    marks_before = adapter.mark_calls
 
     summary = consolidate_entity_type(adapter, "Event", batch_size=10)
 
-    # Solo se procesa el grupo pendiente.
-    assert summary["groups"] == 1
-    assert summary["aportes"] == 2
-    assert adapter.consolidated_ids == {"g1a", "g1b", "g2a", "g2b"}
+    # Ambos grupos se procesan (re-escaneo completo).
+    assert summary["groups"] == 2
+    assert summary["aportes"] == 4
+    assert summary["upserts"] == 2
     assert len(adapter.canonical) == 2
+    assert ("Event", _HASH) in adapter.canonical
     assert ("Event", _HASH_B) in adapter.canonical
-    # No re-marca los ya consolidados del grupo 1.
-    assert adapter.mark_calls == marks_before + 1
 
 
 def test_batches_pequenos_procesan_todo() -> None:
@@ -172,13 +165,18 @@ def test_batches_pequenos_procesan_todo() -> None:
     assert summary["groups"] == 3
     assert summary["batches"] == 3
     assert len(adapter.canonical) == 3
-    assert adapter.consolidated_ids == {"h1", "h2", "h3"}
 
 
 def test_aportes_sin_dedup_hash_se_ignoran(caplog) -> None:
     aportes = [
         _event_aporte("ok"),
-        {"id": "sin_hash", "entity_type": "Event", "dedup_hash": None, "payload": {}},
+        {
+            "id": "sin_hash",
+            "entity_type": "Event",
+            "dedup_hash": None,
+            "created_at": "2026-06-24T14:00:00Z",
+            "payload": {},
+        },
     ]
     adapter = FakeInMemoryAdapter(aportes)
 
@@ -186,7 +184,7 @@ def test_aportes_sin_dedup_hash_se_ignoran(caplog) -> None:
     summary = consolidate_entity_type(adapter, "Event", batch_size=10)
 
     assert summary["groups"] == 1
-    assert adapter.consolidated_ids == {"ok"}
+    assert ("Event", _HASH) in adapter.canonical
     assert "sin_dedup_hash" in caplog.text
 
 
@@ -245,14 +243,14 @@ def test_fallo_de_grupo_no_aborta_los_sanos(caplog: pytest.LogCaptureFixture) ->
     summary = consolidate_entity_type(adapter, "Event", batch_size=10)
 
     # Los grupos sanos se consolidan; el que falla NO.
-    assert adapter.consolidated_ids == {"b1", "c1"}
     assert ("Event", "ha") not in adapter.canonical
     assert ("Event", "hb") in adapter.canonical
     assert ("Event", "hc") in adapter.canonical
     assert summary["upserts"] == 2
-    # El fallo se cuenta y se loguea (al menos una vez; el grupo fallido se
-    # re-lee en la ronda siguiente y se reintenta, ver known follow-up del PR).
-    assert summary["errors"] >= 1
+    # El fallo se cuenta y se loguea. El grupo fallido se reintenta en la proxima
+    # corrida (re-escaneo completo, upsert idempotente): una pagina mala no traba
+    # el avance del cursor.
+    assert summary["errors"] == 1
     assert "ha" in caplog.text
 
 
@@ -265,8 +263,6 @@ def test_fallo_de_unico_grupo_cuenta_error_sin_propagar() -> None:
 
     assert summary["errors"] == 1
     assert summary["upserts"] == 0
-    assert summary["marked"] == 0
-    assert adapter.consolidated_ids == set()
     assert adapter.canonical == {}
 
 
@@ -306,17 +302,19 @@ def test_fetch_person_candidates_retorna_aportes_con_block_key_solapante() -> No
     assert ids == {"fp1", "fp2"}
 
 
-def test_fetch_person_candidates_excluye_ya_consolidados() -> None:
+def test_fetch_person_candidates_incluye_todos_los_del_bloque() -> None:
+    # NO hay estado de "consolidado": el dedup DEBE ver todos los aportes del
+    # bloque (incluidos los procesados en corridas previas), o un duplicado nuevo
+    # nunca se compararia contra su par historico.
     aportes = [
         _fake_person("fp1", ["phon:ev1:abc"]),
         _fake_person("fp2", ["phon:ev1:abc"]),
     ]
     adapter = FakeInMemoryAdapter(aportes)
-    adapter.consolidated_ids.add("fp1")
     result = adapter.fetch_person_candidates(
         block_keys=["phon:ev1:abc"],
     )
-    assert [rec["id"] for rec in result] == ["fp2"]
+    assert {rec["id"] for rec in result} == {"fp1", "fp2"}
 
 
 def test_fetch_person_candidates_excluye_otros_entity_types() -> None:
@@ -442,7 +440,6 @@ def _person_aporte(
         "age_range": {"min": 25, "max": 35},
         "status": "missing",
         "created_at": created_at,
-        "consolidated_at": None,
     }
     if include_block_keys:
         row["block_keys"] = block_keys or [f"ced:{event_id}:same"]
@@ -599,18 +596,6 @@ def test_person_existing_candidate_is_idempotent_update() -> None:
     assert any("candidate_id=eq.cand-1" in url for url in transport.patch_urls)
 
 
-def test_person_mark_consolidated_error_is_reported() -> None:
-    rows = [
-        _person_aporte("a1", "person-1"),
-        _person_aporte("a2", "person-2"),
-    ]
-    transport = _PersonTransport([rows], mark_status=500)
-    result = run_person_consolidation(_person_config(), client=_person_client(transport))
-
-    assert result.mark_errors == 1
-    assert any(error.startswith("mark_error") for error in result.errors)
-
-
 @pytest.mark.parametrize("missing_field", ["blocking_key"])
 def test_person_invalid_candidate_payload_is_nonfatal(
     monkeypatch: pytest.MonkeyPatch,
@@ -652,12 +637,9 @@ def test_person_invalid_candidate_payload_is_nonfatal(
     assert any("candidate_payload_error" in error for error in result.errors)
     assert result.candidates_inserted_or_updated == 1
     assert len(transport.post_bodies[0]) == 1
-    mark_urls = [url for url in transport.patch_urls if "/rest/v1/aportes" in url]
-    assert mark_urls
-    assert "ok-1" in mark_urls[0]
-    assert "ok-2" in mark_urls[0]
-    assert "bad-1" not in mark_urls[0]
-    assert "bad-2" not in mark_urls[0]
+    # El payload invalido no aborta el batch: solo el candidato valido se inserta.
+    # La consolidacion nunca escribe en aportes (no hay marcado consolidated_at).
+    assert not any("/rest/v1/aportes" in url for url in transport.patch_urls)
 
 
 def test_person_fatal_upsert_error_aborts_without_marking() -> None:

@@ -4,11 +4,11 @@ Ningun test hace red real: el httpx.Client se construye con un
 ``httpx.MockTransport`` inyectado via el constructor del adapter (mismo patron
 que test_staging_exporter / test_consolidation_job). Cubre:
   - Config from_env: dry-run intencional, config parcial, HTTPS obligatorio.
-  - fetch_unconsolidated: filtros PostgREST correctos, orden, limit, mapeo de
-    columnas reales (raw_json -> payload) y degradacion segura de trust_tier.
+  - fetch_aportes_page: paginacion por cursor keyset (created_at, id), filtros
+    PostgREST correctos (SIN consolidated_at), orden, limit, mapeo de columnas
+    reales (raw_json -> payload) y degradacion segura de trust_tier.
   - upsert_canonical: on_conflict=dedup_hash + Prefer merge-duplicates y
     proyeccion SOLO sobre columnas canonicas reales.
-  - mark_consolidated: PATCH con id=in.(...) y chunking.
   - winner-selection final: menor tier gana; desempate fetched_at desc; luego
     confidence_score desc.
 """
@@ -114,7 +114,7 @@ def test_from_config_headers_apikey_publishable_bearer_jwt() -> None:
         adapter.close()
 
 
-# --- fetch_unconsolidated ---------------------------------------------------
+# --- fetch_aportes_page -----------------------------------------------------
 
 def test_fetch_envia_filtros_correctos() -> None:
     captured: dict[str, Any] = {}
@@ -124,12 +124,18 @@ def test_fetch_envia_filtros_correctos() -> None:
         return httpx.Response(200, json=[])
 
     adapter = _adapter(handler)
-    adapter.fetch_unconsolidated("Event", batch_size=250)
+    adapter.fetch_aportes_page("Event", 250, ("2026-06-24T10:00:00Z", "ap-9"))
 
     query = parse_qs(urlparse(str(captured["url"])).query)
     assert urlparse(str(captured["url"])).path == "/rest/v1/aportes"
-    assert query["consolidated_at"] == ["is.null"]
+    # NO se filtra por consolidated_at (columna inexistente en el schema real);
+    # la paginacion la lleva el cursor keyset (created_at, id).
+    assert "consolidated_at" not in query
     assert query["entity_type"] == ["eq.event"]  # slug del enum del backend
+    assert query["or"] == [
+        "(created_at.gt.2026-06-24T10:00:00Z,"
+        "and(created_at.eq.2026-06-24T10:00:00Z,id.gt.ap-9))"
+    ]
     assert query["order"] == ["created_at.asc,id.asc"]
     assert query["limit"] == ["250"]
     assert query["select"] == ["*"]
@@ -143,7 +149,7 @@ def test_fetch_acopio_usa_slug_acopio() -> None:
         return httpx.Response(200, json=[])
 
     adapter = _adapter(handler)
-    adapter.fetch_unconsolidated("AcopioCenter", batch_size=10)
+    adapter.fetch_aportes_page("AcopioCenter", 10, ("", ""))
     query = parse_qs(urlparse(str(captured["url"])).query)
     assert query["entity_type"] == ["eq.acopio"]
 
@@ -165,7 +171,7 @@ def test_fetch_mapea_columnas_reales_a_record() -> None:
         return httpx.Response(200, json=[row])
 
     adapter = _adapter(handler)
-    records = adapter.fetch_unconsolidated("Event", batch_size=10)
+    records = adapter.fetch_aportes_page("Event", 10, ("", ""))
 
     assert len(records) == 1
     rec = records[0]
@@ -193,7 +199,7 @@ def test_fetch_trust_tier_ausente_degrada_seguro() -> None:
         return httpx.Response(200, json=[row])
 
     adapter = _adapter(handler)
-    rec = adapter.fetch_unconsolidated("Event", batch_size=10)[0]
+    rec = adapter.fetch_aportes_page("Event", 10, ("", ""))[0]
     assert rec["trust_tier"] == ""
     assert rec["fetched_at"] is None
     assert rec["confidence_score"] is None
@@ -202,7 +208,7 @@ def test_fetch_trust_tier_ausente_degrada_seguro() -> None:
 def test_fetch_entity_type_no_soportado_lanza() -> None:
     adapter = _adapter(lambda request: httpx.Response(200, json=[]))
     with pytest.raises(ValueError):
-        adapter.fetch_unconsolidated("Person", batch_size=10)
+        adapter.fetch_aportes_page("Person", 10, ("", ""))
 
 
 # --- upsert_canonical -------------------------------------------------------
@@ -270,64 +276,6 @@ def test_upsert_sin_dedup_hash_falla() -> None:
         adapter.upsert_canonical("Event", {"name": "X"})
 
 
-# --- mark_consolidated ------------------------------------------------------
-
-def test_mark_consolidated_patch_con_in_filter() -> None:
-    captured: list[dict[str, Any]] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        captured.append(
-            {
-                "url": str(request.url),
-                "method": request.method,
-                "body": json.loads(request.content),
-                "prefer": request.headers.get("Prefer"),
-            }
-        )
-        return httpx.Response(204)
-
-    adapter = _adapter(handler)
-    adapter.mark_consolidated(["ap-1", "ap-2", "ap-3"])
-
-    assert len(captured) == 1
-    call = captured[0]
-    assert call["method"] == "PATCH"
-    parsed = urlparse(call["url"])
-    assert parsed.path == "/rest/v1/aportes"
-    assert parse_qs(parsed.query)["id"] == ["in.(ap-1,ap-2,ap-3)"]
-    assert "consolidated_at" in call["body"]
-    assert "return=minimal" in call["prefer"]
-
-
-def test_mark_consolidated_vacio_no_llama() -> None:
-    calls = 0
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal calls
-        calls += 1
-        return httpx.Response(204)
-
-    adapter = _adapter(handler)
-    adapter.mark_consolidated([])
-    assert calls == 0
-
-
-def test_mark_consolidated_chunkea() -> None:
-    calls: list[str] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        calls.append(str(request.url))
-        return httpx.Response(204)
-
-    adapter = _adapter(handler)
-    ids = [f"ap-{i}" for i in range(250)]
-    adapter.mark_consolidated(ids)
-    # 250 ids en chunks de 100 -> 3 requests.
-    assert len(calls) == 3
-    first_ids = parse_qs(urlparse(calls[0]).query)["id"][0]
-    assert first_ids.count(",") == 99  # 100 ids => 99 comas
-
-
 # --- errores HTTP y reintentos (media #3) -----------------------------------
 
 def _no_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -351,7 +299,7 @@ def test_status_transitorio_reintenta_y_luego_exito(
         return httpx.Response(200, json=[])
 
     adapter = _adapter(handler)
-    assert adapter.fetch_unconsolidated("Event", batch_size=10) == []
+    assert adapter.fetch_aportes_page("Event", 10, ("", "")) == []
     assert calls["n"] == 3
 
 
@@ -368,7 +316,7 @@ def test_retry_exhaustion_lanza_http_status_error(
 
     adapter = _adapter(handler)
     with pytest.raises(httpx.HTTPStatusError):
-        adapter.fetch_unconsolidated("Event", batch_size=10)
+        adapter.fetch_aportes_page("Event", 10, ("", ""))
     assert calls["n"] == _MAX_RETRIES
 
 
@@ -387,7 +335,7 @@ def test_status_no_retryable_no_reintenta(
 
     adapter = _adapter(handler)
     with pytest.raises(httpx.HTTPStatusError):
-        adapter.fetch_unconsolidated("Event", batch_size=10)
+        adapter.fetch_aportes_page("Event", 10, ("", ""))
     assert calls["n"] == 1
 
 
@@ -403,7 +351,7 @@ def test_error_de_red_reintenta_y_relanza(monkeypatch: pytest.MonkeyPatch) -> No
 
     adapter = _adapter(handler)
     with pytest.raises(httpx.ConnectError):
-        adapter.fetch_unconsolidated("Event", batch_size=10)
+        adapter.fetch_aportes_page("Event", 10, ("", ""))
     assert calls["n"] == _MAX_RETRIES
 
 
@@ -497,7 +445,9 @@ def test_fetch_person_candidates_envia_filtros_correctos() -> None:
 
     query = parse_qs(urlparse(str(captured["url"])).query)
     assert urlparse(str(captured["url"])).path == "/rest/v1/aportes"
-    assert query["consolidated_at"] == ["is.null"]
+    # NO se filtra por consolidated_at: el dedup debe ver todos los aportes del
+    # bloque, incluidos los ya procesados en corridas previas.
+    assert "consolidated_at" not in query
     assert query["entity_type"] == ["eq.person"]
     assert "or" in query
     or_val = query["or"][0]

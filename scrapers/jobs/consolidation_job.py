@@ -4,14 +4,17 @@ Faceta #91 del EPIC #82. Solo cubre Event y AcopioCenter, cuyo dedup exacto
 (fingerprint v1) se puede auto-fundir sin revision humana (SPECS.allow_automerge
 == True). Person (#92) NO se toca aqui: exige revision humana.
 
-Flujo (por entity_type, en batches, incremental e idempotente):
-  1. Leer aportes NO consolidados via el PORT (`fetch_unconsolidated`).
+Flujo (por entity_type, paginando por cursor keyset e idempotente):
+  1. Leer una pagina de aportes via el PORT (`fetch_aportes_page`), ordenada por
+     cursor keyset `(created_at, id)`. NO hay columna `consolidated_at` en el
+     schema real: cada corrida re-escanea el set completo desde el inicio.
   2. Agrupar por dedup_hash (`group_by_dedup_hash`, funcion pura).
   3. Elegir un ganador determinista por grupo (`pick_winner`, funcion pura).
   4. Upsert de la fila canonica del ganador via el PORT (`upsert_canonical`).
-  5. Marcar TODOS los aportes del grupo como consolidados (`mark_consolidated`).
+     Idempotente por `on_conflict=dedup_hash`: re-upsertar no duplica.
+  5. Avanzar el cursor al frente de la pagina y repetir hasta agotarla.
 
-En --dry-run no se escribe nada (ni upsert ni mark): solo se loguea el plan.
+En --dry-run no se escribe nada: se lee una pagina, se loguea el plan y se corta.
 
 Ejecucion:
   python -m scrapers.jobs.consolidation_job \
@@ -201,12 +204,21 @@ def consolidate_entity_type(
     tier_rank: TierRankFn = default_tier_rank,
     logger: logging.Logger | None = None,
 ) -> dict[str, int]:
-    """Consolida un entity_type en batches hasta agotar lo pendiente.
+    """Consolida un entity_type paginando por cursor keyset ``(created_at, id)``.
 
-    Devuelve un resumen con contadores. Incremental: cada batch se relee del
-    PORT, asi que si un batch se marca consolidado, el siguiente ya no lo trae.
-    Idempotente: re-correr sobre datos ya consolidados no upserta ni marca nada.
-    En dry_run NO escribe (ni upsert ni mark); solo cuenta y loguea el plan.
+    Devuelve un resumen con contadores. NO marca ``consolidated_at`` (columna
+    inexistente en el schema real, ver docs/schema.md): la paginacion la lleva un
+    cursor keyset ``(created_at, id)`` que avanza pagina a pagina, y cada corrida
+    re-escanea el set completo desde el inicio. Idempotente: ``upsert_canonical``
+    usa ``on_conflict=dedup_hash`` (merge-duplicates), asi que re-upsertar el
+    mismo ganador no duplica ni corrompe la fila canonica. En dry_run NO escribe;
+    lee una sola pagina, loguea el plan y corta (basta para verificar la query).
+
+    Limitacion conocida (follow-up): el ``group_by_dedup_hash`` es por-pagina, asi
+    que un dedup_hash partido en el borde de dos paginas elige ganador dos veces y
+    el ultimo upsert gana (no el de mejor tier). Es una regresion NO nueva (el
+    esquema previo por ``consolidated_at`` tambien partia el grupo en el borde) y
+    se rastrea junto al gap de blocking cross-batch de Person.
     """
     active_logger = logger or _LOGGER
     if entity_type not in AUTOMERGE_ENTITY_TYPES:
@@ -219,20 +231,21 @@ def consolidate_entity_type(
         "groups": 0,
         "aportes": 0,
         "upserts": 0,
-        "marked": 0,
         "batches": 0,
         "errors": 0,
     }
 
+    cursor = _INITIAL_CURSOR
     while True:
-        batch = port.fetch_unconsolidated(entity_type, batch_size)
+        batch = port.fetch_aportes_page(entity_type, batch_size, cursor)
         if not batch:
             break
         summary["batches"] += 1
 
         groups = group_by_dedup_hash(batch)
-        # Ids sin dedup_hash quedan fuera de los grupos; no se consolidan y se
-        # reintentaran (no hay identidad para fundir). Se loguean para visibilidad.
+        # Ids sin dedup_hash quedan fuera de los grupos; no se funden (no hay
+        # identidad de contenido). El cursor igual avanza sobre ellos, asi que no
+        # ciclan: solo se loguean para visibilidad.
         grouped_ids = {str(r.get("id")) for g in groups.values() for r in g}
         skipped = [str(r.get("id")) for r in batch if str(r.get("id")) not in grouped_ids]
         if skipped:
@@ -243,12 +256,6 @@ def consolidate_entity_type(
                 skipped,
             )
 
-        # Nada agrupable en este batch: cortar para no ciclar infinito sobre
-        # aportes sin hash que nunca se marcan.
-        if not groups:
-            break
-
-        batch_progress = False
         for dedup_hash, group in groups.items():
             winner = pick_winner(group, tier_rank)
             aporte_ids = [str(rec.get("id")) for rec in group]
@@ -270,18 +277,15 @@ def consolidate_entity_type(
             if dry_run:
                 continue
 
-            # Fallo parcial de batch: si upsert/mark de ESTE grupo revienta, se
+            # Fallo parcial de batch: si el upsert de ESTE grupo revienta, se
             # loguea, se cuenta y se sigue con los demas grupos (regla del
-            # staging_exporter: el batch avanza pese a errores parciales). No
-            # marcar el grupo fallido => se re-lee en la ronda siguiente y se
-            # reintenta de forma idempotente (upsert por on_conflict, mark por id).
+            # staging_exporter: el batch avanza pese a errores parciales). El
+            # grupo fallido se reintenta en la proxima corrida (upsert idempotente
+            # por on_conflict); una pagina mala no traba el avance del cursor.
             try:
                 canonical = canonical_from_winner(winner)
                 port.upsert_canonical(entity_type, canonical)
                 summary["upserts"] += 1
-                port.mark_consolidated(aporte_ids)
-                summary["marked"] += len(aporte_ids)
-                batch_progress = True
             except Exception as exc:  # noqa: BLE001 - aislar el grupo, no el job
                 summary["errors"] += 1
                 active_logger.error(
@@ -295,19 +299,29 @@ def consolidate_entity_type(
                 )
                 continue
 
-        # En dry_run no se marca nada, asi que el siguiente fetch devolveria el
-        # mismo batch: cortar tras el primer pase para no ciclar.
-        if dry_run or not batch_progress:
+        # En dry_run basta una pagina para verificar la query; no re-escanear
+        # todo el set en el paso de verificacion del cron.
+        if dry_run:
+            break
+
+        # Avanzar el cursor al frente de la pagina (ultimo row por el orden
+        # created_at.asc,id.asc). Se avanza SIEMPRE, incluso si la pagina no tuvo
+        # grupos o algun grupo fallo, para no re-leer la misma pagina en bucle.
+        last_row = batch[-1]
+        cursor = (
+            str(last_row.get("created_at", cursor[0])),
+            str(last_row.get("id", cursor[1])),
+        )
+        if len(batch) < batch_size:
             break
 
     active_logger.info(
         "consolidation done entity_type=%s groups=%d aportes=%d upserts=%d "
-        "marked=%d batches=%d errors=%d dry_run=%s",
+        "batches=%d errors=%d dry_run=%s",
         entity_type,
         summary["groups"],
         summary["aportes"],
         summary["upserts"],
-        summary["marked"],
         summary["batches"],
         summary["errors"],
         dry_run,
@@ -399,7 +413,6 @@ class PersonConsolidationResult:
     candidates_inserted_or_updated: int = 0
     duplicates_skipped: int = 0
     upsert_errors: int = 0
-    mark_errors: int = 0
     execution_time_ms: int = 0
     errors: list[str] = field(default_factory=list)
 
@@ -409,7 +422,6 @@ class PersonCandidateWriteResult:
     written: int = 0
     idempotent: int = 0
     errors: int = 0
-    mark_blocked_record_ids: set[str] = field(default_factory=set)
     messages: list[str] = field(default_factory=list)
     fatal: bool = False
 
@@ -419,13 +431,6 @@ def _candidate_key(row: dict[str, Any]) -> tuple[str, str, str]:
     right = str(row["right_aporte_id"])
     first, second = sorted([left, right])
     return (first, second, str(row["blocking_key"]))
-
-
-def _source_record_ids(candidate: dict[str, Any]) -> set[str]:
-    raw_ids = candidate.get("source_record_ids")
-    if not isinstance(raw_ids, list):
-        return set()
-    return {str(value) for value in raw_ids if value}
 
 
 def _candidate_payload(candidate: dict[str, Any]) -> dict[str, Any]:
@@ -478,13 +483,21 @@ class SupabasePersonDedupAdapter:
         config: PersonConsolidationConfig,
         cursor: tuple[str, str],
     ) -> list[dict[str, Any]]:
-        """Lee un batch estable con cursor (created_at, id)."""
+        """Lee un batch estable con cursor (created_at, id).
+
+        NO filtra por ``consolidated_at`` (columna inexistente en el schema real,
+        ver docs/schema.md): el cursor keyset ``(created_at, id)`` es lo unico que
+        pagina, y cada corrida re-escanea el set completo desde el inicio. La
+        idempotencia la garantiza ``find_existing_candidates`` (no re-inserta
+        aristas ya presentes), asi que el re-escaneo no duplica candidatos. Ademas
+        el dedup EXIGE ver todos los aportes previos de cada bloque: ocultar los ya
+        procesados romperia el blocking contra registros historicos.
+        """
         last_created_at, last_id = cursor
         response = self._client.get(
             "/rest/v1/aportes",
             params={
                 "select": "*",
-                "consolidated_at": "is.null",
                 "entity_type": f"eq.{config.entity_type}",
                 "or": (
                     f"(created_at.gt.{last_created_at},"
@@ -569,30 +582,6 @@ class SupabasePersonDedupAdapter:
     def __exit__(self, *_: object) -> None:
         self.close()
 
-    def mark_consolidated(self, record_ids: list[str]) -> tuple[int, int, list[str]]:
-        if not record_ids:
-            return (0, 0, [])
-
-        marked = 0
-        errors = 0
-        messages: list[str] = []
-        now = datetime.now(timezone.utc).isoformat()
-        for i in range(0, len(record_ids), 100):
-            chunk = record_ids[i : i + 100]
-            response = self._client.patch(
-                f"/rest/v1/aportes?id=in.({','.join(chunk)})",
-                json={"consolidated_at": now},
-                headers={"Prefer": "return=minimal"},
-            )
-            if response.status_code in (200, 204):
-                marked += len(chunk)
-                continue
-            errors += 1
-            message = f"mark_error: status={response.status_code}"
-            messages.append(message)
-            _LOGGER.error("Error marking aportes consolidated: %s", response.status_code)
-        return (marked, errors, messages)
-
 
 def _is_fatal_write_error(exc: Exception) -> bool:
     if isinstance(exc, TypeError):
@@ -607,43 +596,35 @@ def _write_person_candidates(
     candidates: list[dict[str, Any]],
 ) -> PersonCandidateWriteResult:
     result = PersonCandidateWriteResult()
-    valid: list[tuple[dict[str, Any], set[str]]] = []
+    valid: list[dict[str, Any]] = []
 
     for candidate in candidates:
-        source_ids = _source_record_ids(candidate)
         try:
-            valid.append((_candidate_payload(candidate), source_ids))
+            valid.append(_candidate_payload(candidate))
         except ValueError as exc:
             result.errors += 1
-            result.mark_blocked_record_ids.update(source_ids)
             result.messages.append(f"candidate_payload_error: {exc}")
             _LOGGER.warning("Invalid dedup candidate payload: %s", exc)
 
-    payloads = [payload for payload, _ in valid]
     try:
-        existing = adapter.find_existing_candidates(payloads)
+        existing = adapter.find_existing_candidates(valid)
     except Exception as exc:
         result.fatal = _is_fatal_write_error(exc)
-        result.errors += len(payloads) if payloads else 1
-        for _, source_ids in valid:
-            result.mark_blocked_record_ids.update(source_ids)
+        result.errors += len(valid) if valid else 1
         result.messages.append(f"existing_lookup_error: {exc}")
         _LOGGER.error("Error looking up existing dedup candidates: %s", exc)
         return result
 
     new_payloads: list[dict[str, Any]] = []
-    new_source_ids: set[str] = set()
-    for payload, source_ids in valid:
+    for payload in valid:
         existing_row = existing.get(_candidate_key(payload))
         if existing_row is None:
             new_payloads.append(payload)
-            new_source_ids.update(source_ids)
             continue
 
         candidate_id = existing_row.get("candidate_id")
         if not isinstance(candidate_id, str) or not candidate_id:
             result.errors += 1
-            result.mark_blocked_record_ids.update(source_ids)
             result.messages.append("upsert_error: existing candidate missing candidate_id")
             continue
         try:
@@ -652,7 +633,6 @@ def _write_person_candidates(
             result.idempotent += 1
         except Exception as exc:
             result.errors += 1
-            result.mark_blocked_record_ids.update(source_ids)
             result.messages.append(f"upsert_error: {exc}")
             _LOGGER.error("Error updating dedup candidate: %s", exc)
             if _is_fatal_write_error(exc):
@@ -663,7 +643,6 @@ def _write_person_candidates(
         result.written += adapter.insert_candidates(new_payloads)
     except Exception as exc:
         result.errors += len(new_payloads)
-        result.mark_blocked_record_ids.update(new_source_ids)
         result.messages.append(f"upsert_error: {exc}")
         _LOGGER.error("Error inserting dedup candidates: %s", exc)
         result.fatal = _is_fatal_write_error(exc)
@@ -721,17 +700,9 @@ def run_person_consolidation(
             if write_result.fatal:
                 break
 
-            ids = [
-                str(row["id"])
-                for row in rows
-                if row.get("id") and str(row["id"]) not in write_result.mark_blocked_record_ids
-            ]
-            _, mark_errors, mark_messages = adapter.mark_consolidated(ids)
-            result.mark_errors += mark_errors
-            result.errors.extend(mark_messages)
-            if mark_errors:
-                break
-
+            # No se marca ``consolidated_at`` (columna inexistente): el cursor
+            # keyset avanza la paginacion y ``find_existing_candidates`` hace el
+            # write idempotente, asi que el re-escaneo por corrida es seguro.
             last_row = rows[-1]
             cursor = (
                 str(last_row.get("created_at", _INITIAL_CURSOR[0])),
