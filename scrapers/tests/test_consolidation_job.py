@@ -846,6 +846,34 @@ def test_person_cursor_ausente_degrada_a_scan_completo() -> None:
     assert result.candidates_inserted_or_updated == 1
 
 
+def test_fetch_partners_trocea_block_keys_grandes() -> None:
+    # Guard de escala (#93): una pagina grande produce ~1000 block keys; plegarlas
+    # en un solo GET desbordaria el limite de URL del proxy => 414/431 => (como el
+    # fetch es NO fatal) degradaria en silencio a bloqueo solo-pagina. Se trocea.
+    from scrapers.jobs.consolidation_job import (
+        _PARTNER_BLOCK_KEY_CHUNK,
+        SupabasePersonDedupAdapter,
+    )
+
+    keys = [f"ced:{_EVENT_ID}:k{i}" for i in range(100)]
+    # El transport devuelve el mismo companero en cada chunk: el resultado debe
+    # venir dedup por id (una sola vez), no repetido por chunk.
+    transport = _PersonTransport([], partners=[_person_aporte("p-1", "person-p")])
+    adapter = SupabasePersonDedupAdapter(_person_client(transport))
+    try:
+        partners = adapter.fetch_partners_by_block_keys(keys)
+    finally:
+        adapter.close()
+
+    expected_chunks = -(-len(keys) // _PARTNER_BLOCK_KEY_CHUNK)  # ceil
+    assert len(transport.partner_get_urls) == expected_chunks == 3
+    # Ningun GET pliega mas de _PARTNER_BLOCK_KEY_CHUNK clausulas.
+    for url in transport.partner_get_urls:
+        assert url.count("block_keys.cs") <= _PARTNER_BLOCK_KEY_CHUNK
+    # Dedup por id a traves de chunks: el companero aparece una sola vez.
+    assert [p["id"] for p in partners] == ["p-1"]
+
+
 def test_person_partner_fetch_error_es_no_fatal() -> None:
     # Si el fetch de companeros historicos falla, la pagina degrada a bloqueo
     # solo-pagina (no aborta): las aristas nuevo-vs-nuevo se emiten igual y el error

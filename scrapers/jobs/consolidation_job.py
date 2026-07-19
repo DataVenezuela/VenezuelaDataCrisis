@@ -67,6 +67,22 @@ _PERSON_DEFAULT_BATCH_SIZE = 500
 _PERSON_DEFAULT_THRESHOLD = 0.85
 _INITIAL_CURSOR = ("1970-01-01T00:00:00Z", "00000000-0000-0000-0000-000000000000")
 
+# Maximo de block_keys por request al traer companeros historicos. Una pagina de
+# 500 aportes puede producir ~1000 block keys; plegarlas todas en un solo
+# ``or=(block_keys.cs.["k1"],...,block_keys.cs.["kN"])`` desborda el limite de URL
+# del proxy frente a PostgREST (~8KB) => 414/431. Como el fetch de companeros es
+# NO fatal, ese fallo degradaria en silencio a bloqueo solo-pagina (justo el caso
+# "peor que el rescan completo"). Se trocea en grupos acotados y se une por id.
+# 40 claves ~100 chars c/u encodeadas quedan holgadas bajo el limite.
+_PARTNER_BLOCK_KEY_CHUNK = 40
+
+
+def _chunked(items: list[str], size: int) -> list[list[str]]:
+    """Parte ``items`` en sublistas de a lo sumo ``size`` (size>0)."""
+    if size <= 0:
+        raise ValueError("size debe ser > 0")
+    return [items[i : i + size] for i in range(0, len(items), size)]
+
 # Entity types que este job puede auto-fundir. Se derivan de SPECS para no
 # duplicar la decision de allow_automerge (Person queda fuera por construccion).
 AUTOMERGE_ENTITY_TYPES: tuple[str, ...] = tuple(
@@ -549,23 +565,39 @@ class SupabasePersonDedupAdapter:
         Espeja ``SupabaseConsolidationAdapter.fetch_person_candidates``:
         ``block_keys`` es jsonb, el operador de contencion @> exige sintaxis de
         array JSON (``cs.["clave"]``). Lista vacia => sin red.
+
+        Se trocea en grupos de ``_PARTNER_BLOCK_KEY_CHUNK`` para no desbordar el
+        limite de URL del proxy (una pagina grande produce ~1000 claves) y se
+        unen los resultados dedup por id. Si un chunk falla, propaga la excepcion
+        (el caller ``_fetch_block_partners`` la maneja como no fatal).
         """
         if not block_keys:
             return []
-        cs_clauses = ",".join(f'block_keys.cs.["{key}"]' for key in block_keys)
-        response = self._client.get(
-            "/rest/v1/aportes",
-            params={
-                "select": "*",
-                "entity_type": "eq.person",
-                "or": f"({cs_clauses})",
-            },
-        )
-        response.raise_for_status()
-        payload = response.json()
-        if not isinstance(payload, list):
-            raise TypeError("Supabase aportes response must be a list")
-        return payload
+        seen: set[str] = set()
+        partners: list[dict[str, Any]] = []
+        for chunk in _chunked(block_keys, _PARTNER_BLOCK_KEY_CHUNK):
+            cs_clauses = ",".join(f'block_keys.cs.["{key}"]' for key in chunk)
+            response = self._client.get(
+                "/rest/v1/aportes",
+                params={
+                    "select": "*",
+                    "entity_type": "eq.person",
+                    "or": f"({cs_clauses})",
+                },
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, list):
+                raise TypeError("Supabase aportes response must be a list")
+            for row in payload:
+                rid = row.get("id")
+                # Un companero puede matchear claves de varios chunks; dedup por id.
+                if rid is not None:
+                    if str(rid) in seen:
+                        continue
+                    seen.add(str(rid))
+                partners.append(row)
+        return partners
 
     def read_cursor(self, entity_type: str) -> tuple[str, str] | None:
         """Frontera durable ``(created_at, id)`` de ``entity_type``; None => scan completo.
@@ -630,10 +662,13 @@ class SupabasePersonDedupAdapter:
         """
         if self._cursor_unavailable:
             return False
+        # updated_at explicito: en merge-duplicates el DEFAULT solo aplica al INSERT
+        # inicial; sin enviarlo la fila UPDATE-ada no reflejaria el ultimo avance.
         payload = [{
             "entity_type": entity_type,
             "cursor_created_at": created_at,
             "cursor_id": cursor_id,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
         }]
         try:
             response = self._client.post(

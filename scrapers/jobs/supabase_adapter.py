@@ -59,6 +59,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 import httpx
 
@@ -472,10 +473,14 @@ class SupabaseConsolidationAdapter:
         if self._cursor_unavailable:
             return False
         slug, _ = _entity_tables(entity_type)
+        # updated_at explicito: en un UPSERT merge-duplicates el DEFAULT solo aplica
+        # al INSERT inicial; sin enviarlo, la fila UPDATE-ada conservaria el
+        # updated_at viejo y no reflejaria el ultimo avance del cursor.
         payload = [{
             "entity_type": slug,
             "cursor_created_at": created_at,
             "cursor_id": cursor_id,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
         }]
         try:
             resp = self._request_with_retry(

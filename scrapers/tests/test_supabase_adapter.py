@@ -564,11 +564,12 @@ def test_write_cursor_upsert_por_entity_type() -> None:
 
     assert ok is True
     assert "on_conflict=entity_type" in str(captured["url"])
-    assert captured["body"] == [{
-        "entity_type": "acopio",
-        "cursor_created_at": "2024-06-01T00:00:00Z",
-        "cursor_id": "c-99",
-    }]
+    row = captured["body"][0]
+    assert row["entity_type"] == "acopio"
+    assert row["cursor_created_at"] == "2024-06-01T00:00:00Z"
+    assert row["cursor_id"] == "c-99"
+    # updated_at explicito para que el UPDATE de merge-duplicates lo refresque.
+    assert "updated_at" in row
     assert "resolution=merge-duplicates" in captured["prefer"]
 
 
