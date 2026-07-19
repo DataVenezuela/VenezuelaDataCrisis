@@ -53,9 +53,10 @@ class ConsolidationDataPort(Protocol):
         ``(created_at, id)`` es estrictamente mayor que ``cursor``, ordenadas
         ascendentemente por ese par (orden total estable => ``pick_winner``
         determinista). NO filtra por ``consolidated_at`` (columna inexistente en
-        el schema real): el cursor es lo unico que pagina y cada corrida re-escanea
-        el set completo desde ``cursor=("", "")`` (o el sentinela inicial). Una
-        lista vacia indica que no quedan mas filas tras el cursor.
+        el schema real). El metodo es agnostico del origen del ``cursor``: el
+        caller arranca desde la frontera DURABLE persistida (``read_cursor``,
+        option B) o, si no hay, desde el sentinela inicial. Una lista vacia indica
+        que no quedan mas filas tras el cursor.
         """
         ...
 
@@ -118,8 +119,10 @@ class FakeInMemoryAdapter:
     Semantica clave para los tests de #91:
       - ``fetch_aportes_page`` pagina por cursor keyset ``(created_at, id)``:
         devuelve las filas del tipo cuyo par es estrictamente mayor que el cursor,
-        ordenadas ascendentemente. NO hay estado de "consolidado"; cada corrida
-        re-escanea desde el cursor inicial (idempotencia via ``upsert_canonical``).
+        ordenadas ascendentemente.
+      - ``read_cursor`` / ``write_cursor`` mantienen la frontera durable por
+        entity_type en memoria (option B): tras ``write_cursor``, la proxima
+        corrida arranca despues de la frontera y no re-procesa lo ya visto.
       - ``upsert_canonical`` reemplaza por (entity_type, dedup_hash): una sola
         fila canonica por hash sin importar cuantas veces se upserte.
     """
