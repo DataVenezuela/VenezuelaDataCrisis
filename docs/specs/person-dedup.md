@@ -13,13 +13,18 @@
 > emite la forma vieja (`*_person_record_id`, `priority` string, columna
 > `event_id`) y debe migrarse a esta forma antes de correr contra la BD real.
 >
-> **Resuelto (2026-07-19):** el cursor de §2 ya **no** usa
+> **Resuelto (2026-07-19, option B / #93):** el cursor de §2 ya **no** usa
 > `aportes.consolidated_at` (columna inexistente en el `aportes` canónico,
 > `docs/schema.md`; un probe en vivo confirmó `400 42703`). El código
-> (`consolidation_job.py`) pagina ahora por cursor keyset puro `(created_at, id)`
-> y re-escanea el set completo en cada corrida; la idempotencia la da
-> `find_existing_candidates` (no re-inserta aristas ya presentes). No hay marcado
-> de estado en `aportes`.
+> (`consolidation_job.py`) pagina ahora por una **frontera durable** persistida
+> por `entity_type` en la tabla `consolidation_state` (cursor keyset
+> `(created_at, id)`), de modo que cada corrida procesa **solo aportes nuevos**
+> (no re-escanea todo ni re-pisa la revisión humana). La completitud
+> nuevo-vs-viejo la aporta un **fetch de compañeros de bloque históricos**
+> (`fetch_partners_by_block_keys`, por `block_keys` e **ignorando** la frontera):
+> un duplicado recién llegado sigue bloqueando contra registros ya procesados. La
+> idempotencia de escritura la da `find_existing_candidates`. Si `consolidation_state`
+> falta o rechaza el acceso, el cursor degrada a scan completo (no repite el 400).
 
 ---
 
@@ -31,30 +36,40 @@ El consolidation job para Person lee de `aportes` en Supabase, agrupa registros 
 
 ## 2. Origen de datos
 
-> Nota de canon: la paginación usa **solo** el cursor keyset `(created_at, id)`,
-> columnas que sí existen en el `aportes` canónico (`docs/schema.md`). No se
-> filtra ni se escribe `consolidated_at` (columna inexistente).
+> Nota de canon: la paginación usa el cursor keyset `(created_at, id)`, columnas
+> que sí existen en el `aportes` canónico (`docs/schema.md`). No se filtra ni se
+> escribe `consolidated_at` (columna inexistente). La **frontera** vive en una
+> tabla de estado dedicada (`consolidation_state`), no en una columna de `aportes`.
 
-Lectura por páginas con cursor keyset desde `aportes`:
+Lectura por páginas con cursor keyset desde `aportes`, arrancando desde la frontera durable:
 
 ```sql
 SELECT * FROM aportes
 WHERE entity_type = 'person'
-  AND (created_at, id) > (:last_created_at, :last_id)
+  AND (created_at, id) > (:cursor_created_at, :cursor_id)  -- frontera de consolidation_state
 ORDER BY created_at ASC, id ASC
 LIMIT :batch_size;
 ```
 
-- **Cursor inicial:** `('1970-01-01T00:00:00Z', '00000000-0000-0000-0000-000000000000')`
+- **Frontera durable (option B, #93):** se lee de `consolidation_state`
+  (`entity_type = 'person'`) al inicio y se persiste al final de cada página. Cada
+  corrida procesa **solo aportes nuevos** posteriores a la frontera — no re-escanea
+  todo el set ni re-emite `decision = 'pending'` sobre aristas ya revisadas. DDL de
+  la tabla en el cuerpo del PR; el mantenedor la aplica primero.
+- **Cursor inicial (sin frontera):** `('1970-01-01T00:00:00Z', '00000000-0000-0000-0000-000000000000')`
 - **Batch size default:** 500, configurable
-- **Avance del cursor:** después de cada página, el cursor avanza al último
-  `(created_at, id)` leído. No se marca ningún estado en `aportes`.
-- **Re-escaneo completo:** cada corrida parte del cursor inicial y recorre todo
-  el set. La idempotencia la da `find_existing_candidates`, que no re-inserta una
-  arista `(left, right, blocking_key)` ya presente. Ver el hueco de completitud
-  (blocking cross-página) en la nota al pie de §3.
-- **Resiliencia:** si el job se cae, la próxima corrida vuelve a recorrer todo
-  desde el inicio; nada queda a medias. El cursor es en memoria, no persiste.
+- **Avance del cursor:** después de cada página, la frontera avanza al último
+  `(created_at, id)` leído y se persiste (`write_cursor`, best-effort).
+- **Compañeros históricos (completitud nuevo-vs-viejo):** la frontera sola solo
+  compararía un aporte nuevo contra otros nuevos de su propia página. Para las
+  aristas nuevo-vs-viejo, cada página trae además los compañeros de bloque
+  históricos (`fetch_partners_by_block_keys`, por `block_keys` e **ignorando** la
+  frontera), los une a la página y bloquea+puntúa sobre la unión. La idempotencia
+  de escritura (`find_existing_candidates`) absorbe los pares viejo-vs-viejo que
+  reaparezcan. Ver el hueco residual (nuevo-vs-nuevo cross-página) en la nota de §3.
+- **Degradación graciosa:** si `consolidation_state` falta (404/406) o rechaza el
+  acceso (401/403), `read_cursor` devuelve la frontera inicial (scan completo) y el
+  job sigue; nunca aborta ni repite el `400` de `consolidated_at`.
 
 ---
 
@@ -81,13 +96,17 @@ Para cada persona, se generan hasta dos block keys:
   producción, `aportes.block_keys` es la fuente de verdad.
 - Una persona puede pertenecer a múltiples bloques (uno por cada block key)
 
-> **Hueco de completitud conocido (follow-up):** el blocking se arma por página
-> (`build_blocks` sobre un batch de `batch_size`), no sobre el set completo. Dos
-> personas del mismo bloque que caen en páginas distintas del cursor keyset no se
-> comparan en esa corrida. El re-escaneo completo por corrida (§2) no lo resuelve:
-> las páginas se recomponen igual entre corridas. Cerrar esto exige blocking sobre
-> el set completo (fetch server-side por block_keys, o acumulación en memoria).
-> Rastreado como seguimiento; no bloquea la meta de producir candidatos.
+> **Hueco de completitud residual (follow-up):** el fetch de compañeros históricos
+> (§2) cierra el caso nuevo-vs-viejo (un aporte nuevo se compara contra **todos**
+> los miembros de su bloque, incluidos los ya procesados). Queda un hueco menor:
+> dos aportes **ambos nuevos** del mismo bloque que caen en páginas distintas
+> **de la misma corrida** no se comparan entre sí en esa corrida (cada uno solo ve
+> compañeros históricos, no al otro nuevo de la otra página). La próxima corrida los
+> compara si uno queda como histórico del otro. Cerrar esto del todo exige blocking
+> sobre el set completo o acumulación en memoria. No bloquea la meta de producir
+> candidatos. (Refinamiento adicional: hoy la unión re-puntúa también pares
+> viejo-vs-viejo —idempotentes vía `find_existing_candidates`—; acotar el scoring a
+> pares que toquen ≥1 aporte nuevo es una optimización de costo, no de correctitud.)
 
 ---
 
@@ -210,8 +229,12 @@ python -m scrapers.jobs.consolidation_job --entity-type person --batch-size 500 
   - Person sin `cedula_hmac` → solo bloque laxo
   - Cédula ausente en uno o ambos registros → no suma 0.30
   - Person sin `phonetic_hash` → sin bloque laxo, posiblemente sin candidatos
-  - Error de escritura de candidato → no marcar `consolidated_at`
-  - Error al marcar consolidado → CLI non-zero
+  - Actualización de arista ya existente → NO re-escribe `decision` (la revisión
+    humana `confirmed`/`rejected` + `resolved_by`/`resolved_at` sobrevive)
+  - Aporte nuevo (posterior a la frontera) que duplica a uno viejo (anterior,
+    otra página) → sigue generando arista vía compañeros históricos
+  - `consolidation_state` ausente/sin permiso → degrada a scan completo, sin abortar
+  - Fetch de compañeros históricos falla → página degrada a solo-página, no fatal
   - Cursor con mismo `created_at` e `id` mayor → no se salta registros
   - Lookup batch de candidatos existentes → no un GET por candidato
   - Aporte sin `event_id` (no puede formar block key) o candidato sin `blocking_key` → error controlado, no tumba todo

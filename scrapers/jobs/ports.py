@@ -67,6 +67,27 @@ class ConsolidationDataPort(Protocol):
         """
         ...
 
+    # --- Cursor durable por entity_type (option B, #93) ----------------------
+
+    def read_cursor(self, entity_type: str) -> tuple[str, str] | None:
+        """Frontera ``(cursor_created_at, cursor_id)`` persistida para ``entity_type``.
+
+        None => no hay frontera (primera corrida o tabla ausente): el caller
+        arranca desde el sentinela inicial (scan completo). Se degrada a None ante
+        tabla ausente / sin permiso / error de red (NO aborta): repetir el
+        incidente del 400 seria peor que reescanear.
+        """
+        ...
+
+    def write_cursor(self, entity_type: str, created_at: str, cursor_id: str) -> bool:
+        """Persiste la frontera ``(created_at, cursor_id)`` de ``entity_type``.
+
+        Best-effort: devuelve False si no se pudo persistir (tabla ausente / sin
+        permiso / error de red), en cuyo caso la proxima corrida re-escanea desde
+        el sentinela (el write idempotente aguas abajo evita duplicar).
+        """
+        ...
+
     # --- Person: parte del contrato, fuera de alcance de este job (#91) ------
 
     def fetch_person_candidates(self, block_keys: list[str]) -> list[Record]:
@@ -107,6 +128,8 @@ class FakeInMemoryAdapter:
         self.aportes: list[Record] = list(aportes or [])
         # Fila canonica por (entity_type, dedup_hash).
         self.canonical: dict[tuple[str, str], Record] = {}
+        # Frontera durable por entity_type (option B): en memoria, sin persistencia.
+        self.cursors: dict[str, tuple[str, str]] = {}
         # Contador de auditoria para asserts en tests.
         self.upsert_calls: int = 0
 
@@ -130,6 +153,13 @@ class FakeInMemoryAdapter:
             raise ValueError("upsert_canonical requiere un dedup_hash no vacio")
         self.canonical[(entity_type, dedup_hash)] = record
         self.upsert_calls += 1
+
+    def read_cursor(self, entity_type: str) -> tuple[str, str] | None:
+        return self.cursors.get(entity_type)
+
+    def write_cursor(self, entity_type: str, created_at: str, cursor_id: str) -> bool:
+        self.cursors[entity_type] = (created_at, cursor_id)
+        return True
 
     def fetch_person_candidates(self, block_keys: list[str]) -> list[Record]:
         if not block_keys:

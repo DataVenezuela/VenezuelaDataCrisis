@@ -4,15 +4,18 @@ Faceta #91 del EPIC #82. Solo cubre Event y AcopioCenter, cuyo dedup exacto
 (fingerprint v1) se puede auto-fundir sin revision humana (SPECS.allow_automerge
 == True). Person (#92) NO se toca aqui: exige revision humana.
 
-Flujo (por entity_type, paginando por cursor keyset e idempotente):
-  1. Leer una pagina de aportes via el PORT (`fetch_aportes_page`), ordenada por
-     cursor keyset `(created_at, id)`. NO hay columna `consolidated_at` en el
-     schema real: cada corrida re-escanea el set completo desde el inicio.
-  2. Agrupar por dedup_hash (`group_by_dedup_hash`, funcion pura).
-  3. Elegir un ganador determinista por grupo (`pick_winner`, funcion pura).
-  4. Upsert de la fila canonica del ganador via el PORT (`upsert_canonical`).
+Flujo (por entity_type, paginando por cursor keyset DURABLE e idempotente):
+  1. Leer la frontera durable de `consolidation_state` (`read_cursor`); si falta
+     la tabla, degrada a scan completo (NO hay columna `consolidated_at` en el
+     schema real). Option B (#93): cada corrida procesa solo aportes NUEVOS.
+  2. Leer una pagina de aportes via el PORT (`fetch_aportes_page`), ordenada por
+     cursor keyset `(created_at, id)`, posterior a la frontera.
+  3. Agrupar por dedup_hash (`group_by_dedup_hash`, funcion pura).
+  4. Elegir un ganador determinista por grupo (`pick_winner`, funcion pura).
+  5. Upsert de la fila canonica del ganador via el PORT (`upsert_canonical`).
      Idempotente por `on_conflict=dedup_hash`: re-upsertar no duplica.
-  5. Avanzar el cursor al frente de la pagina y repetir hasta agotarla.
+  6. Avanzar la frontera al frente de la pagina, PERSISTIRLA (`write_cursor`) y
+     repetir hasta agotar la pagina.
 
 En --dry-run no se escribe nada: se lee una pagina, se loguea el plan y se corta.
 
@@ -50,6 +53,9 @@ from scrapers.dedup import specs
 from scrapers.dedup.fingerprint import FINGERPRINT_VERSION
 from scrapers.jobs.ports import ConsolidationDataPort, FakeInMemoryAdapter, Record
 from scrapers.jobs.supabase_adapter import (
+    _CURSOR_PATH,
+    _CURSOR_UPSERT_PATH,
+    _ROLE_HINT,
     SupabaseConsolidationAdapter,
     SupabaseConsolidationConfig,
 )
@@ -206,13 +212,17 @@ def consolidate_entity_type(
 ) -> dict[str, int]:
     """Consolida un entity_type paginando por cursor keyset ``(created_at, id)``.
 
-    Devuelve un resumen con contadores. NO marca ``consolidated_at`` (columna
-    inexistente en el schema real, ver docs/schema.md): la paginacion la lleva un
-    cursor keyset ``(created_at, id)`` que avanza pagina a pagina, y cada corrida
-    re-escanea el set completo desde el inicio. Idempotente: ``upsert_canonical``
-    usa ``on_conflict=dedup_hash`` (merge-duplicates), asi que re-upsertar el
-    mismo ganador no duplica ni corrompe la fila canonica. En dry_run NO escribe;
-    lee una sola pagina, loguea el plan y corta (basta para verificar la query).
+    Devuelve un resumen con contadores. NO usa ``consolidated_at`` (columna
+    inexistente en el schema real, ver docs/schema.md). Option B (#93): la
+    paginacion arranca desde una frontera DURABLE persistida en
+    ``consolidation_state`` (via ``port.read_cursor`` / ``port.write_cursor``),
+    de modo que cada corrida procesa solo aportes NUEVOS en vez de re-escanear el
+    set completo. Idempotente: ``upsert_canonical`` usa ``on_conflict=dedup_hash``
+    (merge-duplicates), asi que si un duplicado tardio reaparece, re-upsertar el
+    ganador no duplica ni corrompe la fila canonica. Si la tabla de cursor
+    falta/rechaza, la frontera degrada a scan completo (seguro, ver read_cursor).
+    En dry_run NO lee ni persiste cursor ni escribe: lee una sola pagina desde el
+    sentinela, loguea el plan y corta (basta para verificar la query).
 
     Limitacion conocida (follow-up): el ``group_by_dedup_hash`` es por-pagina, asi
     que un dedup_hash partido en el borde de dos paginas elige ganador dos veces y
@@ -235,7 +245,12 @@ def consolidate_entity_type(
         "errors": 0,
     }
 
-    cursor = _INITIAL_CURSOR
+    # Option B (#93): arrancar desde la frontera durable persistida, no desde el
+    # inicio. Solo se procesan aportes NUEVOS (posteriores al cursor), evitando el
+    # re-escaneo completo cada corrida. En dry_run NO se lee ni persiste el cursor:
+    # se verifica una sola pagina desde el sentinela y se corta. Si la tabla de
+    # cursor falta/rechaza, read_cursor degrada a None => scan completo (seguro).
+    cursor = _INITIAL_CURSOR if dry_run else (port.read_cursor(entity_type) or _INITIAL_CURSOR)
     while True:
         batch = port.fetch_aportes_page(entity_type, batch_size, cursor)
         if not batch:
@@ -312,6 +327,10 @@ def consolidate_entity_type(
             str(last_row.get("created_at", cursor[0])),
             str(last_row.get("id", cursor[1])),
         )
+        # Persistir la frontera (option B): la proxima corrida arranca aca en vez de
+        # re-escanear. Best-effort: si la tabla falta/rechaza, write_cursor degrada
+        # (la corrida sigue; la proxima re-escanea, idempotente por on_conflict).
+        port.write_cursor(entity_type, cursor[0], cursor[1])
         if len(batch) < batch_size:
             break
 
@@ -462,6 +481,9 @@ class SupabasePersonDedupAdapter:
 
     def __init__(self, client: httpx.Client) -> None:
         self._client = client
+        # Se marca en True la primera vez que consolidation_state falta o rechaza
+        # el acceso, para no reintentar (ni loguear) en cada pagina de la corrida.
+        self._cursor_unavailable = False
 
     @classmethod
     def from_config(cls, config: PersonConsolidationConfig) -> "SupabasePersonDedupAdapter":
@@ -483,15 +505,15 @@ class SupabasePersonDedupAdapter:
         config: PersonConsolidationConfig,
         cursor: tuple[str, str],
     ) -> list[dict[str, Any]]:
-        """Lee un batch estable con cursor (created_at, id).
+        """Lee un batch estable de aportes NUEVOS con cursor (created_at, id).
 
         NO filtra por ``consolidated_at`` (columna inexistente en el schema real,
-        ver docs/schema.md): el cursor keyset ``(created_at, id)`` es lo unico que
-        pagina, y cada corrida re-escanea el set completo desde el inicio. La
-        idempotencia la garantiza ``find_existing_candidates`` (no re-inserta
-        aristas ya presentes), asi que el re-escaneo no duplica candidatos. Ademas
-        el dedup EXIGE ver todos los aportes previos de cada bloque: ocultar los ya
-        procesados romperia el blocking contra registros historicos.
+        ver docs/schema.md). Option B (#93): el cursor keyset arranca desde la
+        frontera durable persistida en ``consolidation_state`` (``read_cursor``),
+        asi que cada corrida solo trae aportes posteriores a la frontera. La
+        completitud nuevo-vs-viejo la aporta ``fetch_partners_by_block_keys`` (trae
+        los companeros historicos de cada bloque IGNORANDO la frontera), y la
+        idempotencia del write la garantiza ``find_existing_candidates``.
         """
         last_created_at, last_id = cursor
         response = self._client.get(
@@ -512,6 +534,138 @@ class SupabasePersonDedupAdapter:
         if not isinstance(payload, list):
             raise TypeError("Supabase aportes response must be a list")
         return payload
+
+    def fetch_partners_by_block_keys(
+        self,
+        block_keys: list[str],
+    ) -> list[dict[str, Any]]:
+        """Aportes person historicos cuyo ``block_keys`` solapa con ``block_keys``.
+
+        Nucleo de option B (#93): la frontera sola solo compararia un aporte nuevo
+        contra otros nuevos de su misma pagina (casi cero aristas nuevo-vs-viejo).
+        Para que un duplicado recien llegado se compare contra registros YA
+        procesados en corridas previas, se traen los companeros de bloque
+        IGNORANDO la frontera (todos los aportes del bloque siguen visibles).
+        Espeja ``SupabaseConsolidationAdapter.fetch_person_candidates``:
+        ``block_keys`` es jsonb, el operador de contencion @> exige sintaxis de
+        array JSON (``cs.["clave"]``). Lista vacia => sin red.
+        """
+        if not block_keys:
+            return []
+        cs_clauses = ",".join(f'block_keys.cs.["{key}"]' for key in block_keys)
+        response = self._client.get(
+            "/rest/v1/aportes",
+            params={
+                "select": "*",
+                "entity_type": "eq.person",
+                "or": f"({cs_clauses})",
+            },
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, list):
+            raise TypeError("Supabase aportes response must be a list")
+        return payload
+
+    def read_cursor(self, entity_type: str) -> tuple[str, str] | None:
+        """Frontera durable ``(created_at, id)`` de ``entity_type``; None => scan completo.
+
+        Se degrada a None (sin abortar) ante tabla ausente (404/406), sin permiso
+        (401/403) o error de red. Espeja ``materializer._read_cursor`` /
+        ``SupabaseConsolidationAdapter.read_cursor``.
+        """
+        try:
+            response = self._client.get(
+                _CURSOR_PATH,
+                params={
+                    "select": "cursor_created_at,cursor_id",
+                    "entity_type": f"eq.{entity_type}",
+                    "limit": "1",
+                },
+            )
+        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            _LOGGER.warning(
+                "person consolidation: no se pudo leer el cursor (%s); scan completo",
+                type(exc).__name__,
+            )
+            return None
+        if response.status_code in (404, 406):
+            _LOGGER.info(
+                "person consolidation: tabla de cursor ausente (status %s); scan completo "
+                "(aplicar el DDL de consolidation_state del PR)",
+                response.status_code,
+            )
+            self._cursor_unavailable = True
+            return None
+        if response.status_code in (401, 403):
+            _LOGGER.warning(
+                "person consolidation: sin permiso para leer el cursor (status %s); scan completo "
+                "(%s sobre consolidation_state)",
+                response.status_code, _ROLE_HINT,
+            )
+            self._cursor_unavailable = True
+            return None
+        if response.status_code != 200:
+            _LOGGER.warning(
+                "person consolidation: lectura de cursor status %s; scan completo",
+                response.status_code,
+            )
+            return None
+        try:
+            rows = response.json()
+        except ValueError:
+            return None
+        if isinstance(rows, list) and rows:
+            created_at = rows[0].get("cursor_created_at")
+            cursor_id = rows[0].get("cursor_id")
+            if isinstance(created_at, str) and created_at and cursor_id:
+                return (created_at, str(cursor_id))
+        return None
+
+    def write_cursor(self, entity_type: str, created_at: str, cursor_id: str) -> bool:
+        """Persiste la frontera de ``entity_type`` (upsert por PK entity_type). Best-effort.
+
+        No es PII (timestamp + UUID). Si la tabla falta/rechaza, lo marca y no
+        reintenta el resto de la corrida; un fallo aqui no aborta el job.
+        """
+        if self._cursor_unavailable:
+            return False
+        payload = [{
+            "entity_type": entity_type,
+            "cursor_created_at": created_at,
+            "cursor_id": cursor_id,
+        }]
+        try:
+            response = self._client.post(
+                _CURSOR_UPSERT_PATH,
+                json=payload,
+                headers={"Prefer": "resolution=merge-duplicates,return=minimal"},
+            )
+        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            _LOGGER.warning("person consolidation: POST cursor error de red (%s)", type(exc).__name__)
+            return False
+        if response.status_code in (404, 406):
+            _LOGGER.info(
+                "person consolidation: tabla de cursor ausente; sin paginado incremental "
+                "(aplicar el DDL de consolidation_state del PR)"
+            )
+            self._cursor_unavailable = True
+            return False
+        if response.status_code in (401, 403):
+            _LOGGER.warning(
+                "person consolidation: sin permiso para persistir el cursor (status %s); "
+                "sin paginado incremental el resto de esta corrida (%s sobre consolidation_state)",
+                response.status_code, _ROLE_HINT,
+            )
+            self._cursor_unavailable = True
+            return False
+        if response.status_code not in (200, 201, 204):
+            _LOGGER.warning(
+                "person consolidation: no se pudo persistir el cursor (status %s)",
+                response.status_code,
+            )
+            return False
+        return True
 
     def find_existing_candidates(
         self,
@@ -561,13 +715,18 @@ class SupabasePersonDedupAdapter:
         return len(payloads)
 
     def update_candidate(self, candidate_id: str, payload: dict[str, Any]) -> None:
+        # NO se re-escribe ``decision`` aqui (option B, #93): esta arista ya existe
+        # y una re-corrida re-emite el mismo par por completitud (nuevo-vs-viejo).
+        # Escribir ``decision="pending"`` RESETEARIA la revision humana
+        # (confirmed/rejected + resolved_by/resolved_at) cada 20 min. Solo se
+        # refresca el scoring; los inserts nuevos ya nacen ``pending`` via
+        # ``_candidate_payload``.
         response = self._client.patch(
             f"/rest/v1/dedup_candidates?candidate_id=eq.{candidate_id}",
             json={
                 "score": payload["score"],
                 "reasons": payload["reasons"],
                 "priority": payload["priority"],
-                "decision": "pending",
             },
             headers={"Prefer": "return=minimal"},
         )
@@ -650,6 +809,54 @@ def _write_person_candidates(
     return result
 
 
+def _union_by_id(primary: list[dict[str, Any]], extra: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Une ``primary`` (pagina nueva) con ``extra`` (companeros historicos), dedup por id.
+
+    La pagina nueva tiene precedencia (se conserva su instancia). Los companeros
+    ya presentes en la pagina (o sin id) se descartan: el fetch por block_keys
+    puede devolver los mismos aportes nuevos (comparten block key) o repetidos.
+    """
+    seen: set[str] = set()
+    union: list[dict[str, Any]] = []
+    for rec in primary:
+        rid = rec.get("id")
+        if rid is not None:
+            seen.add(str(rid))
+        union.append(rec)
+    for rec in extra:
+        rid = rec.get("id")
+        if rid is None or str(rid) in seen:
+            continue
+        seen.add(str(rid))
+        union.append(rec)
+    return union
+
+
+def _fetch_block_partners(
+    adapter: "SupabasePersonDedupAdapter",
+    block_keys: list[str],
+    result: PersonConsolidationResult,
+) -> list[dict[str, Any]]:
+    """Companeros de bloque historicos para las block_keys de la pagina nueva.
+
+    No fatal: si el fetch falla, se degrada a bloqueo solo-pagina (se pierden las
+    aristas nuevo-vs-viejo de esta pagina, pero la corrida sigue emitiendo
+    nuevo-vs-nuevo) y se registra el error para visibilidad. Sin block_keys => [].
+    """
+    if not block_keys:
+        return []
+    try:
+        return adapter.fetch_partners_by_block_keys(block_keys)
+    except Exception as exc:  # noqa: BLE001 - degradar a solo-pagina, no abortar
+        result.errors.append(f"partner_fetch_error: {exc}")
+        _LOGGER.warning(
+            "person consolidation: fetch de companeros de bloque fallo (%s); "
+            "esta pagina bloquea solo contra si misma (sin nuevo-vs-viejo)",
+            exc,
+        )
+        return []
+
+
 def run_person_consolidation(
     config: PersonConsolidationConfig,
     client: httpx.Client | None = None,
@@ -668,7 +875,10 @@ def run_person_consolidation(
         if client is not None
         else SupabasePersonDedupAdapter.from_config(config)
     )
-    cursor = _INITIAL_CURSOR
+    # Option B (#93): arrancar desde la frontera durable, no desde el inicio. Si la
+    # tabla consolidation_state falta/rechaza, read_cursor degrada a None => scan
+    # completo (seguro, nunca el 400 de consolidated_at).
+    cursor = adapter.read_cursor(config.entity_type) or _INITIAL_CURSOR
 
     try:
         while True:
@@ -684,7 +894,18 @@ def run_person_consolidation(
             result.batches += 1
             result.records_read += len(rows)
 
-            blocks = build_blocks(rows)
+            # Nucleo de option B: la frontera sola solo compararia cada aporte NUEVO
+            # contra otros nuevos de su propia pagina (casi cero aristas
+            # nuevo-vs-viejo, PEOR que el rescan completo). Para las aristas
+            # nuevo-vs-viejo se traen los companeros de bloque HISTORICOS (ignorando
+            # la frontera) y se unen a la pagina antes de bloquear + puntuar. La
+            # idempotencia del write (find_existing_candidates) absorbe los pares
+            # viejo-vs-viejo que reaparezcan.
+            new_block_keys = list(build_blocks(rows).keys())
+            partners = _fetch_block_partners(adapter, new_block_keys, result)
+            scoring_rows = _union_by_id(rows, partners)
+
+            blocks = build_blocks(scoring_rows)
             result.blocks += len(blocks)
             for members in blocks.values():
                 n = len(members)
@@ -700,14 +921,17 @@ def run_person_consolidation(
             if write_result.fatal:
                 break
 
-            # No se marca ``consolidated_at`` (columna inexistente): el cursor
-            # keyset avanza la paginacion y ``find_existing_candidates`` hace el
-            # write idempotente, asi que el re-escaneo por corrida es seguro.
+            # Avanzar y PERSISTIR la frontera durable (option B). La proxima corrida
+            # arranca aca en vez de re-escanear; los companeros historicos siguen
+            # visibles via fetch_partners_by_block_keys, asi que un duplicado tardio
+            # aun bloquea contra registros ya procesados. Best-effort: si la tabla
+            # falta/rechaza, write_cursor degrada (la corrida sigue).
             last_row = rows[-1]
             cursor = (
                 str(last_row.get("created_at", _INITIAL_CURSOR[0])),
                 str(last_row.get("id", _INITIAL_CURSOR[1])),
             )
+            adapter.write_cursor(config.entity_type, cursor[0], cursor[1])
             if len(rows) < config.batch_size:
                 break
     finally:

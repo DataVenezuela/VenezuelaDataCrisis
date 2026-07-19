@@ -179,6 +179,21 @@ CREATE TABLE public.silver_materialize_state (
   CONSTRAINT silver_materialize_state_pkey PRIMARY KEY (singleton),
   CONSTRAINT silver_materialize_state_singleton CHECK (singleton)
 );
+-- Cursor durable POR entity_type del consolidation_job (option B, #93). Frontera
+-- (created_at, id) del ultimo aporte procesado por cada slug (event|acopio|person),
+-- para que la consolidacion procese solo aportes NUEVOS en vez de reescanear todo
+-- (y sin re-pisar la revision humana en dedup_candidates). Espeja
+-- silver_materialize_state pero con PK = entity_type en vez de singleton.
+-- PENDIENTE: DDL a aplicar por el mantenedor (va en el cuerpo del PR de #93);
+-- requiere grants SELECT/INSERT/UPDATE al rol consolidation_job. El adapter degrada
+-- a scan completo si la tabla falta o rechaza el acceso.
+CREATE TABLE public.consolidation_state (
+  entity_type text NOT NULL,
+  cursor_created_at timestamp with time zone,
+  cursor_id uuid,
+  updated_at timestamp with time zone NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT consolidation_state_pkey PRIMARY KEY (entity_type)
+);
 CREATE TABLE public.dedup_candidates (
   candidate_id uuid NOT NULL DEFAULT gen_random_uuid(),
   left_aporte_id uuid NOT NULL,

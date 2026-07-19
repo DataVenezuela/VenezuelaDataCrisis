@@ -144,8 +144,11 @@ flowchart TD
 - Cerrar los huecos código-vs-canon registrados (columnas que el exporter emite
   fuera del `aportes` canónico, nullability de `artifact_id`) contra
   `docs/schema.md`, como parte de la migración de `aportes`. El hueco de
-  `aportes.consolidated_at` quedó cerrado (2026-07-19): el job ya no usa esa
-  columna, pagina por cursor keyset `(created_at, id)` (ver `docs/specs/person-dedup.md`).
+  `aportes.consolidated_at` quedó cerrado (2026-07-19, option B / #93): el job ya no
+  usa esa columna; pagina por una **frontera durable** en la tabla
+  `consolidation_state` (cursor keyset `(created_at, id)` por `entity_type`) y, para
+  Person, trae compañeros de bloque históricos por `block_keys` para la completitud
+  nuevo-vs-viejo (ver `docs/specs/person-dedup.md`).
 - Restricciones must-link / cannot-link y re-clustering periódico: Fase 2.
 
 ---

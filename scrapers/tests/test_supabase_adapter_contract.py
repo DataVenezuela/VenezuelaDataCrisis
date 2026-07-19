@@ -190,6 +190,34 @@ def test_dedup_candidates_columnas_reales_existen() -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# consolidation_state — cursor durable de option B (#93)
+# ---------------------------------------------------------------------------
+
+def test_consolidation_state_columnas_reales_existen() -> None:
+    # El cursor durable exige que el fixture declare consolidation_state con las
+    # columnas que read_cursor/write_cursor leen y escriben. Si el DDL del PR
+    # difiere del fixture, este test rompe en vez de degradar en silencio.
+    sql = _read_schema()
+    cols = _columns_of_table(sql, "consolidation_state")
+    for col in ("entity_type", "cursor_created_at", "cursor_id", "updated_at"):
+        assert col in cols, (
+            f"consolidation_state.{col} requerida por el cursor durable (option B) "
+            f"no existe en el fixture; columnas: {sorted(cols)}"
+        )
+
+
+def test_consolidation_state_select_del_adapter_usa_columnas_reales() -> None:
+    # Las columnas que el SELECT del adapter proyecta (read_cursor) y las que el
+    # upsert escribe (write_cursor) deben existir en el schema del fixture.
+    sql = _read_schema()
+    cols = _columns_of_table(sql, "consolidation_state")
+    read_cols = {"cursor_created_at", "cursor_id"}
+    write_cols = {"entity_type", "cursor_created_at", "cursor_id"}
+    assert read_cols <= cols
+    assert write_cols <= cols
+
+
 def test_candidate_payload_solo_emite_columnas_reales() -> None:
     from scrapers.jobs.consolidation_job import _candidate_payload
 

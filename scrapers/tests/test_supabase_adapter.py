@@ -508,3 +508,79 @@ def test_fetch_person_candidates_un_solo_block_key() -> None:
 
     or_val = parse_qs(urlparse(str(captured["url"])).query)["or"][0]
     assert or_val == '(block_keys.cs.["phon:ev2:xyz"])'
+
+
+# --- Cursor durable por entity_type (option B, #93) -------------------------
+
+def test_read_cursor_devuelve_frontera_y_filtra_por_slug() -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = request.url
+        return httpx.Response(200, json=[{
+            "cursor_created_at": "2024-05-01T00:00:00Z",
+            "cursor_id": "c-42",
+        }])
+
+    adapter = _adapter(handler)
+    cursor = adapter.read_cursor("Event")
+
+    assert cursor == ("2024-05-01T00:00:00Z", "c-42")
+    query = parse_qs(urlparse(str(captured["url"])).query)
+    # Se consulta consolidation_state filtrando por el slug de la DB (event), no
+    # por el nombre interno (Event).
+    assert urlparse(str(captured["url"])).path == "/rest/v1/consolidation_state"
+    assert query["entity_type"] == ["eq.event"]
+
+
+def test_read_cursor_vacio_devuelve_none() -> None:
+    adapter = _adapter(lambda request: httpx.Response(200, json=[]))
+    assert adapter.read_cursor("AcopioCenter") is None
+
+
+def test_read_cursor_tabla_ausente_degrada_a_none() -> None:
+    adapter = _adapter(lambda request: httpx.Response(404, json={"message": "no relation"}))
+    assert adapter.read_cursor("Event") is None
+    assert adapter._cursor_unavailable is True
+
+
+def test_read_cursor_sin_permiso_degrada_a_none() -> None:
+    adapter = _adapter(lambda request: httpx.Response(403, json={"message": "permission denied"}))
+    assert adapter.read_cursor("Event") is None
+    assert adapter._cursor_unavailable is True
+
+
+def test_write_cursor_upsert_por_entity_type() -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = request.url
+        captured["body"] = json.loads(request.content)
+        captured["prefer"] = request.headers.get("Prefer")
+        return httpx.Response(204)
+
+    adapter = _adapter(handler)
+    ok = adapter.write_cursor("AcopioCenter", "2024-06-01T00:00:00Z", "c-99")
+
+    assert ok is True
+    assert "on_conflict=entity_type" in str(captured["url"])
+    assert captured["body"] == [{
+        "entity_type": "acopio",
+        "cursor_created_at": "2024-06-01T00:00:00Z",
+        "cursor_id": "c-99",
+    }]
+    assert "resolution=merge-duplicates" in captured["prefer"]
+
+
+def test_write_cursor_tabla_ausente_no_reintenta() -> None:
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(404, json={"message": "no relation"})
+
+    adapter = _adapter(handler)
+    assert adapter.write_cursor("Event", "2024-06-01T00:00:00Z", "c-1") is False
+    # Marcada como no disponible => una segunda escritura no toca la red.
+    assert adapter.write_cursor("Event", "2024-06-02T00:00:00Z", "c-2") is False
+    assert calls["n"] == 1

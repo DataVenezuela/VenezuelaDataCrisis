@@ -93,7 +93,10 @@ def test_gana_el_de_menor_tier() -> None:
     assert canonical["winner_aporte_id"] == "alta"
 
 
-def test_recorrer_dos_veces_es_idempotente() -> None:
+def test_recorrer_dos_veces_no_reprocesa_frontera_persistida() -> None:
+    # Option B (#93): la primera corrida persiste la frontera durable; la segunda
+    # arranca DESPUES de ella y no re-procesa nada (a diferencia del rescan completo
+    # de option A). Esto es lo que evita re-pisar trabajo/decisiones cada 20 min.
     aportes = [_event_aporte(f"a{i}", trust_tier="B") for i in range(3)]
     adapter = FakeInMemoryAdapter(aportes)
 
@@ -103,12 +106,13 @@ def test_recorrer_dos_veces_es_idempotente() -> None:
     second = consolidate_entity_type(adapter, "Event", batch_size=10)
 
     assert first["groups"] == 1
-    # Sin estado de "consolidado", la segunda corrida RE-ESCANEA todo y re-upserta
-    # el mismo ganador (idempotente por on_conflict=dedup_hash): re-hacer el
-    # trabajo no cambia el resultado. La idempotencia es "mismo estado final",
-    # no "saltarse el trabajo ya hecho".
-    assert second["groups"] == 1
-    assert second["upserts"] == 1
+    assert first["upserts"] == 1
+    # La frontera quedo persistida en el fake tras la primera corrida.
+    assert adapter.read_cursor("Event") is not None
+    # La segunda corrida no ve aportes nuevos: cero trabajo, canonical intacto.
+    assert second["groups"] == 0
+    assert second["upserts"] == 0
+    assert second["batches"] == 0
     assert adapter.canonical == canonical_after_first
     assert len(adapter.canonical) == 1
 
@@ -452,27 +456,56 @@ class _PersonTransport(httpx.BaseTransport):
         batches: list[list[dict[str, Any]]],
         *,
         existing: list[dict[str, Any]] | None = None,
+        partners: list[dict[str, Any]] | None = None,
+        cursor_rows: list[dict[str, Any]] | None = None,
+        cursor_get_status: int = 200,
+        cursor_post_status: int = 204,
         post_status: int = 201,
         patch_candidate_status: int = 204,
         mark_status: int = 204,
     ) -> None:
         self.batches = batches
         self.existing = existing or []
+        # Companeros historicos que devuelve el fetch por block_keys (option B, #93).
+        # Default [] => sin nuevo-vs-viejo (comportamiento de una sola pagina).
+        self.partners = partners or []
+        # Frontera durable persistida en consolidation_state. Default [] => sin
+        # cursor => read_cursor degrada a scan completo (sentinela inicial).
+        self.cursor_rows = cursor_rows or []
+        self.cursor_get_status = cursor_get_status
+        self.cursor_post_status = cursor_post_status
         self.post_status = post_status
         self.patch_candidate_status = patch_candidate_status
         self.mark_status = mark_status
         self.get_urls: list[str] = []
+        self.partner_get_urls: list[str] = []
         self.post_bodies: list[Any] = []
         self.patch_urls: list[str] = []
+        self.patch_bodies: list[Any] = []
+        self.cursor_get_urls: list[str] = []
+        self.cursor_post_bodies: list[Any] = []
         self._batch_idx = 0
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
+        query = str(request.url.query)
         if request.method == "GET" and path == "/rest/v1/aportes":
+            # El fetch de companeros historicos (option B) usa block_keys.cs.[...]
+            # en el filtro `or`; el fetch de pagina usa el cursor keyset con
+            # order=created_at. Se enrutan por separado para no consumir un batch.
+            if "block_keys.cs" in query:
+                self.partner_get_urls.append(str(request.url))
+                return httpx.Response(200, json=self.partners)
             self.get_urls.append(str(request.url))
             batch = self.batches[self._batch_idx] if self._batch_idx < len(self.batches) else []
             self._batch_idx += 1
             return httpx.Response(200, json=batch)
+        if request.method == "GET" and path == "/rest/v1/consolidation_state":
+            self.cursor_get_urls.append(str(request.url))
+            return httpx.Response(self.cursor_get_status, json=self.cursor_rows)
+        if request.method == "POST" and path == "/rest/v1/consolidation_state":
+            self.cursor_post_bodies.append(json.loads(request.content))
+            return httpx.Response(self.cursor_post_status)
         if request.method == "GET" and path == "/rest/v1/dedup_candidates":
             self.get_urls.append(str(request.url))
             return httpx.Response(200, json=self.existing)
@@ -481,6 +514,7 @@ class _PersonTransport(httpx.BaseTransport):
             return httpx.Response(self.post_status)
         if request.method == "PATCH" and path == "/rest/v1/dedup_candidates":
             self.patch_urls.append(str(request.url))
+            self.patch_bodies.append(json.loads(request.content))
             return httpx.Response(self.patch_candidate_status)
         if request.method == "PATCH" and path == "/rest/v1/aportes":
             self.patch_urls.append(str(request.url))
@@ -696,6 +730,145 @@ def test_person_without_block_keys_and_event_id_generates_no_invalid_keys() -> N
     assert transport.post_bodies == []
 
 
+# --- Person option B: cursor durable + companeros historicos (#93) -----------
+
+def test_person_new_vs_old_produces_candidate_across_cursor() -> None:
+    # CENTERPIECE de option B (#93): un aporte NUEVO (posterior a la frontera)
+    # que duplica a uno VIEJO (anterior a la frontera, en otra pagina) DEBE seguir
+    # generando una arista. Con frontier-only fallaria (el nuevo solo se compara
+    # contra su propia pagina); con el fetch de companeros historicos, pasa.
+    block = f"ced:{_EVENT_ID}:same"
+    old = _person_aporte("old-1", "person-old", created_at="2024-01-01T00:00:00Z",
+                         block_keys=[block])
+    new = _person_aporte("new-2", "person-new", name="Juan Perez",
+                         created_at="2024-02-01T00:00:00Z", block_keys=[block])
+    # La frontera persistida esta ENTRE old y new: fetch_batch solo devuelve `new`.
+    transport = _PersonTransport(
+        [[new], []],
+        partners=[old],  # el fetch por block_keys trae el viejo, ignorando la frontera
+        cursor_rows=[{
+            "cursor_created_at": "2024-01-15T00:00:00Z",
+            "cursor_id": "old-1",
+        }],
+    )
+    result = run_person_consolidation(
+        _person_config(threshold=0.5),
+        client=_person_client(transport),
+    )
+
+    # Se leyo la frontera y el primer fetch de pagina arranca DESPUES de ella.
+    assert transport.cursor_get_urls, "no se leyo consolidation_state"
+    first_page = transport.get_urls[0]
+    assert "created_at.gt.2024-01-15T00%3A00%3A00Z" in first_page
+    # El companero historico se pidio por block_keys (ignorando la frontera).
+    assert transport.partner_get_urls
+    assert "block_keys.cs" in transport.partner_get_urls[0]
+    # Y la arista nuevo-vs-viejo se emitio.
+    assert result.candidates_inserted_or_updated == 1
+    body = transport.post_bodies[0][0]
+    assert {body["left_aporte_id"], body["right_aporte_id"]} == {"old-1", "new-2"}
+
+
+def test_person_frontier_only_would_miss_without_partners() -> None:
+    # Control negativo del test anterior: si NO hay companeros historicos (partners
+    # vacio), el aporte nuevo solo esta contra si mismo => cero aristas. Demuestra
+    # que la completitud viene del fetch de companeros, no de la frontera.
+    block = f"ced:{_EVENT_ID}:same"
+    new = _person_aporte("new-2", "person-new", created_at="2024-02-01T00:00:00Z",
+                         block_keys=[block])
+    transport = _PersonTransport([[new], []], partners=[])
+    result = run_person_consolidation(
+        _person_config(threshold=0.5),
+        client=_person_client(transport),
+    )
+    assert result.candidates_inserted_or_updated == 0
+    assert transport.post_bodies == []
+
+
+def test_person_persists_frontier_after_page() -> None:
+    # La corrida persiste la frontera durable (option B) tras cada pagina: el POST
+    # a consolidation_state lleva entity_type=person y el keyset de la ultima fila.
+    rows = [
+        _person_aporte("0001", "person-1", created_at="2024-03-01T00:00:00Z"),
+        _person_aporte("0002", "person-2", created_at="2024-03-02T00:00:00Z"),
+    ]
+    transport = _PersonTransport([rows, []])
+    run_person_consolidation(_person_config(), client=_person_client(transport))
+
+    assert transport.cursor_post_bodies, "no se persistio la frontera"
+    last = transport.cursor_post_bodies[-1][0]
+    assert last["entity_type"] == "person"
+    assert last["cursor_created_at"] == "2024-03-02T00:00:00Z"
+    assert last["cursor_id"] == "0002"
+
+
+def test_person_update_candidate_no_resetea_decision() -> None:
+    # option B: al actualizar una arista YA existente NO se re-escribe `decision`,
+    # asi la revision humana (confirmed/rejected + resolved_by/at) sobrevive a cada
+    # corrida. El PATCH solo refresca scoring.
+    rows = [_person_aporte("a1", "person-1"), _person_aporte("a2", "person-2")]
+    transport = _PersonTransport(
+        [rows],
+        existing=[{
+            "candidate_id": "cand-1",
+            "left_aporte_id": "a1",
+            "right_aporte_id": "a2",
+            "blocking_key": f"ced:{_EVENT_ID}:same",
+        }],
+    )
+    run_person_consolidation(_person_config(), client=_person_client(transport))
+
+    assert transport.patch_bodies, "no hubo PATCH de actualizacion"
+    patched = transport.patch_bodies[0]
+    assert "decision" not in patched, (
+        "update_candidate no debe re-escribir decision (resetearia la revision humana)"
+    )
+    assert set(patched) == {"score", "reasons", "priority"}
+
+
+def test_person_cursor_ausente_degrada_a_scan_completo() -> None:
+    # Degradacion graciosa (#93): si consolidation_state falta (404), read_cursor
+    # devuelve None y la corrida arranca desde el sentinela (scan completo) sin
+    # abortar ni 400. El write tampoco aborta.
+    rows = [_person_aporte("a1", "person-1"), _person_aporte("a2", "person-2")]
+    transport = _PersonTransport(
+        [rows, []],
+        cursor_get_status=404,
+        cursor_post_status=404,
+    )
+    result = run_person_consolidation(_person_config(), client=_person_client(transport))
+
+    assert result.errors == []
+    assert result.records_read == 2
+    # Arranco desde el sentinela inicial (no hay frontera).
+    first_page = transport.get_urls[0]
+    assert "created_at.gt.1970-01-01T00%3A00%3A00Z" in first_page
+    assert result.candidates_inserted_or_updated == 1
+
+
+def test_person_partner_fetch_error_es_no_fatal() -> None:
+    # Si el fetch de companeros historicos falla, la pagina degrada a bloqueo
+    # solo-pagina (no aborta): las aristas nuevo-vs-nuevo se emiten igual y el error
+    # queda registrado para visibilidad.
+    class _PartnerFailTransport(_PersonTransport):
+        def handle_request(self, request: httpx.Request) -> httpx.Response:
+            if (
+                request.method == "GET"
+                and request.url.path == "/rest/v1/aportes"
+                and "block_keys.cs" in str(request.url.query)
+            ):
+                return httpx.Response(500, json={"error": "boom"})
+            return super().handle_request(request)
+
+    rows = [_person_aporte("a1", "person-1"), _person_aporte("a2", "person-2")]
+    transport = _PartnerFailTransport([rows, []])
+    result = run_person_consolidation(_person_config(), client=_person_client(transport))
+
+    # Nuevo-vs-nuevo se emitio pese al fallo del fetch de companeros.
+    assert result.candidates_inserted_or_updated == 1
+    assert any("partner_fetch_error" in msg for msg in result.errors)
+
+
 # --- Person config from_env (analogo a Event/Acopio, review de mayerlim) -----
 
 _PERSON_URL = "https://proj.supabase.co"
@@ -810,11 +983,18 @@ def test_person_run_cierra_client_propio(monkeypatch: pytest.MonkeyPatch) -> Non
         closed.append(True)
         self._client.close()
 
-    # fetch_batch vacio => corta al primer batch sin red real.
+    # fetch_batch vacio => corta al primer batch sin red real. read_cursor tambien
+    # se stubbea: sin el, la lectura de la frontera haria un GET real (degradaria a
+    # None por NetworkError, pero mejor no tocar la red en un unit test).
     monkeypatch.setattr(
         SupabasePersonDedupAdapter,
         "fetch_batch",
         lambda self, config, cursor: [],
+    )
+    monkeypatch.setattr(
+        SupabasePersonDedupAdapter,
+        "read_cursor",
+        lambda self, entity_type: None,
     )
     monkeypatch.setattr(SupabasePersonDedupAdapter, "close", _spy_close)
 

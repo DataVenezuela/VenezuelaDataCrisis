@@ -71,6 +71,18 @@ log = logging.getLogger(__name__)
 # --- Endpoints PostgREST ----------------------------------------------------
 _APORTES_PATH = "/rest/v1/aportes"
 
+# Cursor durable por entity_type (option B, #93). Mirror de silver_materialize_state
+# del materializer, pero con PK = entity_type (una fila por slug event/acopio/person)
+# en vez de singleton. La consolidacion arranca desde esta frontera cada corrida,
+# de modo que solo procesa aportes NUEVOS (no reescanea todo ni resetea decisiones
+# de revision). El DDL va en el cuerpo del PR; el mantenedor lo aplica primero.
+_CURSOR_PATH = "/rest/v1/consolidation_state"
+_CURSOR_UPSERT_PATH = "/rest/v1/consolidation_state?on_conflict=entity_type"
+
+# Hint de rol para los WARN de permiso: el job corre como consolidation_job (no
+# scraper_ingest); un 401/403 sobre consolidation_state es un grant faltante de ese rol.
+_ROLE_HINT = "revisar grants de consolidation_job"
+
 # Nombre interno del tipo (Event/AcopioCenter) -> (slug de aportes.entity_type,
 # path PostgREST de la tabla canonica). Los slugs replican _ENTITY_TYPE_SLUGS del
 # staging_exporter y el enum del backend (0008): "event" | "acopio" | "person".
@@ -259,6 +271,9 @@ class SupabaseConsolidationAdapter:
 
     def __init__(self, client: httpx.Client) -> None:
         self._client = client
+        # Se marca en True la primera vez que la tabla de cursor falta o rechaza
+        # el acceso, para no reintentar (ni loguear) en cada pagina de la corrida.
+        self._cursor_unavailable = False
 
     @classmethod
     def from_config(
@@ -386,6 +401,112 @@ class SupabaseConsolidationAdapter:
             headers={"Prefer": "resolution=merge-duplicates,return=minimal"},
         )
         resp.raise_for_status()
+
+    # -- Cursor durable por entity_type (option B, #93) -----------------------
+
+    def read_cursor(self, entity_type: str) -> tuple[str, str] | None:
+        """Lee la frontera ``(created_at, id)`` de ``entity_type``; None => scan completo.
+
+        Se degrada a None (scan completo desde el sentinela, sin abortar) ante
+        cualquier problema: tabla ausente (DDL pendiente, 404/406), sin permiso
+        (401/403), o error de red. Espeja ``materializer._read_cursor`` para no
+        repetir el incidente del 400 de ``consolidated_at``.
+        """
+        slug, _ = _entity_tables(entity_type)
+        try:
+            resp = self._request_with_retry(
+                "GET",
+                _CURSOR_PATH,
+                params={
+                    "select": "cursor_created_at,cursor_id",
+                    "entity_type": f"eq.{slug}",
+                    "limit": "1",
+                },
+            )
+        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            log.warning(
+                "consolidacion: no se pudo leer el cursor de %s (%s); scan completo",
+                slug, type(exc).__name__,
+            )
+            return None
+        if resp.status_code in (404, 406):
+            log.info(
+                "consolidacion: tabla de cursor ausente (status %s); scan completo de %s "
+                "(aplicar el DDL de consolidation_state del PR para el paginado incremental)",
+                resp.status_code, slug,
+            )
+            self._cursor_unavailable = True
+            return None
+        if resp.status_code in (401, 403):
+            log.warning(
+                "consolidacion: sin permiso para leer el cursor (status %s); scan completo "
+                "(%s sobre consolidation_state)",
+                resp.status_code, _ROLE_HINT,
+            )
+            self._cursor_unavailable = True
+            return None
+        if resp.status_code != 200:
+            log.warning(
+                "consolidacion: lectura de cursor de %s status %s; scan completo",
+                slug, resp.status_code,
+            )
+            return None
+        try:
+            rows = resp.json()
+        except ValueError:
+            return None
+        if isinstance(rows, list) and rows:
+            created_at = rows[0].get("cursor_created_at")
+            cursor_id = rows[0].get("cursor_id")
+            if isinstance(created_at, str) and created_at and cursor_id:
+                return (created_at, str(cursor_id))
+        return None
+
+    def write_cursor(self, entity_type: str, created_at: str, cursor_id: str) -> bool:
+        """Persiste la frontera de ``entity_type`` (upsert por PK entity_type). Best-effort.
+
+        No es PII (timestamp + UUID de aporte). Si la tabla no existe o falta el
+        permiso, lo marca y no reintenta el resto de la corrida; un fallo aqui no
+        aborta el job (la proxima corrida re-escanea, idempotente aguas abajo).
+        """
+        if self._cursor_unavailable:
+            return False
+        slug, _ = _entity_tables(entity_type)
+        payload = [{
+            "entity_type": slug,
+            "cursor_created_at": created_at,
+            "cursor_id": cursor_id,
+        }]
+        try:
+            resp = self._request_with_retry(
+                "POST",
+                _CURSOR_UPSERT_PATH,
+                json=payload,
+                headers={"Prefer": "resolution=merge-duplicates,return=minimal"},
+            )
+        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            log.warning("consolidacion: POST cursor de %s error de red (%s)", slug, type(exc).__name__)
+            return False
+        if resp.status_code in (404, 406):
+            log.info(
+                "consolidacion: tabla de cursor ausente; sin paginado incremental de %s "
+                "(aplicar el DDL de consolidation_state del PR)",
+                slug,
+            )
+            self._cursor_unavailable = True
+            return False
+        if resp.status_code in (401, 403):
+            log.warning(
+                "consolidacion: sin permiso para persistir el cursor (status %s); "
+                "sin paginado incremental el resto de esta corrida (%s sobre consolidation_state)",
+                resp.status_code, _ROLE_HINT,
+            )
+            self._cursor_unavailable = True
+            return False
+        if resp.status_code not in (200, 201, 204):
+            log.warning("consolidacion: no se pudo persistir el cursor de %s (status %s)", slug, resp.status_code)
+            return False
+        return True
 
     # -- Person: candidatos por block keys para el scorer (#92) ---------------
 

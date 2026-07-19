@@ -120,3 +120,21 @@ create table public.dedup_candidates (
   resolved_at     timestamptz,
   check (left_aporte_id <> right_aporte_id)
 );
+
+-- ---------------------------------------------------------------------------
+-- consolidation_state: cursor durable POR entity_type (option B, #93).
+-- NOTA: esta tabla es NUEVA (DDL pendiente de aplicar por el mantenedor; va en el
+-- cuerpo del PR, sin migracion cross-repo). Espeja silver_materialize_state del
+-- materializer pero con PK = entity_type (una fila por slug event|acopio|person)
+-- en vez de singleton. La consolidacion arranca desde esta frontera cada corrida,
+-- de modo que solo procesa aportes NUEVOS. El adapter degrada a scan completo si la
+-- tabla falta (404/406) o sin permiso (401/403), para no repetir el 400 de
+-- consolidated_at. Requiere grants SELECT/INSERT/UPDATE al rol consolidation_job.
+-- ---------------------------------------------------------------------------
+create table public.consolidation_state (
+  entity_type       text not null,
+  cursor_created_at timestamptz,
+  cursor_id         uuid,
+  updated_at        timestamptz not null default now(),
+  constraint consolidation_state_pkey primary key (entity_type)
+);
