@@ -31,6 +31,7 @@ import httpx
 import pytest
 
 from scrapers.adapters.base import RawContent
+from scrapers.adapters.pdf_adapter import PdfTextExtractionError
 from scrapers.exporters.provenance_exporter import ProvenanceExporter
 from scrapers.exporters.quarantine_exporter import QuarantineConfig, QuarantineExporter
 from scrapers.exporters.staging_exporter import StagingConfig, StagingExporter
@@ -1879,3 +1880,101 @@ sources:
         # temprano por fallo de resolucion de fuentes.
         instance.materialize.assert_called_once_with(event_id=_EVENT_ID)
         assert "no se pudo leer project.event_id" not in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# PDF sin texto extraible -> cuarentena `pdf_no_text` (no se descarta en silencio)
+# ---------------------------------------------------------------------------
+
+
+class _RaisingAdapter:
+    """Adapter cuyo `fetch_all` lanza durante la iteracion (streaming lazy)."""
+
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+
+    def fetch_all(self, path: str, **kwargs: Any):
+        yield from ()  # no emite ninguna pagina...
+        raise self._exc  # ...y falla en el primer next(), como el PdfAdapter real
+
+
+class _OkAdapter:
+    def fetch_all(self, path: str, **kwargs: Any):
+        yield {"page": 1, "raw_content": "x"}
+        yield {"page": 2, "raw_content": "y"}
+
+
+def _pdf_source() -> SourceConfig:
+    return SourceConfig(
+        id="pdf_src",
+        name="PDF",
+        type="pdf",
+        enabled=True,
+        trust_tier="C",
+        url="https://example.org/scan.pdf",
+        refresh_minutes=30,
+        parser_asignado="encuentralos",
+    )
+
+
+class TestPdfNoTextQuarantine:
+    """Un PDF escaneado/imagen (sin texto extraible) no se pierde: va a cuarentena
+    con reason_code `pdf_no_text` para OCR/revision humana. Antes se descartaba en
+    silencio (la excepcion solo quedaba en un log)."""
+
+    def test_pdf_without_text_is_quarantined(self) -> None:
+        source = _pdf_source()
+        exc = PdfTextExtractionError(
+            "PDF has no extractable text; OCR is required: https://example.org/scan.pdf",
+            source_url="https://example.org/scan.pdf",
+            content_hash="a" * 64,
+        )
+        quarantine_batch: list[QuarantineRecord] = []
+        errors: list[str] = []
+
+        pages = list(
+            rp._fetch_pages_or_quarantine(
+                _RaisingAdapter(exc), source, "2026-01-01T00:00:00Z",
+                quarantine_batch, errors,
+            )
+        )
+
+        assert pages == []  # no se emitio ninguna pagina
+        assert len(quarantine_batch) == 1
+        qrec = quarantine_batch[0]
+        assert qrec.reason_code == "pdf_no_text"
+        assert qrec.reason_code in QUARANTINE_REASON_CODES
+        assert qrec.risk_level == "medium"
+        assert qrec.source_slug == "pdf_src"
+        assert qrec.source_url == "https://example.org/scan.pdf"
+        # payload_hash = SHA-256 de los bytes del PDF: prueba que ESE archivo se vio.
+        assert qrec.payload_hash == "a" * 64
+        assert qrec.payload_preview_redacted is None  # no hay texto que previsualizar
+        # Regresion: el exporter debe aceptarlo, si no quarantine_many lo perderia.
+        qrec.validate()  # no debe lanzar
+        assert errors and any("pdf_no_text" in e for e in errors)
+
+    def test_non_pdf_error_is_reraised(self) -> None:
+        source = _pdf_source()
+        quarantine_batch: list[QuarantineRecord] = []
+        with pytest.raises(RuntimeError, match="boom"):
+            list(
+                rp._fetch_pages_or_quarantine(
+                    _RaisingAdapter(RuntimeError("boom")), source,
+                    "2026-01-01T00:00:00Z", quarantine_batch, [],
+                )
+            )
+        # Otras fallas (descarga, red) NO se cuarentenan aqui: las maneja
+        # _process_source_safe reteniendo el watermark para re-fetch.
+        assert quarantine_batch == []
+
+    def test_pages_pass_through_when_no_error(self) -> None:
+        source = _pdf_source()
+        quarantine_batch: list[QuarantineRecord] = []
+        pages = list(
+            rp._fetch_pages_or_quarantine(
+                _OkAdapter(), source, "2026-01-01T00:00:00Z", quarantine_batch, [],
+            )
+        )
+        assert [p["page"] for p in pages] == [1, 2]
+        assert quarantine_batch == []

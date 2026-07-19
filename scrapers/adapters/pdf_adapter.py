@@ -23,7 +23,18 @@ class PdfAdapterError(RuntimeError):
 
 
 class PdfTextExtractionError(PdfAdapterError):
-    """Raised when a PDF opens but has no extractable text."""
+    """Raised when a PDF opens but has no extractable text.
+
+    Carries ``source_url`` and ``content_hash`` (SHA-256 hex of the PDF bytes) so
+    the pipeline can quarantine the artifact (reason_code ``pdf_no_text``) with a
+    verifiable ``payload_hash`` instead of discarding it: a scanned/image-only PDF
+    needs OCR or human review, it is not dropped silently.
+    """
+
+    def __init__(self, message: str, *, source_url: str, content_hash: str) -> None:
+        super().__init__(message)
+        self.source_url = source_url
+        self.content_hash = content_hash
 
 
 class PdfAdapter:
@@ -163,7 +174,9 @@ def _extract_pdf_pages(pdf_bytes: bytes, source_url: str) -> list[str]:
 
     if not pages or not any(page.strip() for page in pages):
         raise PdfTextExtractionError(
-            f"PDF has no extractable text; OCR is required: {source_url}"
+            f"PDF has no extractable text; OCR is required: {source_url}",
+            source_url=source_url,
+            content_hash=sha256_hex(pdf_bytes),
         )
     return pages
 

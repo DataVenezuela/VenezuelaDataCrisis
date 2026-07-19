@@ -399,6 +399,48 @@ def _fetch_pages(adapter: Any, source: SourceConfig, updated_after: str):
                     break
 
 
+def _fetch_pages_or_quarantine(
+    adapter: Any,
+    source: SourceConfig,
+    updated_after: str,
+    quarantine_batch: list[QuarantineRecord],
+    source_errors: list[str],
+):
+    """Itera las páginas del adapter; si un PDF no tiene texto extraíble
+    (imagen/escaneo), NO se descarta en silencio: el artefacto va a cuarentena
+    (``pdf_no_text``) para OCR/revisión humana y la iteración termina.
+
+    El ``payload_hash`` es el SHA-256 de los bytes del PDF (lo trae la excepción),
+    así el revisor puede verificar exactamente qué archivo se vio. No hay texto que
+    previsualizar ni PII detectada (no se extrajo nada), por eso esos campos se omiten.
+
+    Cualquier otra excepción (descarga fallida, etc.) se re-lanza sin tocar: esas
+    rutas ya las maneja ``_process_source_safe`` (retiene watermark, re-fetch).
+    """
+    try:
+        yield from _fetch_pages(adapter, source, updated_after)
+    except Exception as exc:
+        # Import perezoso: no cargar pdfplumber en el happy-path ni para adapters
+        # no-PDF (mismo criterio que el registry de adapters).
+        from scrapers.adapters.pdf_adapter import PdfTextExtractionError
+
+        if not isinstance(exc, PdfTextExtractionError):
+            raise
+        msg = f"PDF sin texto extraíble (a cuarentena pdf_no_text): {exc}"
+        log.warning("[%s] %s", source.id, msg)
+        source_errors.append(msg)
+        quarantine_batch.append(
+            QuarantineRecord(
+                source_slug=source.id,
+                reason_code="pdf_no_text",
+                risk_level="medium",
+                source_url=exc.source_url or source.url,
+                reason_detail=msg,
+                payload_hash=exc.content_hash,
+            )
+        )
+
+
 def _parse_pages(
     parser: Any,
     pages: list[RawContent],
@@ -834,7 +876,13 @@ def _run_source(
             log.error("[%s] %s", source.id, msg)
             source_errors.append(msg)
 
-        for page in _fetch_pages(adapter, source, watermark_at) if run_id is not None else ():
+        for page in (
+            _fetch_pages_or_quarantine(
+                adapter, source, watermark_at, quarantine_batch, source_errors
+            )
+            if run_id is not None
+            else ()
+        ):
             pages_seen += 1
 
             # Registrar la pagina cruda en Bronze (append-only) ANTES de parsear:
