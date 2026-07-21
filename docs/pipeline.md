@@ -781,12 +781,17 @@ La tabla `quarantined_records` es la de `docs/schema.md`; el scraper no ejecuta 
 |----------------------|---------------|--------------|
 | Fuente sin parser asignado (se baja el crudo igual) | `parser_unavailable` | `medium` |
 | Página que falla al parsear | `invalid_schema` | `medium` |
+| PDF sin texto extraíble (imagen/escaneo, requiere OCR) | `pdf_no_text` | `medium` |
 | PII no tratable/redactable (ni rescatable sin PII) | `pii_untreatable` | `high` |
 | Protección de menores falla (fail-closed solo para staging) | `pii_untreatable` | `high` |
 
+En el caso `pdf_no_text` no hay texto que previsualizar ni PII detectada (no se
+extrajo nada), así que `payload_preview_redacted` y `pii_findings_summary` se omiten;
+el `payload_hash` es el SHA-256 de los bytes del PDF, que prueba qué archivo exacto
+se vio para el revisor humano.
+
 Otros `reason_code` controlados (los produce el backend o etapas futuras):
-`pdf_no_text`, `unclassified_sensitive`, `contradictory_sources`,
-`ambiguous_manual_review`.
+`unclassified_sensitive`, `contradictory_sources`, `ambiguous_manual_review`.
 
 Un **type sin adapter** implementado omite la fuente entera: no hay payload que
 cuarentenar (nunca se hizo fetch), pero la omisión queda **visible** en
