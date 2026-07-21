@@ -2,12 +2,29 @@
 
 | Campo | Valor |
 |---|---|
-| Estado | Propuesta |
+| Estado | Rechazada (2026-07-21) |
 | Fecha | 2026-07-04 |
 | Decisores | Mantenedores (mathiasaiva, mayerlim), equipo de pipeline |
 | Reemplaza a | (ninguno) |
 | Complementa | ADR 0003 (reestructuración de repos) |
-| Relacionado con | spec #231 (PR #232) |
+| Relacionado con | spec #231 (PR #232), issue #306 |
+
+---
+
+> **Rechazada (2026-07-21, #306):** el contrato versionado explícito
+> (`CONTRACT_VERSION`, columna `contract_version`, tags `contract-v*`,
+> cuarentena por mismatch de versión) no se implementa. La arquitectura que
+> efectivamente se construyó no depende de un contrato versionado entre repos:
+> el cron `consolidate` (`consolidate.yml`) habla directo contra Supabase vía
+> PostgREST desde este mismo repo, sin un `vzla-deployment` que fije un tag de
+> contrato como consumidor separado; esa conexión directa GitHub Actions ->
+> Supabase es la realidad operativa, no la que asumía el §1. `docs/schema.md`
+> ya es la fuente de verdad del contrato entidad->DB, y el drift código-vs-canon
+> se cierra por PR directo contra ese doc (ver el caso de `aportes.consolidated_at`
+> resuelto en #93) más los tests de contrato en CI (#281), no por un mecanismo de
+> semver + cuarentena por mismatch de versión. El resto de esta ADR queda como
+> registro histórico de la propuesta original; no describe el estado actual del
+> sistema ni un plan pendiente.
 
 ---
 

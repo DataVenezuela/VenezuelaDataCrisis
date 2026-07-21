@@ -18,10 +18,10 @@ Hoy una corrida del pipeline no deja rastro estructurado: si un scraper falla a
 la mitad o se cae el proceso, no hay una fila que lo diga. La idea es una tabla
 `pipeline_runs` en Supabase (una fila por corrida: fuente, inicio, fin, filas
 leídas, insertadas, cuarentenadas, estado) más un centinela de caída que marque
-la corrida como fallida si el proceso muere sin cerrarla. Daría visibilidad a la
-cuarentena que ADR 0004 crea (una cuarentena que crece sin observarse es un
-riesgo anotado ahí) y una señal para saber si una fuente dejó de producir. No
-existe `pipeline_runs` en el código.
+la corrida como fallida si el proceso muere sin cerrarla. Daría visibilidad a
+`quarantined_records` (una cuarentena que crece sin observarse es un riesgo) y
+una señal para saber si una fuente dejó de producir. No existe `pipeline_runs`
+en el código.
 
 > Nota de canon: `scrape_runs` (ver `docs/schema.md`) ya registra por corrida
 > `started_at`/`finished_at`/`stats jsonb`. P4 se solapa parcialmente; el delta

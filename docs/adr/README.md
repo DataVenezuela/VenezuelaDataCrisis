@@ -15,7 +15,7 @@ ADR que reemplaza a la anterior.
 | [0001](./0001-arquitectura-serving-publico.md) | Arquitectura del plano de serving público | Aceptada (§5 reemplazada por 0007) |
 | [0002](./0002-endurecimiento-seguridad-cloudflare.md) | Endurecimiento de seguridad del plano público con Cloudflare | Propuesta |
 | [0003](./0003-reestructuracion-repos-deployment.md) | Reestructuración de repos: pipeline público, deployment y web privados | Propuesta |
-| [0004](./0004-versionado-de-contrato.md) | Versionado del contrato DB/scrapers | Propuesta |
+| [0004](./0004-versionado-de-contrato.md) | Versionado del contrato DB/scrapers | Rechazada |
 | [0005](./0005-gobernabilidad.md) | Gobernabilidad del repositorio y quórum de mantenedores | Propuesta |
 | [0006](./0006-proteccion-pii-ingesta.md) | Protección de PII en la ingesta | Propuesta |
 | [0007](./0007-modelo-consolidacion-gold.md) | Modelo de consolidación y capa gold | Aceptada |
