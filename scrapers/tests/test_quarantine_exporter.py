@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import urllib.parse
 from typing import Any
 from unittest.mock import patch
 
@@ -36,18 +37,26 @@ _QUARANTINE_PATH = "/rest/v1/quarantined_records"
 
 
 class _RecordingTransport(httpx.BaseTransport):
-    """Captura POSTs a /rest/v1/quarantined_records y devuelve un status fijo."""
+    """Captura POST/PATCH a /rest/v1/quarantined_records y devuelve status fijo."""
 
     def __init__(self, status: int = 201) -> None:
         self.status = status
         self.posts: list[dict[str, Any]] = []
+        self.patches: list[dict[str, Any]] = []
+        self.patch_urls: list[str] = []
         self.requests: list[httpx.Request] = []
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
         if request.url.path == _QUARANTINE_PATH:
-            self.posts.append(json.loads(request.content))
-            return httpx.Response(self.status, json={"ok": True})
+            body = json.loads(request.content) if request.content else {}
+            if request.method == "POST":
+                self.posts.append(body)
+                return httpx.Response(self.status, json={"ok": True})
+            if request.method == "PATCH":
+                self.patches.append(body)
+                self.patch_urls.append(str(request.url))
+                return httpx.Response(200, json=[{"id": "affected-row"}])
         return httpx.Response(404)
 
 
@@ -360,3 +369,132 @@ class TestDryRun:
         assert cfg.supabase_url == "https://x.supabase.co"  # rstrip "/"
         assert cfg.publishable_key == "anon-key"
         assert cfg.ingest_jwt == "jwt-token"
+
+
+# ---------------------------------------------------------------------------
+# destruccion de registros — destroy_record / destroy_expired (#88)
+# ---------------------------------------------------------------------------
+
+
+class _NoMatchTransport(httpx.BaseTransport):
+    """Transport que responde PATCH con 0 filas afectadas (guard no cumplido)."""
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        if request.url.path == _QUARANTINE_PATH and request.method == "PATCH":
+            return httpx.Response(200, json=[])
+        return httpx.Response(404)
+
+
+class _BatchPurgeTransport(httpx.BaseTransport):
+    """Transport que responde PATCH bulk con 204 + Content-Range."""
+
+    def __init__(self, count: int = 5) -> None:
+        self.count = count
+        self.patches: list[dict[str, Any]] = []
+        self.requests: list[httpx.Request] = []
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        if request.url.path == _QUARANTINE_PATH:
+            if request.method == "PATCH":
+                self.patches.append(json.loads(request.content))
+                return httpx.Response(
+                    204, headers={"content-range": f"*/{self.count}"}
+                )
+            if request.method == "GET":
+                return httpx.Response(200, json=[
+                    {"id": "aaa", "source_slug": "s1",
+                     "reason_code": "invalid_schema",
+                     "retention_until": "2026-01-01T00:00:00Z"},
+                ])
+        return httpx.Response(404)
+
+
+class _DryRunTransport(httpx.BaseTransport):
+    """Transport que responde GET con expirados; nunca recibe PATCH."""
+
+    def __init__(self) -> None:
+        self.requests: list[httpx.Request] = []
+        self.patches: list[dict[str, Any]] = []
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        if request.url.path == _QUARANTINE_PATH:
+            if request.method == "GET":
+                return httpx.Response(200, json=[
+                    {"id": "aaa", "source_slug": "s1",
+                     "reason_code": "invalid_schema",
+                     "retention_until": "2026-01-01T00:00:00Z"},
+                    {"id": "bbb", "source_slug": "s2",
+                     "reason_code": "pdf_no_text",
+                     "retention_until": "2026-02-01T00:00:00Z"},
+                ])
+            if request.method == "PATCH":
+                self.patches.append(json.loads(request.content))
+        return httpx.Response(404)
+
+
+class TestDestroyRecord:
+    def test_destroy_success(self) -> None:
+        t = _RecordingTransport(status=200)
+        result = _exporter(t).destroy_record(
+            "aaaaaaaa-0000-4000-8000-000000000001"
+        )
+        assert result is True
+        assert t.patches[0]["payload_preview_redacted"] is None
+        assert t.patches[0]["pii_findings_summary"] is None
+        assert t.patches[0]["destroyed_at"] is not None
+
+    def test_destroy_guard_failure(self) -> None:
+        t = _NoMatchTransport()
+        result = _exporter(t).destroy_record(
+            "aaaaaaaa-0000-4000-8000-000000000001"
+        )
+        assert result is False
+
+    def test_destroy_patch_method(self) -> None:
+        t = _RecordingTransport(status=200)
+        _exporter(t).destroy_record(
+            "aaaaaaaa-0000-4000-8000-000000000001"
+        )
+        assert t.requests[0].method == "PATCH"
+
+    def test_destroy_disabled_exporter(self) -> None:
+        exp = QuarantineExporter(None)
+        assert exp.destroy_record("uuid") is False
+
+    def test_destroy_url_has_safe_params(self) -> None:
+        t = _RecordingTransport(status=200)
+        _exporter(t).destroy_record(
+            "aaaaaaaa-0000-4000-8000-000000000001"
+        )
+        url = t.patch_urls[0]
+        assert "id=eq." in url
+        decoded = urllib.parse.unquote(url)
+        assert "or=" in decoded
+        assert "destroyed_at=is.null" in url
+
+
+class TestDestroyExpired:
+    def test_dry_run_returns_count_and_no_patch(self) -> None:
+        t = _DryRunTransport()
+        count = _exporter(t).destroy_expired(dry_run=True)
+        assert count == 2
+        assert t.patches == []
+
+    def test_bulk_purge_returns_count_from_content_range(self) -> None:
+        t = _BatchPurgeTransport(count=5)
+        count = _exporter(t).destroy_expired(dry_run=False)
+        assert count == 5
+        assert t.patches[0]["payload_preview_redacted"] is None
+        assert t.patches[0]["pii_findings_summary"] is None
+        assert t.patches[0]["destroyed_at"] is not None
+
+    def test_bulk_purge_disabled_exporter(self) -> None:
+        exp = QuarantineExporter(None)
+        assert exp.destroy_expired() == 0
+
+    def test_bulk_purge_patch_method(self) -> None:
+        t = _BatchPurgeTransport(count=3)
+        _exporter(t).destroy_expired(dry_run=False)
+        assert t.requests[0].method == "PATCH"

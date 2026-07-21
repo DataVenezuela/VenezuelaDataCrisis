@@ -115,3 +115,26 @@ create table public.dedup_candidates (
   resolved_at     timestamptz,
   check (left_aporte_id <> right_aporte_id)
 );
+
+-- ---------------------------------------------------------------------------
+-- quarantined_records: cuarentena de registros no procesables (#88)
+-- Schema real desplegado en Supabase, mas destroyed_at para purga auditable.
+-- ---------------------------------------------------------------------------
+create table public.quarantined_records (
+  id                       uuid primary key default gen_random_uuid(),
+  run_id                   uuid,
+  source_slug              text not null,
+  source_url               text,
+  reason_code              text not null,
+  reason_detail            text,
+  risk_level               text not null,
+  payload_preview_redacted text,
+  payload_hash             varchar(64),
+  pii_findings_summary     jsonb,
+  review_status            text not null default 'pending',
+  review_decision          text,
+  retention_until          timestamptz,
+  approved_at              timestamptz,
+  quarantined_at           timestamptz not null default now(),
+  destroyed_at             timestamptz
+);

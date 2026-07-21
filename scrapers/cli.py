@@ -159,6 +159,31 @@ def _cmd_materialize(args: argparse.Namespace) -> None:
         print(f"WARN materializer: {err}", file=sys.stderr)
 
 
+def _cmd_quarantine(args: argparse.Namespace) -> None:
+    from scrapers.exporters.quarantine_exporter import QuarantineConfig, QuarantineExporter
+
+    config = QuarantineConfig.from_env()
+    with QuarantineExporter(config) as exporter:
+        if args.quarantine_command == "destroy":
+            ok = exporter.destroy_record(args.id)
+            if ok:
+                print(f"Registro {args.id} destruido")
+            else:
+                print(
+                    f"No se pudo destruir {args.id} "
+                    f"(condiciones no cumplidas o exporter deshabilitado)",
+                    file=sys.stderr,
+                )
+                raise SystemExit(1)
+        elif args.quarantine_command == "purge":
+            count = exporter.destroy_expired(dry_run=args.dry_run)
+            prefix = "DRY-RUN: " if args.dry_run else ""
+            print(
+                f"{prefix}{count} registros expirados"
+                f"{' (simulacion)' if args.dry_run else ' purgados'}"
+            )
+
+
 def _cmd_consolidate(args: argparse.Namespace) -> None:
     """Consolidacion completa: materializer + auto-merge Event/Acopio + candidatos Person.
 
@@ -291,6 +316,18 @@ def main() -> None:
         "--batch-size", type=int, default=500, help="Aportes por batch (default: 500)"
     )
 
+    # --- quarantine ---
+    quarantine_cmd = sub.add_parser("quarantine", help="Manage quarantined records")
+    qsub = quarantine_cmd.add_subparsers(dest="quarantine_command", required=True)
+
+    destroy_cmd = qsub.add_parser("destroy", help="Destroy a quarantined record by ID")
+    destroy_cmd.add_argument("id", help="Record UUID to destroy")
+
+    purge_cmd = qsub.add_parser("purge", help="Destroy all expired quarantined records")
+    purge_cmd.add_argument(
+        "--dry-run", action="store_true", help="Preview only, no mutation"
+    )
+
     args = parser.parse_args()
 
     if args.verbose:
@@ -309,6 +346,7 @@ def main() -> None:
         "list-enabled": _cmd_list_enabled,
         "ingest": _cmd_ingest,
         "consolidate": _cmd_consolidate,
+        "quarantine": _cmd_quarantine,
     }
     commands[args.command](args)
 

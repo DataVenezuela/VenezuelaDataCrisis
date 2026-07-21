@@ -1191,7 +1191,8 @@ CREATE TABLE public.quarantined_records (
   review_decision          text,
   retention_until          timestamptz,
   approved_at              timestamptz,
-  quarantined_at           timestamptz NOT NULL DEFAULT now()
+  quarantined_at           timestamptz NOT NULL DEFAULT now(),
+  destroyed_at             timestamptz
 );
 ```
 

@@ -197,3 +197,37 @@ def test_candidate_payload_solo_emite_columnas_reales() -> None:
         f"_candidate_payload() emite claves sin columna real en dedup_candidates: {unknown}. "
         "Actualizar el payload o el fixture si el schema cambió."
     )
+
+
+# ---------------------------------------------------------------------------
+# quarantined_records — contrato de destruccion de cuarentena (#88)
+# ---------------------------------------------------------------------------
+
+def test_quarantined_records_columnas_reales_existen() -> None:
+    sql = _read_schema()
+    cols = _columns_of_table(sql, "quarantined_records")
+    for col in (
+        "payload_preview_redacted",
+        "pii_findings_summary",
+        "payload_hash",
+        "destroyed_at",
+        "retention_until",
+        "review_status",
+    ):
+        assert col in cols, (
+            f"quarantined_records.{col} requerida no existe en "
+            f"el schema real; columnas: {sorted(cols)}"
+        )
+
+
+def test_destroy_payload_solo_emite_columnas_reales() -> None:
+    from scrapers.exporters.quarantine_exporter import _destroy_payload
+
+    sql = _read_schema()
+    qr_cols = _columns_of_table(sql, "quarantined_records")
+    payload = _destroy_payload("2026-07-09T12:00:00Z")
+    unknown = set(payload) - qr_cols
+    assert not unknown, (
+        f"_destroy_payload() emite claves sin columna real "
+        f"en quarantined_records: {unknown}"
+    )
