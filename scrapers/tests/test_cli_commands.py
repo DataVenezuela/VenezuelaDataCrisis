@@ -210,18 +210,14 @@ class TestConsolidate:
     def test_materializer_runs_as_first_stage(self, tmp_path: Path) -> None:
         # El materializer (etapa 1) corre siempre, antes de las etapas de
         # consolidacion; en dry-run (sin SUPABASE_*) es un no-op silencioso.
-        result = _run_cli(
-            "consolidate", "--config", str(_SAMPLE_CONFIG), "--output-dir", str(tmp_path)
-        )
+        result = _run_cli("consolidate", "--config", str(_SAMPLE_CONFIG))
         assert result.returncode == 0
         assert "Materializer:" in result.stdout
 
     def test_automerge_stages_run_for_event_and_acopio(self, tmp_path: Path) -> None:
         # Etapa 2: sin SUPABASE_*, build_port() cae a FakeInMemoryAdapter (vacio),
         # asi que cada entity_type reporta un summary en cero, sin tocar la red.
-        result = _run_cli(
-            "consolidate", "--config", str(_SAMPLE_CONFIG), "--output-dir", str(tmp_path)
-        )
+        result = _run_cli("consolidate", "--config", str(_SAMPLE_CONFIG))
         assert result.returncode == 0
         assert "Consolidation[Event]:" in result.stdout
         assert "Consolidation[AcopioCenter]:" in result.stdout
@@ -229,9 +225,7 @@ class TestConsolidate:
     def test_person_stage_skipped_without_credentials(self, tmp_path: Path) -> None:
         # Etapa 3: sin SUPABASE_*, PersonConsolidationConfig.from_env() es None,
         # asi que la etapa se omite explicitamente en vez de intentar un write.
-        result = _run_cli(
-            "consolidate", "--config", str(_SAMPLE_CONFIG), "--output-dir", str(tmp_path)
-        )
+        result = _run_cli("consolidate", "--config", str(_SAMPLE_CONFIG))
         assert result.returncode == 0
         assert "Consolidation[Person]: sin credenciales Supabase, omitido" in result.stdout
 
@@ -242,7 +236,6 @@ class TestConsolidate:
         result = _run_cli(
             "consolidate", "--dry-run",
             "--config", str(_SAMPLE_CONFIG),
-            "--output-dir", str(tmp_path),
         )
         assert result.returncode == 0
         assert "Consolidation[Person]: omitido en --dry-run" in result.stdout
@@ -252,7 +245,6 @@ class TestConsolidate:
         result = _run_cli(
             "consolidate", "--dry-run",
             "--config", str(_SAMPLE_CONFIG),
-            "--output-dir", str(tmp_path),
         )
         assert result.returncode == 0
 
@@ -260,9 +252,41 @@ class TestConsolidate:
         result = _run_cli(
             "consolidate", "--batch-size", "10",
             "--config", str(_SAMPLE_CONFIG),
-            "--output-dir", str(tmp_path),
         )
         assert result.returncode == 0
+
+    def test_automerge_failure_does_not_block_person_stage(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Un entity_type que revienta en la etapa 2 no debe abortar el comando
+        antes de la etapa 3 (Person): consolidate_entity_type no envuelve su
+        fetch en try/except propio, asi que un error transitorio (red/Supabase)
+        propagaria sin el aislamiento por entity_type de _cmd_consolidate."""
+        import scrapers.jobs.consolidation_job as consolidation_job
+
+        for var in (
+            "SUPABASE_URL", "SUPABASE_PUBLISHABLE_KEY", "SUPABASE_CONSOLIDATION_JWT",
+        ):
+            monkeypatch.delenv(var, raising=False)
+
+        original = consolidation_job.consolidate_entity_type
+
+        def _boom(*, port: Any, entity_type: str, batch_size: int, dry_run: bool) -> Any:
+            if entity_type == "Event":
+                raise RuntimeError("boom transitorio")
+            return original(port=port, entity_type=entity_type, batch_size=batch_size, dry_run=dry_run)
+
+        monkeypatch.setattr(consolidation_job, "consolidate_entity_type", _boom)
+
+        from scrapers.cli import _cmd_consolidate
+
+        args = argparse.Namespace(config=str(_SAMPLE_CONFIG), dry_run=False, batch_size=500)
+        _cmd_consolidate(args)
+
+        out = capsys.readouterr()
+        assert "Consolidation[Event]: FAILED" in out.err
+        assert "Consolidation[AcopioCenter]:" in out.out
+        assert "Consolidation[Person]: sin credenciales Supabase, omitido" in out.out
 
 
 # ── existing commands still work ──────────────────────────────────
