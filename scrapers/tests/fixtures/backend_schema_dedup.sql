@@ -33,6 +33,12 @@ create table public.aportes (
 
 -- ---------------------------------------------------------------------------
 -- 0008_ingesta_staging_dedup.sql : aportes staging/dedup columns
+-- NOTA: el schema DESPLEGADO en Supabase NO tiene la columna
+-- ``consolidated_at`` (probe en vivo 2026-07-19: GET aportes?...consolidated_at=is.null
+-- -> 400 42703 "column aportes.consolidated_at does not exist"). La consolidacion
+-- no la usa: pagina por cursor keyset (created_at, id), no por estado. NO agregarla
+-- aqui: este fixture refleja lo DESPLEGADO (igual que el bloque dedup_candidates),
+-- para que un adapter que la referencie falle en el contract test.
 -- ---------------------------------------------------------------------------
 alter table public.aportes
   add column run_id             uuid,
@@ -41,7 +47,6 @@ alter table public.aportes
   add column dedup_version      text,
   add column block_keys         text[],
   add column content_hash       varchar(64),
-  add column consolidated_at    timestamptz,
   add column source_record_id   text,
   add column source_url         text,
   add column parser_version     text,
@@ -114,4 +119,22 @@ create table public.dedup_candidates (
   created_at      timestamptz not null default now(),
   resolved_at     timestamptz,
   check (left_aporte_id <> right_aporte_id)
+);
+
+-- ---------------------------------------------------------------------------
+-- consolidation_state: cursor durable POR entity_type (option B, #93).
+-- NOTA: esta tabla es NUEVA (DDL pendiente de aplicar por el mantenedor; va en el
+-- cuerpo del PR, sin migracion cross-repo). Espeja silver_materialize_state del
+-- materializer pero con PK = entity_type (una fila por slug event|acopio|person)
+-- en vez de singleton. La consolidacion arranca desde esta frontera cada corrida,
+-- de modo que solo procesa aportes NUEVOS. El adapter degrada a scan completo si la
+-- tabla falta (404/406) o sin permiso (401/403), para no repetir el 400 de
+-- consolidated_at. Requiere grants SELECT/INSERT/UPDATE al rol consolidation_job.
+-- ---------------------------------------------------------------------------
+create table public.consolidation_state (
+  entity_type       text not null,
+  cursor_created_at timestamptz,
+  cursor_id         uuid,
+  updated_at        timestamptz not null default now(),
+  constraint consolidation_state_pkey primary key (entity_type)
 );

@@ -94,10 +94,21 @@ def test_aportes_tiene_columnas_que_el_adapter_lee() -> None:
             f"columna aportes.{column} usada por el adapter NO existe en el "
             f"schema real; columnas: {sorted(aportes_cols)}"
         )
-    # Filtros clave del fetch / mark tambien deben ser columnas reales.
-    assert "consolidated_at" in aportes_cols
+    # Columnas del cursor keyset (created_at, id) y del filtro por tipo deben ser
+    # reales: son los unicos campos que la paginacion de fetch_aportes_page usa.
     assert "entity_type" in aportes_cols
     assert "id" in aportes_cols
+    assert "created_at" in aportes_cols
+
+
+def test_aportes_consolidated_at_ausente_en_schema_real() -> None:
+    # DOCUMENTADO: el schema DESPLEGADO no tiene aportes.consolidated_at (probe en
+    # vivo 2026-07-19: GET ...consolidated_at=is.null -> 400 42703). La
+    # consolidacion NO la usa (pagina por cursor keyset, no por estado). Este test
+    # fija ese hecho: si una migracion futura la agrega y se actualiza el fixture,
+    # rompe y avisa que el adapter puede volver a referenciarla.
+    aportes_cols = _columns_of_table(_read_schema(), "aportes")
+    assert "consolidated_at" not in aportes_cols
 
 
 def test_aportes_trust_tier_ausente_en_schema_real() -> None:
@@ -177,6 +188,34 @@ def test_dedup_candidates_columnas_reales_existen() -> None:
     assert "right_person" not in cols, (
         "dedup_candidates.right_person es del schema antiguo; fixture debe usar right_aporte_id"
     )
+
+
+# ---------------------------------------------------------------------------
+# consolidation_state — cursor durable de option B (#93)
+# ---------------------------------------------------------------------------
+
+def test_consolidation_state_columnas_reales_existen() -> None:
+    # El cursor durable exige que el fixture declare consolidation_state con las
+    # columnas que read_cursor/write_cursor leen y escriben. Si el DDL del PR
+    # difiere del fixture, este test rompe en vez de degradar en silencio.
+    sql = _read_schema()
+    cols = _columns_of_table(sql, "consolidation_state")
+    for col in ("entity_type", "cursor_created_at", "cursor_id", "updated_at"):
+        assert col in cols, (
+            f"consolidation_state.{col} requerida por el cursor durable (option B) "
+            f"no existe en el fixture; columnas: {sorted(cols)}"
+        )
+
+
+def test_consolidation_state_select_del_adapter_usa_columnas_reales() -> None:
+    # Las columnas que el SELECT del adapter proyecta (read_cursor) y las que el
+    # upsert escribe (write_cursor) deben existir en el schema del fixture.
+    sql = _read_schema()
+    cols = _columns_of_table(sql, "consolidation_state")
+    read_cols = {"cursor_created_at", "cursor_id"}
+    write_cols = {"entity_type", "cursor_created_at", "cursor_id"}
+    assert read_cols <= cols
+    assert write_cols <= cols
 
 
 def test_candidate_payload_solo_emite_columnas_reales() -> None:

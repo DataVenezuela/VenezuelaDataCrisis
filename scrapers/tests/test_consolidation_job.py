@@ -2,9 +2,10 @@
 
 Todo corre contra `FakeInMemoryAdapter`, sin red ni DB real. Cubre los
 criterios de aceptacion de #91: 3 aportes con el mismo dedup_hash producen 1
-fila canonica y los 3 quedan marcados; gana el de mayor tier; re-correr es
-idempotente; --dry-run no muta el fake; interrupcion+reintento procesa solo lo
-pendiente.
+fila canonica; gana el de menor tier; re-correr es idempotente (cada corrida
+re-escanea el set completo via cursor keyset y re-upserta el mismo ganador sin
+cambiar el resultado); --dry-run no muta el fake. NO hay estado de "consolidado":
+el schema real no tiene ``consolidated_at`` y la paginacion la lleva el cursor.
 """
 
 from __future__ import annotations
@@ -62,7 +63,7 @@ def test_fake_adapter_satisface_el_protocolo() -> None:
     assert isinstance(adapter, ConsolidationDataPort)
 
 
-def test_tres_aportes_mismo_hash_una_fila_y_tres_marcados() -> None:
+def test_tres_aportes_mismo_hash_una_fila() -> None:
     aportes = [_event_aporte(f"a{i}") for i in range(3)]
     adapter = FakeInMemoryAdapter(aportes)
 
@@ -70,11 +71,10 @@ def test_tres_aportes_mismo_hash_una_fila_y_tres_marcados() -> None:
 
     assert summary["groups"] == 1
     assert summary["aportes"] == 3
+    assert summary["upserts"] == 1
     # Una sola fila canonica por dedup_hash.
     assert len(adapter.canonical) == 1
     assert ("Event", _HASH) in adapter.canonical
-    # Los tres aportes quedan marcados como consolidados.
-    assert adapter.consolidated_ids == {"a0", "a1", "a2"}
 
 
 def test_gana_el_de_menor_tier() -> None:
@@ -91,26 +91,28 @@ def test_gana_el_de_menor_tier() -> None:
 
     canonical = adapter.canonical[("Event", _HASH)]
     assert canonical["winner_aporte_id"] == "alta"
-    # Aun asi los tres aportes del grupo quedan marcados.
-    assert adapter.consolidated_ids == {"baja", "alta", "media"}
 
 
-def test_recorrer_dos_veces_es_idempotente() -> None:
+def test_recorrer_dos_veces_no_reprocesa_frontera_persistida() -> None:
+    # Option B (#93): la primera corrida persiste la frontera durable; la segunda
+    # arranca DESPUES de ella y no re-procesa nada (a diferencia del rescan completo
+    # de option A). Esto es lo que evita re-pisar trabajo/decisiones cada 20 min.
     aportes = [_event_aporte(f"a{i}", trust_tier="B") for i in range(3)]
     adapter = FakeInMemoryAdapter(aportes)
 
     first = consolidate_entity_type(adapter, "Event", batch_size=10)
     canonical_after_first = dict(adapter.canonical)
-    upserts_after_first = adapter.upsert_calls
 
     second = consolidate_entity_type(adapter, "Event", batch_size=10)
 
     assert first["groups"] == 1
-    # La segunda corrida no encuentra pendientes: no agrupa, no upserta, no marca.
+    assert first["upserts"] == 1
+    # La frontera quedo persistida en el fake tras la primera corrida.
+    assert adapter.read_cursor("Event") is not None
+    # La segunda corrida no ve aportes nuevos: cero trabajo, canonical intacto.
     assert second["groups"] == 0
     assert second["upserts"] == 0
-    assert second["marked"] == 0
-    assert adapter.upsert_calls == upserts_after_first
+    assert second["batches"] == 0
     assert adapter.canonical == canonical_after_first
     assert len(adapter.canonical) == 1
 
@@ -124,16 +126,14 @@ def test_dry_run_no_muta_el_fake() -> None:
     # Se planifico el grupo pero NO se escribio nada.
     assert summary["groups"] == 1
     assert summary["upserts"] == 0
-    assert summary["marked"] == 0
     assert adapter.canonical == {}
-    assert adapter.consolidated_ids == set()
     assert adapter.upsert_calls == 0
-    assert adapter.mark_calls == 0
 
 
-def test_interrupcion_y_reintento_procesa_solo_lo_pendiente() -> None:
-    # Grupo 1 ya consolidado (simula una corrida previa interrumpida tras el
-    # primer grupo); grupo 2 pendiente.
+def test_corrida_previa_se_reprocesa_idempotente() -> None:
+    # Grupo 1 ya tenia su fila canonica (simula una corrida previa); grupo 2 es
+    # nuevo. Sin estado de "consolidado", la corrida RE-ESCANEA todo: reprocesa el
+    # grupo 1 (re-upsert idempotente, mismo ganador) y consolida el grupo 2.
     aportes = [
         _event_aporte("g1a", dedup_hash=_HASH),
         _event_aporte("g1b", dedup_hash=_HASH),
@@ -141,21 +141,18 @@ def test_interrupcion_y_reintento_procesa_solo_lo_pendiente() -> None:
         _event_aporte("g2b", dedup_hash=_HASH_B),
     ]
     adapter = FakeInMemoryAdapter(aportes)
-    adapter.mark_consolidated(["g1a", "g1b"])
-    # Simula que la fila canonica del grupo 1 ya existia.
+    # Simula que la fila canonica del grupo 1 ya existia de una corrida previa.
     adapter.canonical[("Event", _HASH)] = {"dedup_hash": _HASH, "winner_aporte_id": "g1a"}
-    marks_before = adapter.mark_calls
 
     summary = consolidate_entity_type(adapter, "Event", batch_size=10)
 
-    # Solo se procesa el grupo pendiente.
-    assert summary["groups"] == 1
-    assert summary["aportes"] == 2
-    assert adapter.consolidated_ids == {"g1a", "g1b", "g2a", "g2b"}
+    # Ambos grupos se procesan (re-escaneo completo).
+    assert summary["groups"] == 2
+    assert summary["aportes"] == 4
+    assert summary["upserts"] == 2
     assert len(adapter.canonical) == 2
+    assert ("Event", _HASH) in adapter.canonical
     assert ("Event", _HASH_B) in adapter.canonical
-    # No re-marca los ya consolidados del grupo 1.
-    assert adapter.mark_calls == marks_before + 1
 
 
 def test_batches_pequenos_procesan_todo() -> None:
@@ -172,13 +169,18 @@ def test_batches_pequenos_procesan_todo() -> None:
     assert summary["groups"] == 3
     assert summary["batches"] == 3
     assert len(adapter.canonical) == 3
-    assert adapter.consolidated_ids == {"h1", "h2", "h3"}
 
 
 def test_aportes_sin_dedup_hash_se_ignoran(caplog) -> None:
     aportes = [
         _event_aporte("ok"),
-        {"id": "sin_hash", "entity_type": "Event", "dedup_hash": None, "payload": {}},
+        {
+            "id": "sin_hash",
+            "entity_type": "Event",
+            "dedup_hash": None,
+            "created_at": "2026-06-24T14:00:00Z",
+            "payload": {},
+        },
     ]
     adapter = FakeInMemoryAdapter(aportes)
 
@@ -186,7 +188,7 @@ def test_aportes_sin_dedup_hash_se_ignoran(caplog) -> None:
     summary = consolidate_entity_type(adapter, "Event", batch_size=10)
 
     assert summary["groups"] == 1
-    assert adapter.consolidated_ids == {"ok"}
+    assert ("Event", _HASH) in adapter.canonical
     assert "sin_dedup_hash" in caplog.text
 
 
@@ -245,15 +247,41 @@ def test_fallo_de_grupo_no_aborta_los_sanos(caplog: pytest.LogCaptureFixture) ->
     summary = consolidate_entity_type(adapter, "Event", batch_size=10)
 
     # Los grupos sanos se consolidan; el que falla NO.
-    assert adapter.consolidated_ids == {"b1", "c1"}
     assert ("Event", "ha") not in adapter.canonical
     assert ("Event", "hb") in adapter.canonical
     assert ("Event", "hc") in adapter.canonical
     assert summary["upserts"] == 2
-    # El fallo se cuenta y se loguea (al menos una vez; el grupo fallido se
-    # re-lee en la ronda siguiente y se reintenta, ver known follow-up del PR).
-    assert summary["errors"] >= 1
+    # El fallo se cuenta y se loguea. El cursor NO avanza para esta pagina (ver
+    # test_fallo_de_grupo_no_avanza_el_cursor): la proxima corrida relee la misma
+    # pagina completa y reintenta el grupo fallido, idempotente por on_conflict.
+    assert summary["errors"] == 1
     assert "ha" in caplog.text
+
+
+def test_fallo_de_grupo_no_avanza_el_cursor() -> None:
+    # Regresion: si el cursor avanzara SIEMPRE (incluso con un grupo fallido en
+    # la pagina), ese grupo quedaria con (created_at, id) por debajo de la nueva
+    # frontera y ningun fetch futuro lo volveria a traer: se perderia para
+    # siempre en vez de reintentarse. El cursor debe quedarse donde estaba.
+    aportes = [
+        _event_aporte("a1", dedup_hash="ha"),
+        _event_aporte("b1", dedup_hash="hb"),
+    ]
+    adapter = _FailingUpsertAdapter(aportes, fail_hash="ha")
+
+    summary1 = consolidate_entity_type(adapter, "Event", batch_size=10)
+    assert summary1["errors"] == 1
+    assert ("Event", "hb") in adapter.canonical
+    assert ("Event", "ha") not in adapter.canonical
+    assert adapter.read_cursor("Event") is None  # cursor NUNCA avanzo
+
+    # Segunda corrida, ya sin la falla: la pagina completa (incluida "ha") se
+    # relee desde el mismo cursor y esta vez se consolida entera.
+    adapter._fail_hash = ""  # type: ignore[attr-defined]
+    summary2 = consolidate_entity_type(adapter, "Event", batch_size=10)
+    assert summary2["errors"] == 0
+    assert ("Event", "ha") in adapter.canonical
+    assert adapter.read_cursor("Event") is not None  # ahora si avanzo
 
 
 def test_fallo_de_unico_grupo_cuenta_error_sin_propagar() -> None:
@@ -265,8 +293,6 @@ def test_fallo_de_unico_grupo_cuenta_error_sin_propagar() -> None:
 
     assert summary["errors"] == 1
     assert summary["upserts"] == 0
-    assert summary["marked"] == 0
-    assert adapter.consolidated_ids == set()
     assert adapter.canonical == {}
 
 
@@ -306,17 +332,19 @@ def test_fetch_person_candidates_retorna_aportes_con_block_key_solapante() -> No
     assert ids == {"fp1", "fp2"}
 
 
-def test_fetch_person_candidates_excluye_ya_consolidados() -> None:
+def test_fetch_person_candidates_incluye_todos_los_del_bloque() -> None:
+    # NO hay estado de "consolidado": el dedup DEBE ver todos los aportes del
+    # bloque (incluidos los procesados en corridas previas), o un duplicado nuevo
+    # nunca se compararia contra su par historico.
     aportes = [
         _fake_person("fp1", ["phon:ev1:abc"]),
         _fake_person("fp2", ["phon:ev1:abc"]),
     ]
     adapter = FakeInMemoryAdapter(aportes)
-    adapter.consolidated_ids.add("fp1")
     result = adapter.fetch_person_candidates(
         block_keys=["phon:ev1:abc"],
     )
-    assert [rec["id"] for rec in result] == ["fp2"]
+    assert {rec["id"] for rec in result} == {"fp1", "fp2"}
 
 
 def test_fetch_person_candidates_excluye_otros_entity_types() -> None:
@@ -442,7 +470,6 @@ def _person_aporte(
         "age_range": {"min": 25, "max": 35},
         "status": "missing",
         "created_at": created_at,
-        "consolidated_at": None,
     }
     if include_block_keys:
         row["block_keys"] = block_keys or [f"ced:{event_id}:same"]
@@ -455,27 +482,56 @@ class _PersonTransport(httpx.BaseTransport):
         batches: list[list[dict[str, Any]]],
         *,
         existing: list[dict[str, Any]] | None = None,
+        partners: list[dict[str, Any]] | None = None,
+        cursor_rows: list[dict[str, Any]] | None = None,
+        cursor_get_status: int = 200,
+        cursor_post_status: int = 204,
         post_status: int = 201,
         patch_candidate_status: int = 204,
         mark_status: int = 204,
     ) -> None:
         self.batches = batches
         self.existing = existing or []
+        # Companeros historicos que devuelve el fetch por block_keys (option B, #93).
+        # Default [] => sin nuevo-vs-viejo (comportamiento de una sola pagina).
+        self.partners = partners or []
+        # Frontera durable persistida en consolidation_state. Default [] => sin
+        # cursor => read_cursor degrada a scan completo (sentinela inicial).
+        self.cursor_rows = cursor_rows or []
+        self.cursor_get_status = cursor_get_status
+        self.cursor_post_status = cursor_post_status
         self.post_status = post_status
         self.patch_candidate_status = patch_candidate_status
         self.mark_status = mark_status
         self.get_urls: list[str] = []
+        self.partner_get_urls: list[str] = []
         self.post_bodies: list[Any] = []
         self.patch_urls: list[str] = []
+        self.patch_bodies: list[Any] = []
+        self.cursor_get_urls: list[str] = []
+        self.cursor_post_bodies: list[Any] = []
         self._batch_idx = 0
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
+        query = str(request.url.query)
         if request.method == "GET" and path == "/rest/v1/aportes":
+            # El fetch de companeros historicos (option B) usa block_keys.cs.[...]
+            # en el filtro `or`; el fetch de pagina usa el cursor keyset con
+            # order=created_at. Se enrutan por separado para no consumir un batch.
+            if "block_keys.cs" in query:
+                self.partner_get_urls.append(str(request.url))
+                return httpx.Response(200, json=self.partners)
             self.get_urls.append(str(request.url))
             batch = self.batches[self._batch_idx] if self._batch_idx < len(self.batches) else []
             self._batch_idx += 1
             return httpx.Response(200, json=batch)
+        if request.method == "GET" and path == "/rest/v1/consolidation_state":
+            self.cursor_get_urls.append(str(request.url))
+            return httpx.Response(self.cursor_get_status, json=self.cursor_rows)
+        if request.method == "POST" and path == "/rest/v1/consolidation_state":
+            self.cursor_post_bodies.append(json.loads(request.content))
+            return httpx.Response(self.cursor_post_status)
         if request.method == "GET" and path == "/rest/v1/dedup_candidates":
             self.get_urls.append(str(request.url))
             return httpx.Response(200, json=self.existing)
@@ -484,6 +540,7 @@ class _PersonTransport(httpx.BaseTransport):
             return httpx.Response(self.post_status)
         if request.method == "PATCH" and path == "/rest/v1/dedup_candidates":
             self.patch_urls.append(str(request.url))
+            self.patch_bodies.append(json.loads(request.content))
             return httpx.Response(self.patch_candidate_status)
         if request.method == "PATCH" and path == "/rest/v1/aportes":
             self.patch_urls.append(str(request.url))
@@ -599,18 +656,6 @@ def test_person_existing_candidate_is_idempotent_update() -> None:
     assert any("candidate_id=eq.cand-1" in url for url in transport.patch_urls)
 
 
-def test_person_mark_consolidated_error_is_reported() -> None:
-    rows = [
-        _person_aporte("a1", "person-1"),
-        _person_aporte("a2", "person-2"),
-    ]
-    transport = _PersonTransport([rows], mark_status=500)
-    result = run_person_consolidation(_person_config(), client=_person_client(transport))
-
-    assert result.mark_errors == 1
-    assert any(error.startswith("mark_error") for error in result.errors)
-
-
 @pytest.mark.parametrize("missing_field", ["blocking_key"])
 def test_person_invalid_candidate_payload_is_nonfatal(
     monkeypatch: pytest.MonkeyPatch,
@@ -652,12 +697,9 @@ def test_person_invalid_candidate_payload_is_nonfatal(
     assert any("candidate_payload_error" in error for error in result.errors)
     assert result.candidates_inserted_or_updated == 1
     assert len(transport.post_bodies[0]) == 1
-    mark_urls = [url for url in transport.patch_urls if "/rest/v1/aportes" in url]
-    assert mark_urls
-    assert "ok-1" in mark_urls[0]
-    assert "ok-2" in mark_urls[0]
-    assert "bad-1" not in mark_urls[0]
-    assert "bad-2" not in mark_urls[0]
+    # El payload invalido no aborta el batch: solo el candidato valido se inserta.
+    # La consolidacion nunca escribe en aportes (no hay marcado consolidated_at).
+    assert not any("/rest/v1/aportes" in url for url in transport.patch_urls)
 
 
 def test_person_fatal_upsert_error_aborts_without_marking() -> None:
@@ -712,6 +754,173 @@ def test_person_without_block_keys_and_event_id_generates_no_invalid_keys() -> N
     assert result.blocks == 0
     assert result.candidates_inserted_or_updated == 0
     assert transport.post_bodies == []
+
+
+# --- Person option B: cursor durable + companeros historicos (#93) -----------
+
+def test_person_new_vs_old_produces_candidate_across_cursor() -> None:
+    # CENTERPIECE de option B (#93): un aporte NUEVO (posterior a la frontera)
+    # que duplica a uno VIEJO (anterior a la frontera, en otra pagina) DEBE seguir
+    # generando una arista. Con frontier-only fallaria (el nuevo solo se compara
+    # contra su propia pagina); con el fetch de companeros historicos, pasa.
+    block = f"ced:{_EVENT_ID}:same"
+    old = _person_aporte("old-1", "person-old", created_at="2024-01-01T00:00:00Z",
+                         block_keys=[block])
+    new = _person_aporte("new-2", "person-new", name="Juan Perez",
+                         created_at="2024-02-01T00:00:00Z", block_keys=[block])
+    # La frontera persistida esta ENTRE old y new: fetch_batch solo devuelve `new`.
+    transport = _PersonTransport(
+        [[new], []],
+        partners=[old],  # el fetch por block_keys trae el viejo, ignorando la frontera
+        cursor_rows=[{
+            "cursor_created_at": "2024-01-15T00:00:00Z",
+            "cursor_id": "old-1",
+        }],
+    )
+    result = run_person_consolidation(
+        _person_config(threshold=0.5),
+        client=_person_client(transport),
+    )
+
+    # Se leyo la frontera y el primer fetch de pagina arranca DESPUES de ella.
+    assert transport.cursor_get_urls, "no se leyo consolidation_state"
+    first_page = transport.get_urls[0]
+    assert "created_at.gt.2024-01-15T00%3A00%3A00Z" in first_page
+    # El companero historico se pidio por block_keys (ignorando la frontera).
+    assert transport.partner_get_urls
+    assert "block_keys.cs" in transport.partner_get_urls[0]
+    # Y la arista nuevo-vs-viejo se emitio.
+    assert result.candidates_inserted_or_updated == 1
+    body = transport.post_bodies[0][0]
+    assert {body["left_aporte_id"], body["right_aporte_id"]} == {"old-1", "new-2"}
+
+
+def test_person_frontier_only_would_miss_without_partners() -> None:
+    # Control negativo del test anterior: si NO hay companeros historicos (partners
+    # vacio), el aporte nuevo solo esta contra si mismo => cero aristas. Demuestra
+    # que la completitud viene del fetch de companeros, no de la frontera.
+    block = f"ced:{_EVENT_ID}:same"
+    new = _person_aporte("new-2", "person-new", created_at="2024-02-01T00:00:00Z",
+                         block_keys=[block])
+    transport = _PersonTransport([[new], []], partners=[])
+    result = run_person_consolidation(
+        _person_config(threshold=0.5),
+        client=_person_client(transport),
+    )
+    assert result.candidates_inserted_or_updated == 0
+    assert transport.post_bodies == []
+
+
+def test_person_persists_frontier_after_page() -> None:
+    # La corrida persiste la frontera durable (option B) tras cada pagina: el POST
+    # a consolidation_state lleva entity_type=person y el keyset de la ultima fila.
+    rows = [
+        _person_aporte("0001", "person-1", created_at="2024-03-01T00:00:00Z"),
+        _person_aporte("0002", "person-2", created_at="2024-03-02T00:00:00Z"),
+    ]
+    transport = _PersonTransport([rows, []])
+    run_person_consolidation(_person_config(), client=_person_client(transport))
+
+    assert transport.cursor_post_bodies, "no se persistio la frontera"
+    last = transport.cursor_post_bodies[-1][0]
+    assert last["entity_type"] == "person"
+    assert last["cursor_created_at"] == "2024-03-02T00:00:00Z"
+    assert last["cursor_id"] == "0002"
+
+
+def test_person_update_candidate_no_resetea_decision() -> None:
+    # option B: al actualizar una arista YA existente NO se re-escribe `decision`,
+    # asi la revision humana (confirmed/rejected + resolved_by/at) sobrevive a cada
+    # corrida. El PATCH solo refresca scoring.
+    rows = [_person_aporte("a1", "person-1"), _person_aporte("a2", "person-2")]
+    transport = _PersonTransport(
+        [rows],
+        existing=[{
+            "candidate_id": "cand-1",
+            "left_aporte_id": "a1",
+            "right_aporte_id": "a2",
+            "blocking_key": f"ced:{_EVENT_ID}:same",
+        }],
+    )
+    run_person_consolidation(_person_config(), client=_person_client(transport))
+
+    assert transport.patch_bodies, "no hubo PATCH de actualizacion"
+    patched = transport.patch_bodies[0]
+    assert "decision" not in patched, (
+        "update_candidate no debe re-escribir decision (resetearia la revision humana)"
+    )
+    assert set(patched) == {"score", "reasons", "priority"}
+
+
+def test_person_cursor_ausente_degrada_a_scan_completo() -> None:
+    # Degradacion graciosa (#93): si consolidation_state falta (404), read_cursor
+    # devuelve None y la corrida arranca desde el sentinela (scan completo) sin
+    # abortar ni 400. El write tampoco aborta.
+    rows = [_person_aporte("a1", "person-1"), _person_aporte("a2", "person-2")]
+    transport = _PersonTransport(
+        [rows, []],
+        cursor_get_status=404,
+        cursor_post_status=404,
+    )
+    result = run_person_consolidation(_person_config(), client=_person_client(transport))
+
+    assert result.errors == []
+    assert result.records_read == 2
+    # Arranco desde el sentinela inicial (no hay frontera).
+    first_page = transport.get_urls[0]
+    assert "created_at.gt.1970-01-01T00%3A00%3A00Z" in first_page
+    assert result.candidates_inserted_or_updated == 1
+
+
+def test_fetch_partners_trocea_block_keys_grandes() -> None:
+    # Guard de escala (#93): una pagina grande produce ~1000 block keys; plegarlas
+    # en un solo GET desbordaria el limite de URL del proxy => 414/431 => (como el
+    # fetch es NO fatal) degradaria en silencio a bloqueo solo-pagina. Se trocea.
+    from scrapers.jobs.consolidation_job import (
+        _PARTNER_BLOCK_KEY_CHUNK,
+        SupabasePersonDedupAdapter,
+    )
+
+    keys = [f"ced:{_EVENT_ID}:k{i}" for i in range(100)]
+    # El transport devuelve el mismo companero en cada chunk: el resultado debe
+    # venir dedup por id (una sola vez), no repetido por chunk.
+    transport = _PersonTransport([], partners=[_person_aporte("p-1", "person-p")])
+    adapter = SupabasePersonDedupAdapter(_person_client(transport))
+    try:
+        partners = adapter.fetch_partners_by_block_keys(keys)
+    finally:
+        adapter.close()
+
+    expected_chunks = -(-len(keys) // _PARTNER_BLOCK_KEY_CHUNK)  # ceil
+    assert len(transport.partner_get_urls) == expected_chunks == 3
+    # Ningun GET pliega mas de _PARTNER_BLOCK_KEY_CHUNK clausulas.
+    for url in transport.partner_get_urls:
+        assert url.count("block_keys.cs") <= _PARTNER_BLOCK_KEY_CHUNK
+    # Dedup por id a traves de chunks: el companero aparece una sola vez.
+    assert [p["id"] for p in partners] == ["p-1"]
+
+
+def test_person_partner_fetch_error_es_no_fatal() -> None:
+    # Si el fetch de companeros historicos falla, la pagina degrada a bloqueo
+    # solo-pagina (no aborta): las aristas nuevo-vs-nuevo se emiten igual y el error
+    # queda registrado para visibilidad.
+    class _PartnerFailTransport(_PersonTransport):
+        def handle_request(self, request: httpx.Request) -> httpx.Response:
+            if (
+                request.method == "GET"
+                and request.url.path == "/rest/v1/aportes"
+                and "block_keys.cs" in str(request.url.query)
+            ):
+                return httpx.Response(500, json={"error": "boom"})
+            return super().handle_request(request)
+
+    rows = [_person_aporte("a1", "person-1"), _person_aporte("a2", "person-2")]
+    transport = _PartnerFailTransport([rows, []])
+    result = run_person_consolidation(_person_config(), client=_person_client(transport))
+
+    # Nuevo-vs-nuevo se emitio pese al fallo del fetch de companeros.
+    assert result.candidates_inserted_or_updated == 1
+    assert any("partner_fetch_error" in msg for msg in result.errors)
 
 
 # --- Person config from_env (analogo a Event/Acopio, review de mayerlim) -----
@@ -828,11 +1037,18 @@ def test_person_run_cierra_client_propio(monkeypatch: pytest.MonkeyPatch) -> Non
         closed.append(True)
         self._client.close()
 
-    # fetch_batch vacio => corta al primer batch sin red real.
+    # fetch_batch vacio => corta al primer batch sin red real. read_cursor tambien
+    # se stubbea: sin el, la lectura de la frontera haria un GET real (degradaria a
+    # None por NetworkError, pero mejor no tocar la red en un unit test).
     monkeypatch.setattr(
         SupabasePersonDedupAdapter,
         "fetch_batch",
         lambda self, config, cursor: [],
+    )
+    monkeypatch.setattr(
+        SupabasePersonDedupAdapter,
+        "read_cursor",
+        lambda self, entity_type: None,
     )
     monkeypatch.setattr(SupabasePersonDedupAdapter, "close", _spy_close)
 
