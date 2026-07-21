@@ -100,6 +100,16 @@ if left_cedula and right_cedula and left_cedula != right_cedula:
     return 0.0  # score total = 0 → nunca candidato
 ```
 
+### 4.2b Cédula parcial (regla asimétrica, #322)
+
+Cuando ninguno de los dos tiene `cedula_hmac` completo pero ambos son
+`identity_kind="partial"` con el mismo `cedula_partial` + `cedula_partial_pattern`,
+el campo `cedula` aporta `0.5 * 0.30 = 0.15` (menor confianza que un match de
+`cedula_hmac` completo, por la mayor probabilidad de colisión de un fragmento
+corto). A diferencia del veto de `cedula_hmac`, un mismatch de `cedula_partial`
+**nunca** anula el score total — solo suma cuando coincide, nunca descarta
+cuando difiere. Implementado en `scrapers/dedup/similarity.py::_cedula_score`.
+
 ### 4.3 Jaro-Winkler
 
 Se usa `jellyfish.jaro_winkler_similarity()`. Ya está en `scrapers/requirements.txt`. Reemplaza la implementación pura Python del PR #79.

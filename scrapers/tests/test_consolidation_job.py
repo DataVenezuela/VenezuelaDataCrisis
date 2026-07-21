@@ -521,7 +521,7 @@ def test_person_candidate_payload_matches_master_schema() -> None:
     assert body["left_aporte_id"] == "a1"
     assert body["right_aporte_id"] == "a2"
     assert body["blocking_key"] == f"ced:{_EVENT_ID}:same"
-    assert body["priority"] == 1
+    assert body["priority"] == 2
     assert body["touches_gold"] is False
     assert body["decision"] == "pending"
     assert "event_id" not in body
