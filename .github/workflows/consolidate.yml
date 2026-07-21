@@ -28,18 +28,16 @@ jobs:
       - name: Install dependencies
         run: pip install -r scrapers/requirements.txt
 
-      - name: Download latest ingest artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: scrapers/runtime_output
-          merge-multiple: true
-        continue-on-error: true
-
       - name: Dry-run consolidation (verificación)
+        env:
+          PII_SALT: ${{ secrets.PII_HMAC_SECRET }}
+          PII_HMAC_SECRET: ${{ secrets.PII_HMAC_SECRET }}
+          SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+          SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
+          SUPABASE_CONSOLIDATION_JWT: ${{ secrets.SUPABASE_CONSOLIDATION_JWT }}
         run: |
           python -m scrapers.cli consolidate \
             --dry-run \
-            --output-dir scrapers/runtime_output \
             --config scrapers/config/sources.custom.yaml
 
       - name: Run consolidation
@@ -52,16 +50,8 @@ jobs:
         run: |
           set -o pipefail
           python -m scrapers.cli consolidate \
-            --output-dir scrapers/runtime_output \
             --config scrapers/config/sources.custom.yaml \
             2>&1 | tee consolidation.log
-
-      - name: Upload consolidation output
-        uses: actions/upload-artifact@v4
-        with:
-          name: consolidation-output
-          path: scrapers/runtime_output/consolidated
-          retention-days: 7
 
       - name: Upload consolidation log
         if: always()

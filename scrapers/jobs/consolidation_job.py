@@ -18,7 +18,7 @@ Ejecucion:
       --entity-type Event --batch-size 500 [--dry-run]
 
 El acceso a datos real es `SupabaseConsolidationAdapter` (PostgREST directo,
-decision del equipo #82), que se cablea via `_build_port()` desde las env vars
+decision del equipo #82), que se cablea via `build_port()` desde las env vars
 SUPABASE_URL + SUPABASE_PUBLISHABLE_KEY + SUPABASE_CONSOLIDATION_JWT (patron de
 auth acordado en #200: rol dedicado consolidation_job, sin service_role); si
 faltan, cae a un `FakeInMemoryAdapter` vacio (dry-run seguro, sin red). Ver
@@ -793,8 +793,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _build_port() -> ConsolidationDataPort:
+def build_port() -> ConsolidationDataPort:
     """Construye el PORT de datos a usar por la CLI para Event/AcopioCenter.
+
+    Publico (sin guion bajo): tambien lo usa `scrapers.cli._cmd_consolidate`
+    para cablear este mismo job al cron de `consolidate.yml`.
 
     Decision del equipo (#82): acceso DIRECTO a Supabase PostgREST desde GitHub
     Actions. Si `SUPABASE_URL` + `SUPABASE_PUBLISHABLE_KEY` +
@@ -845,7 +848,7 @@ def main(argv: list[str] | None = None) -> int:
             threshold,
         )
 
-    port = _build_port()
+    port = build_port()
     # El port real mantiene un httpx.Client abierto; cerrarlo siempre al terminar
     # (en el fake close() es no-op). Para un CLI que termina solo no es un crash,
     # pero deja el patron listo si el job pasa a correr long-running.
