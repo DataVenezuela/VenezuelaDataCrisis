@@ -188,17 +188,25 @@ def _cmd_consolidate(args: argparse.Namespace) -> None:
     # generacion de aristas; solo comparte la cadencia del cron.
     _cmd_materialize(args)
 
-    # Etapa 2: auto-merge exacto Event/AcopioCenter por dedup_hash.
+    # Etapa 2: auto-merge exacto Event/AcopioCenter por dedup_hash. Cada
+    # entity_type se aisla en su propio try/except: un fetch que revienta
+    # (error transitorio de red/Supabase, sin try/except propio dentro de
+    # consolidate_entity_type) no debe abortar el comando entero antes de
+    # llegar a la Etapa 3 (Person no depende de que Event/AcopioCenter salgan
+    # bien).
     port = build_port()
     try:
         for entity_type in AUTOMERGE_ENTITY_TYPES:
-            summary = consolidate_entity_type(
-                port=port,
-                entity_type=entity_type,
-                batch_size=batch_size,
-                dry_run=dry_run,
-            )
-            print(f"Consolidation[{entity_type}]: {summary}")
+            try:
+                summary = consolidate_entity_type(
+                    port=port,
+                    entity_type=entity_type,
+                    batch_size=batch_size,
+                    dry_run=dry_run,
+                )
+                print(f"Consolidation[{entity_type}]: {summary}")
+            except Exception as exc:  # noqa: BLE001 - aislar el entity_type, no el comando
+                print(f"Consolidation[{entity_type}]: FAILED {exc}", file=sys.stderr)
     finally:
         port.close()
 
@@ -265,9 +273,6 @@ def main() -> None:
     # --- consolidate ---
     consolidate_cmd = sub.add_parser("consolidate", help="Cross-source deduplication")
     consolidate_cmd.add_argument(
-        "--output-dir", default="scrapers/runtime_output", help="Output directory"
-    )
-    consolidate_cmd.add_argument(
         "--config",
         default="scrapers/config/sources.demo.yaml",
         help="YAML config path (para project.event_id del seed del catalogo)",
@@ -276,8 +281,10 @@ def main() -> None:
         "--dry-run",
         action="store_true",
         help=(
-            "Solo loguea el plan de auto-merge Event/AcopioCenter; no upserta "
-            "ni marca nada. Omite por completo la etapa de candidatos Person."
+            "Aplica solo a las etapas 2-3 (auto-merge Event/AcopioCenter, "
+            "candidatos Person): no upserta ni marca nada ahi, y omite la "
+            "etapa de Person por completo. La etapa 1 (materializer) SIEMPRE "
+            "corre y escribe si hay credenciales Supabase, sin mirar este flag."
         ),
     )
     consolidate_cmd.add_argument(
