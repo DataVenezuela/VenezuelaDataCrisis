@@ -12,10 +12,13 @@
 > **Estado / implementación:** `Propuesta`. Los repos privados `vzla-deployment`
 > y `vzla-web` todavía no existen y nada cambia en producción hasta crearlos;
 > mientras tanto no se renombra ni se elimina ninguna referencia a
-> `dataVenezuela`. El contrato que acopla los repos está en progreso: la spec
-> entidad->DB vive en PR #232 (issue #231) y su versionado formal
-> (`CONTRACT_VERSION`, tag `contract-v1.0`) lo define la ADR 0004 (incluida en
-> PR #232, aún sin fusionar).
+> `dataVenezuela`. La spec entidad->DB vivía en PR #232 (issue #231); se eliminó
+> en PR #258 y la forma canónica del contrato vive en `docs/schema.md`. Su
+> versionado formal (`CONTRACT_VERSION`, tag `contract-v1.0`) lo definía la ADR
+> 0004, **rechazada** (#306, 2026-07-21): la arquitectura real no pasa por un
+> contrato versionado entre repos, sino por una conexión directa GitHub Actions
+> -> Supabase (ver ADR 0004). Cómo `vzla-deployment` (si se crea, #307)
+> consumiría el pipeline público sigue abierto; ya no es vía tag `contract-v1.0`.
 
 ---
 
@@ -89,9 +92,10 @@ configuración específica de producción.
 * Se conecta a la base de datos de producción.
 * Corre el ingest real (cron).
 * Contiene los parsers y fuentes de producción, los que sí tocan datos reales.
-* **Importa `VZLA_DEDUP` como dependencia** y fija el tag de contrato
-  `contract-v1.0`: consume el pipeline público a través de su contrato
-  versionado, no copiando su código (ver §8 y ADR 0004).
+* **Importa `VZLA_DEDUP` como dependencia**, no copiando su código (ver §8). El
+  mecanismo original (fijar el tag de contrato `contract-v1.0`) dependía de la
+  ADR 0004, rechazada (#306): cómo se fija esa dependencia en la práctica queda
+  abierto para cuando se cree el repo (#307).
 * **Gobernado por quórum de mantenedores** (ver ADR 0005, pendiente, sin issue/PR aún): los
   cambios se aprueban por quórum, no por un solo check o aprobador.
 * Incluye los scripts de creación de Worker que sean seguros de auditar
@@ -144,7 +148,9 @@ flowchart TD
     SB -.->|"DDL manual, acceso limitado,\nfuera de todo repo"| SB
 ```
 
-Flujo de código: `publico → deploy` (como dependencia, tag `contract-v1.0`; cambios de contrato vía PR con quórum).
+Flujo de código: `publico → deploy` (como dependencia; el tag `contract-v1.0` del
+diagrama es el mecanismo original de la ADR 0004, rechazada (ver §8). Cambios de
+contrato vía PR con quórum).
 Flujo de datos: `ING → SB → BUILD → D1`. El DDL nunca entra por ningún repo.
 
 ---
@@ -193,16 +199,18 @@ acceso directo al dashboard de producción a todos los contribuidores.
 
 Cómo dar a los scrapers un contrato público contra el cual validar su
 implementación, sin exponer el schema de producción, es lo que acopla el repo
-público con `vzla-deployment` (§3.2). No queda abierto: se aborda por dos piezas
-de seguimiento, ambas en curso.
+público con `vzla-deployment` (§3.2). Resuelto, pero no como se planteó
+originalmente:
 
 * **El mecanismo del contrato** (precondiciones/postcondiciones entidad->DB) se
   documentaba en `docs/specs/db-scraper-contract.md` (issue #224 punto 4, issue
   #231, PR #232); la spec fue eliminada en PR #258 y la forma canónica del
-  schema vive en `docs/schema.md`.
-* **Su versionado** (`CONTRACT_VERSION`, semver, y el tag `contract-v1.0` que
-  `vzla-deployment` fija) lo define la **ADR 0004** (versionado de contrato,
-  incluida en PR #232, aún sin fusionar).
+  schema vive en `docs/schema.md`, validada contra CI por tests de contrato
+  (#281).
+* **Su versionado explícito** (`CONTRACT_VERSION`, semver, tag `contract-v1.0`)
+  lo iba a definir la **ADR 0004**, **rechazada** (#306, 2026-07-21): no se
+  implementa. El drift código-vs-canon se cierra por PR directo contra
+  `docs/schema.md`, no por un mecanismo de versión + cuarentena por mismatch.
 
 Cuando un scraper necesite algo nuevo, deja un PR contra ese contrato. La
 existencia del contrato es un prerequisito de **implementación** para abrir el
@@ -266,8 +274,9 @@ esquema general.
 * Dos repos privados adicionales que mantener, con su propio ciclo de PRs y
   quórum, más fricción que un solo repo.
 * Los contribuidores externos de scrapers ya no pueden ver ni probar contra
-  fuentes/parsers reales de producción; dependen del contrato público, hoy en
-  progreso (spec en PR #232, versionado en ADR 0004, ambos en PR #232) (§8).
+  fuentes/parsers reales de producción; dependen del contrato público, resuelto
+  vía `docs/schema.md` + tests de contrato en CI, no vía versionado explícito
+  (ADR 0004 rechazada, #306) (§8).
 * `docs/base-standards.md §2` y la sección de `CONTRIBUTING.md` sobre el
   contrato exporter → DB citan `DataVenezuela/dataVenezuela` como fuente de
   verdad actual; quedan desactualizadas en cuanto esta ADR se implemente (ver
@@ -278,24 +287,26 @@ esquema general.
 * *Los repos privados nuevos aún no existen.* Hasta que se creen, esta ADR
   documenta la decisión pero no cambia nada en producción. No renombrar ni
   eliminar referencias a `dataVenezuela` antes de que el reemplazo exista.
-* *El contrato DB/scrapers todavía sin finalizar (§8)* podría bloquear
-  contribuciones externas de scrapers si tarda demasiado: la spec y ADR 0004
-  están en PR #232, aún sin fusionar. Fusionar ese PR es el siguiente paso
-  inmediato tras esta ADR.
+* *El contrato DB/scrapers ya no depende de una PR pendiente* (§8): la spec se
+  eliminó en PR #258 (forma canónica en `docs/schema.md`) y su versionado
+  explícito quedó rechazado (ADR 0004, #306). Ya no bloquea el siguiente paso.
 
 ---
 
 ## 12. Plan de implementación (pendientes)
 
-El contrato debe existir antes de abrir `vzla-deployment` (lo importa y fija su
-tag), asi que encabeza el orden:
+El contrato debe existir antes de abrir `vzla-deployment`, asi que encabeza el
+orden:
 
 ```text
-[ ] Finalizar el contrato DB/scrapers: fusionar la spec (PR #232, issue #231) y
-    decidir su versionado en ADR 0004; etiquetar contract-v1.0. Prerequisito
-    para abrir vzla-deployment, que fija ese tag
+[x] Finalizar el contrato DB/scrapers: la spec (PR #232, issue #231) se
+    elimino en PR #258; la forma canonica vive en docs/schema.md. Su
+    versionado explicito (ADR 0004) se rechazo (#306): no hay tag
+    contract-v1.0 que fijar. Como vzla-deployment fijaria su dependencia al
+    pipeline publico (si se crea, #307) queda abierto, ya no via ese tag
 [ ] Crear el repo privado vzla-deployment (Workers, ingest cron, DB connection,
-    parsers/fuentes de produccion); importa VZLA_DEDUP y fija contract-v1.0
+    parsers/fuentes de produccion); importa VZLA_DEDUP (mecanismo de fijado
+    de version pendiente, ver punto anterior)
 [ ] Configurar la gobernanza del repo de deployment (quorum de mantenedores)
     segun ADR 0005 (sin issue/PR aún; pendiente de abrir)
 [ ] Crear el repo privado vzla-web (login + MFA, Worker de merge separado)
