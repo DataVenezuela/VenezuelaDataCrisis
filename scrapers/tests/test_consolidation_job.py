@@ -251,11 +251,37 @@ def test_fallo_de_grupo_no_aborta_los_sanos(caplog: pytest.LogCaptureFixture) ->
     assert ("Event", "hb") in adapter.canonical
     assert ("Event", "hc") in adapter.canonical
     assert summary["upserts"] == 2
-    # El fallo se cuenta y se loguea. El grupo fallido se reintenta en la proxima
-    # corrida (re-escaneo completo, upsert idempotente): una pagina mala no traba
-    # el avance del cursor.
+    # El fallo se cuenta y se loguea. El cursor NO avanza para esta pagina (ver
+    # test_fallo_de_grupo_no_avanza_el_cursor): la proxima corrida relee la misma
+    # pagina completa y reintenta el grupo fallido, idempotente por on_conflict.
     assert summary["errors"] == 1
     assert "ha" in caplog.text
+
+
+def test_fallo_de_grupo_no_avanza_el_cursor() -> None:
+    # Regresion: si el cursor avanzara SIEMPRE (incluso con un grupo fallido en
+    # la pagina), ese grupo quedaria con (created_at, id) por debajo de la nueva
+    # frontera y ningun fetch futuro lo volveria a traer: se perderia para
+    # siempre en vez de reintentarse. El cursor debe quedarse donde estaba.
+    aportes = [
+        _event_aporte("a1", dedup_hash="ha"),
+        _event_aporte("b1", dedup_hash="hb"),
+    ]
+    adapter = _FailingUpsertAdapter(aportes, fail_hash="ha")
+
+    summary1 = consolidate_entity_type(adapter, "Event", batch_size=10)
+    assert summary1["errors"] == 1
+    assert ("Event", "hb") in adapter.canonical
+    assert ("Event", "ha") not in adapter.canonical
+    assert adapter.read_cursor("Event") is None  # cursor NUNCA avanzo
+
+    # Segunda corrida, ya sin la falla: la pagina completa (incluida "ha") se
+    # relee desde el mismo cursor y esta vez se consolida entera.
+    adapter._fail_hash = ""  # type: ignore[attr-defined]
+    summary2 = consolidate_entity_type(adapter, "Event", batch_size=10)
+    assert summary2["errors"] == 0
+    assert ("Event", "ha") in adapter.canonical
+    assert adapter.read_cursor("Event") is not None  # ahora si avanzo
 
 
 def test_fallo_de_unico_grupo_cuenta_error_sin_propagar() -> None:

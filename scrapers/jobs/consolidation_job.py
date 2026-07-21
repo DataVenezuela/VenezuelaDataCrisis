@@ -245,6 +245,13 @@ def consolidate_entity_type(
     el ultimo upsert gana (no el de mejor tier). Es una regresion NO nueva (el
     esquema previo por ``consolidated_at`` tambien partia el grupo en el borde) y
     se rastrea junto al gap de blocking cross-batch de Person.
+
+    Si algun grupo de una pagina falla el upsert, el cursor NO avanza ni se
+    persiste para esa pagina (ver el bloque al final del loop): avanzar de
+    todos modos dejaria ese grupo fuera de rango para siempre (su
+    ``(created_at, id)`` quedaria por debajo de la nueva frontera y ningun
+    fetch futuro lo volveria a traer), silenciando la perdida de ese
+    Event/AcopioCenter en vez de reintentarlo.
     """
     active_logger = logger or _LOGGER
     if entity_type not in AUTOMERGE_ENTITY_TYPES:
@@ -287,6 +294,7 @@ def consolidate_entity_type(
                 skipped,
             )
 
+        page_had_error = False
         for dedup_hash, group in groups.items():
             winner = pick_winner(group, tier_rank)
             aporte_ids = [str(rec.get("id")) for rec in group]
@@ -311,14 +319,17 @@ def consolidate_entity_type(
             # Fallo parcial de batch: si el upsert de ESTE grupo revienta, se
             # loguea, se cuenta y se sigue con los demas grupos (regla del
             # staging_exporter: el batch avanza pese a errores parciales). El
-            # grupo fallido se reintenta en la proxima corrida (upsert idempotente
-            # por on_conflict); una pagina mala no traba el avance del cursor.
+            # cursor de esta pagina NO avanza (ver mas abajo), asi que el grupo
+            # fallido se reintenta en la proxima corrida (upsert idempotente por
+            # on_conflict): los grupos que si funcionaron simplemente se
+            # re-upsertan sin duplicar.
             try:
                 canonical = canonical_from_winner(winner)
                 port.upsert_canonical(entity_type, canonical)
                 summary["upserts"] += 1
             except Exception as exc:  # noqa: BLE001 - aislar el grupo, no el job
                 summary["errors"] += 1
+                page_had_error = True
                 active_logger.error(
                     "consolidation group FAILED entity_type=%s dedup_hash=%s "
                     "winner_id=%s aporte_ids=%s: %s",
@@ -335,9 +346,23 @@ def consolidate_entity_type(
         if dry_run:
             break
 
+        if page_had_error:
+            # Al menos un grupo de esta pagina fallo el upsert: NO avanzar ni
+            # persistir el cursor. Avanzar de todos modos dejaria las aportes
+            # del grupo fallido con (created_at, id) por debajo de la nueva
+            # frontera, asi que ningun fetch futuro las volveria a traer (se
+            # perderian de la consolidacion para siempre en vez de reintentarse).
+            # Se corta la corrida aca: la proxima relee esta misma pagina desde
+            # el cursor viejo (idempotente via on_conflict=dedup_hash).
+            active_logger.warning(
+                "consolidation entity_type=%s pagina con errores: cursor no avanza, "
+                "se reintenta completa en la proxima corrida",
+                entity_type,
+            )
+            break
+
         # Avanzar el cursor al frente de la pagina (ultimo row por el orden
-        # created_at.asc,id.asc). Se avanza SIEMPRE, incluso si la pagina no tuvo
-        # grupos o algun grupo fallo, para no re-leer la misma pagina en bucle.
+        # created_at.asc,id.asc). Solo se llega aca si la pagina no tuvo errores.
         last_row = batch[-1]
         cursor = (
             str(last_row.get("created_at", cursor[0])),
