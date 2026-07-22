@@ -47,6 +47,19 @@ Incluye:
 
 ---
 
+### `pfif-import.md`
+
+Define el subconjunto PFIF 1.5 soportado para import offline.
+
+Incluye:
+
+* Mapeo de XML PFIF a `Person`.
+* Status soportados.
+* Campos sensibles que no se importan.
+* Alcance fuera de este primer parser.
+
+---
+
 ### `schema.md`
 
 Mirror completo y autoritativo del esquema de la base de datos del plano interno
