@@ -159,6 +159,42 @@ def _cmd_materialize(args: argparse.Namespace) -> None:
         print(f"WARN materializer: {err}", file=sys.stderr)
 
 
+def _cmd_quarantine_destroy(args: argparse.Namespace) -> None:
+    """Destruccion auditable de registros en quarantined_records (Issue #273).
+
+    ``--id`` destruye un registro puntual; ``--expired`` barre todas las filas
+    con retencion vencida o ``review_status=rejected``. En ambos casos la guarda
+    de elegibilidad la aplica el server (PATCH filtrado). Sin SUPABASE_* entra en
+    dry-run silencioso (no-op), asi que en CI no toca la red.
+    """
+    from scrapers.exporters.staging_exporter import StagingConfig
+    from scrapers.jobs.quarantine_destroyer import QuarantineDestroyer
+
+    record_id: str | None = getattr(args, "id", None)
+    expired: bool = getattr(args, "expired", False)
+
+    if bool(record_id) == expired:
+        print("ERROR: usa exactamente uno de --id o --expired", file=sys.stderr)
+        raise SystemExit(2)
+
+    if record_id is not None:
+        try:
+            record_id = validate_uuid_str(record_id)
+        except ValueError as exc:
+            print(f"ERROR: --id invalido: {exc}", file=sys.stderr)
+            raise SystemExit(2) from exc
+
+    with QuarantineDestroyer(StagingConfig.from_env()) as destroyer:
+        if record_id is not None:
+            result = destroyer.destroy(record_id)
+        else:
+            result = destroyer.destroy_expired(limit=getattr(args, "limit", None))
+
+    print(f"Destruidos: {result.destroyed}, omitidos: {result.skipped}")
+    for err in result.errors:
+        print(f"WARN quarantine-destroy: {err}", file=sys.stderr)
+
+
 def _cmd_consolidate(args: argparse.Namespace) -> None:
     """Consolidacion completa: materializer + auto-merge Event/Acopio + candidatos Person.
 
@@ -291,6 +327,23 @@ def main() -> None:
         "--batch-size", type=int, default=500, help="Aportes por batch (default: 500)"
     )
 
+    # --- quarantine-destroy ---
+    qd_cmd = sub.add_parser(
+        "quarantine-destroy",
+        help="Destruccion auditable de registros en quarantined_records (#273)",
+    )
+    qd_group = qd_cmd.add_mutually_exclusive_group(required=True)
+    qd_group.add_argument("--id", help="UUID del registro a destruir")
+    qd_group.add_argument(
+        "--expired",
+        action="store_true",
+        help="Barre todas las filas con retencion vencida o review_status=rejected",
+    )
+    qd_cmd.add_argument(
+        "--limit", type=int, default=None,
+        help="Tope de filas a destruir en el barrido --expired",
+    )
+
     args = parser.parse_args()
 
     if args.verbose:
@@ -309,6 +362,7 @@ def main() -> None:
         "list-enabled": _cmd_list_enabled,
         "ingest": _cmd_ingest,
         "consolidate": _cmd_consolidate,
+        "quarantine-destroy": _cmd_quarantine_destroy,
     }
     commands[args.command](args)
 

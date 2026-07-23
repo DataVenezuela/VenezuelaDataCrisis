@@ -250,6 +250,7 @@ CREATE TABLE public.quarantined_records (
   review_decision text,
   retention_until timestamp with time zone,
   approved_at timestamp with time zone,
+  destroyed_at timestamp with time zone,
   quarantined_at timestamp with time zone NOT NULL DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT quarantined_records_pkey PRIMARY KEY (id),
   CONSTRAINT quarantined_records_run_id_foreign FOREIGN KEY (run_id) REFERENCES public.scrape_runs(run_id)
