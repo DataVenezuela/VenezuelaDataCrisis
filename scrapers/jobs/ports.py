@@ -44,11 +44,19 @@ class ConsolidationDataPort(Protocol):
     otro dev y su consolidacion exige revision humana (nunca auto-merge).
     """
 
-    def fetch_unconsolidated(self, entity_type: str, batch_size: int) -> list[Record]:
-        """Devuelve hasta ``batch_size`` aportes NO consolidados de ``entity_type``.
+    def fetch_aportes_page(
+        self, entity_type: str, batch_size: int, cursor: tuple[str, str]
+    ) -> list[Record]:
+        """Devuelve hasta ``batch_size`` aportes de ``entity_type`` tras ``cursor``.
 
-        El orden debe ser estable entre llamadas para que la seleccion de
-        ganador sea determinista. Una lista vacia indica que no queda pendiente.
+        Pagina por cursor keyset ``(created_at, id)``: devuelve las filas cuyo
+        ``(created_at, id)`` es estrictamente mayor que ``cursor``, ordenadas
+        ascendentemente por ese par (orden total estable => ``pick_winner``
+        determinista). NO filtra por ``consolidated_at`` (columna inexistente en
+        el schema real). El metodo es agnostico del origen del ``cursor``: el
+        caller arranca desde la frontera DURABLE persistida (``read_cursor``,
+        option B) o, si no hay, desde el sentinela inicial. Una lista vacia indica
+        que no quedan mas filas tras el cursor.
         """
         ...
 
@@ -60,10 +68,24 @@ class ConsolidationDataPort(Protocol):
         """
         ...
 
-    def mark_consolidated(self, aporte_ids: list[str]) -> None:
-        """Marca los aportes ``aporte_ids`` como consolidados (consolidated_at).
+    # --- Cursor durable por entity_type (option B, #93) ----------------------
 
-        Idempotente: re-marcar un aporte ya consolidado no es un error.
+    def read_cursor(self, entity_type: str) -> tuple[str, str] | None:
+        """Frontera ``(cursor_created_at, cursor_id)`` persistida para ``entity_type``.
+
+        None => no hay frontera (primera corrida o tabla ausente): el caller
+        arranca desde el sentinela inicial (scan completo). Se degrada a None ante
+        tabla ausente / sin permiso / error de red (NO aborta): repetir el
+        incidente del 400 seria peor que reescanear.
+        """
+        ...
+
+    def write_cursor(self, entity_type: str, created_at: str, cursor_id: str) -> bool:
+        """Persiste la frontera ``(created_at, cursor_id)`` de ``entity_type``.
+
+        Best-effort: devuelve False si no se pudo persistir (tabla ausente / sin
+        permiso / error de red), en cuyo caso la proxima corrida re-escanea desde
+        el sentinela (el write idempotente aguas abajo evita duplicar).
         """
         ...
 
@@ -91,35 +113,42 @@ class ConsolidationDataPort(Protocol):
 class FakeInMemoryAdapter:
     """Implementacion en memoria de `ConsolidationDataPort` para tests offline.
 
-    Guarda los aportes, las filas canonicas (indexadas por (entity_type,
-    dedup_hash)) y el conjunto de aportes consolidados. Sin red ni DB real.
+    Guarda los aportes y las filas canonicas (indexadas por (entity_type,
+    dedup_hash)). Sin red ni DB real.
 
     Semantica clave para los tests de #91:
-      - ``fetch_unconsolidated`` solo devuelve aportes de ese tipo cuyo id NO
-        esta en ``consolidated_ids`` (incremental / idempotente al re-correr).
+      - ``fetch_aportes_page`` pagina por cursor keyset ``(created_at, id)``:
+        devuelve las filas del tipo cuyo par es estrictamente mayor que el cursor,
+        ordenadas ascendentemente.
+      - ``read_cursor`` / ``write_cursor`` mantienen la frontera durable por
+        entity_type en memoria (option B): tras ``write_cursor``, la proxima
+        corrida arranca despues de la frontera y no re-procesa lo ya visto.
       - ``upsert_canonical`` reemplaza por (entity_type, dedup_hash): una sola
         fila canonica por hash sin importar cuantas veces se upserte.
-      - ``mark_consolidated`` acumula ids en un set (re-marcar no duplica).
     """
 
     def __init__(self, aportes: list[Record] | None = None) -> None:
         self.aportes: list[Record] = list(aportes or [])
         # Fila canonica por (entity_type, dedup_hash).
         self.canonical: dict[tuple[str, str], Record] = {}
-        # Ids de aportes ya consolidados.
-        self.consolidated_ids: set[str] = set()
-        # Contadores de auditoria para asserts en tests.
+        # Frontera durable por entity_type (option B): en memoria, sin persistencia.
+        self.cursors: dict[str, tuple[str, str]] = {}
+        # Contador de auditoria para asserts en tests.
         self.upsert_calls: int = 0
-        self.mark_calls: int = 0
 
-    def fetch_unconsolidated(self, entity_type: str, batch_size: int) -> list[Record]:
-        pending = [
-            rec
-            for rec in self.aportes
-            if rec.get("entity_type") == entity_type
-            and str(rec.get("id")) not in self.consolidated_ids
-        ]
-        return pending[:batch_size]
+    @staticmethod
+    def _keyset(rec: Record) -> tuple[str, str]:
+        return (str(rec.get("created_at", "")), str(rec.get("id", "")))
+
+    def fetch_aportes_page(
+        self, entity_type: str, batch_size: int, cursor: tuple[str, str]
+    ) -> list[Record]:
+        ordered = sorted(
+            (rec for rec in self.aportes if rec.get("entity_type") == entity_type),
+            key=self._keyset,
+        )
+        after = [rec for rec in ordered if self._keyset(rec) > cursor]
+        return after[:batch_size]
 
     def upsert_canonical(self, entity_type: str, record: Record) -> None:
         dedup_hash = record.get("dedup_hash")
@@ -128,9 +157,12 @@ class FakeInMemoryAdapter:
         self.canonical[(entity_type, dedup_hash)] = record
         self.upsert_calls += 1
 
-    def mark_consolidated(self, aporte_ids: list[str]) -> None:
-        self.consolidated_ids.update(aporte_ids)
-        self.mark_calls += 1
+    def read_cursor(self, entity_type: str) -> tuple[str, str] | None:
+        return self.cursors.get(entity_type)
+
+    def write_cursor(self, entity_type: str, created_at: str, cursor_id: str) -> bool:
+        self.cursors[entity_type] = (created_at, cursor_id)
+        return True
 
     def fetch_person_candidates(self, block_keys: list[str]) -> list[Record]:
         if not block_keys:
@@ -140,7 +172,6 @@ class FakeInMemoryAdapter:
             rec
             for rec in self.aportes
             if rec.get("entity_type") == "Person"
-            and str(rec.get("id")) not in self.consolidated_ids
             and any(k in key_set for k in (rec.get("block_keys") or []))
         ]
 
