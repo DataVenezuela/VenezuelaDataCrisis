@@ -2,11 +2,10 @@
 
 | Campo | Valor |
 |---|---|
-| Estado | Aceptada (§2.1 modelo de `events` y §3 gating enmendados por ADR 0010) |
+| Estado | Aceptada |
 | Fecha | 2026-07-06 |
 | Decisores | DB/API, Scrapers/Cleaners, Verification |
 | Reemplaza a | [ADR 0001](./0001-arquitectura-serving-publico.md) §5 (modelo de datos del artefacto público) |
-| Reemplazada por | [ADR 0010](./0010-fusion-uniforme-por-aristas.md) (parcial: §2.1 `events` como catálogo compartido y §3 compuerta de publicación, ahora uniforme para todos los tipos) |
 | Complementa | [ADR 0006](./0006-proteccion-pii-ingesta.md) (protección de PII) |
 | Relacionado con | `docs/pipeline.md`, `docs/schema.md`, `docs/specs/person-dedup.md` |
 
