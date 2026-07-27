@@ -24,7 +24,7 @@ def find_candidates(
         blocking_key: block key that produced the candidate
         score: float
         reasons: dict[str, float]
-        priority: int (1 = high, 2 = medium)
+        priority: int (mayor = mas urgente; 2 = alta si score >= 0.95, 1 = media)
     """
     candidates: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str]] = set()
@@ -55,7 +55,7 @@ def find_candidates(
                 if score < threshold:
                     continue
 
-                priority = 1 if score >= 0.95 else 2
+                priority = 2 if score >= 0.95 else 1
 
                 left_aporte_id, right_aporte_id = sorted([left_id, right_id])
 

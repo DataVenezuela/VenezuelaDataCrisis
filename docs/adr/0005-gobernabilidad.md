@@ -21,10 +21,11 @@ specs de contrato que el repo privado `vzla-deployment` importa (ADR 0003, ADR
 el contrato o comprometer el pipeline.
 
 ADR 0003 §8 y su plan de implementación difieren aquí la gobernanza del repo de
-deployment ("quórum de mantenedores, ver ADR 0005"). ADR 0004 nombra a
-"CODEOWNERS, ADR 0005" como el revisor que verifica que un cambio de contrato
-suba la versión. Falta la ADR que fije esa política de forma explícita: quién
-puede escribir, quién debe aprobar y sobre qué rutas.
+deployment ("quórum de mantenedores, ver ADR 0005"). ADR 0004 (rechazada, #306)
+nombraba a "CODEOWNERS, ADR 0005" como el revisor que verificaría que un cambio
+de contrato suba la versión; ese mecanismo de versión ya no aplica, pero la
+necesidad de fijar quién puede escribir, quién debe aprobar y sobre qué rutas
+sigue en pie por las demás rutas sensibles (PII, parsers, CI) listadas arriba.
 
 ---
 
@@ -105,8 +106,8 @@ rama al día) para que la política deje de depender solo de la disciplina.
 
 - ADR 0003 (reestructuración de repos), §8 y plan de implementación (difiere el
   quórum de deployment aquí).
-- ADR 0004 (versionado de contrato): nombra CODEOWNERS + ADR 0005 como revisor
-  del bump de versión.
+- ADR 0004 (versionado de contrato, rechazada #306): nombraba CODEOWNERS + ADR
+  0005 como revisor del bump de versión; ya no aplica.
 - `CODEOWNERS` (reglas de propiedad actuales).
 - `CONTRIBUTING.md` (proceso de revisión y branch protection).
 - Issue #237.

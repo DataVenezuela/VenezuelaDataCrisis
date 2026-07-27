@@ -2,10 +2,11 @@
 
 | Campo | Valor |
 |---|---|
-| Estado | Aceptada |
+| Estado | Aceptada (§2.1 modelo de `events` y §3 gating enmendados por ADR 0010) |
 | Fecha | 2026-07-06 |
 | Decisores | DB/API, Scrapers/Cleaners, Verification |
 | Reemplaza a | [ADR 0001](./0001-arquitectura-serving-publico.md) §5 (modelo de datos del artefacto público) |
+| Reemplazada por | [ADR 0010](./0010-fusion-uniforme-por-aristas.md) (parcial: §2.1 `events` como catálogo compartido y §3 compuerta de publicación, ahora uniforme para todos los tipos) |
 | Complementa | [ADR 0006](./0006-proteccion-pii-ingesta.md) (protección de PII) |
 | Relacionado con | `docs/pipeline.md`, `docs/schema.md`, `docs/specs/person-dedup.md` |
 
@@ -142,8 +143,13 @@ flowchart TD
 - Migrar el `consolidation_job.py` a la forma viva de `dedup_candidates`
   (`*_aporte_id`, `priority` entero, `touches_gold`) y cablearlo al cron.
 - Cerrar los huecos código-vs-canon registrados (columnas que el exporter emite
-  fuera del `aportes` canónico, `aportes.consolidated_at`, nullability de
-  `artifact_id`) contra `docs/schema.md`, como parte de la migración de `aportes`.
+  fuera del `aportes` canónico, nullability de `artifact_id`) contra
+  `docs/schema.md`, como parte de la migración de `aportes`. El hueco de
+  `aportes.consolidated_at` quedó cerrado (2026-07-19, option B / #93): el job ya no
+  usa esa columna; pagina por una **frontera durable** en la tabla
+  `consolidation_state` (cursor keyset `(created_at, id)` por `entity_type`) y, para
+  Person, trae compañeros de bloque históricos por `block_keys` para la completitud
+  nuevo-vs-viejo (ver `docs/specs/person-dedup.md`).
 - Restricciones must-link / cannot-link y re-clustering periódico: Fase 2.
 
 ---

@@ -33,6 +33,12 @@ create table public.aportes (
 
 -- ---------------------------------------------------------------------------
 -- 0008_ingesta_staging_dedup.sql : aportes staging/dedup columns
+-- NOTA: el schema DESPLEGADO en Supabase NO tiene la columna
+-- ``consolidated_at`` (probe en vivo 2026-07-19: GET aportes?...consolidated_at=is.null
+-- -> 400 42703 "column aportes.consolidated_at does not exist"). La consolidacion
+-- no la usa: pagina por cursor keyset (created_at, id), no por estado. NO agregarla
+-- aqui: este fixture refleja lo DESPLEGADO (igual que el bloque dedup_candidates),
+-- para que un adapter que la referencie falle en el contract test.
 -- ---------------------------------------------------------------------------
 alter table public.aportes
   add column run_id             uuid,
@@ -41,7 +47,6 @@ alter table public.aportes
   add column dedup_version      text,
   add column block_keys         text[],
   add column content_hash       varchar(64),
-  add column consolidated_at    timestamptz,
   add column source_record_id   text,
   add column source_url         text,
   add column parser_version     text,
