@@ -98,6 +98,24 @@ create unique index acopio_centers_dedup_uniq
   on public.acopio_centers (dedup_hash);
 
 -- ---------------------------------------------------------------------------
+-- consolidation_state: cursor durable POR entity_type del consolidation_job
+-- (option B, #93). Frontera (created_at, id) del ultimo aporte procesado por
+-- cada slug (event|acopio_center|person) para consolidar solo aportes NUEVOS.
+-- PROVENANCE: fuente de verdad docs/schema.md (mirror del schema desplegado) +
+-- DDL del cuerpo del PR de #93 que el mantenedor aplica en Supabase. PK =
+-- entity_type (on_conflict del upsert). Requiere grants SELECT/INSERT/UPDATE al
+-- rol consolidation_job; el adapter degrada a scan completo si falta o rechaza.
+-- Si docs/schema.md cambia, actualizar este bloque.
+-- ---------------------------------------------------------------------------
+create table public.consolidation_state (
+  entity_type       text not null,
+  cursor_created_at timestamptz,
+  cursor_id         uuid,
+  updated_at        timestamptz not null default now(),
+  constraint consolidation_state_pkey primary key (entity_type)
+);
+
+-- ---------------------------------------------------------------------------
 -- dedup_candidates: schema real desplegado en Supabase
 -- NOTA: la migración pública 0009 usaba left_person/right_person (FK a persons).
 -- El schema desplegado usa left_aporte_id/right_aporte_id (FK a aportes.id),
