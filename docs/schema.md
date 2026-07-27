@@ -103,6 +103,19 @@ CREATE TABLE public.aportes (
   -- un aporte por registro-fuente por fuente; silver nunca colapsa.
   CONSTRAINT aportes_source_external_uq UNIQUE (source_id, external_id)
 );
+-- Indice GIN para el fetch de companeros de bloque del consolidation_job Person
+-- (option B, #93). Ese fetch corre
+--   entity_type = 'person' AND (block_keys @> '["k1"]' OR ... OR block_keys @> '["kN"]')
+-- (PostgREST cs.["clave"]). Sin este indice, cada rama del OR obliga a un seq scan
+-- de aportes; sobre la tabla ya grande el planner excede el statement_timeout y
+-- PostgREST responde 500. El fetch es NO fatal (degrada a bloqueo solo-pagina, se
+-- pierden las aristas nuevo-vs-viejo), pero la degradacion es permanente hasta que
+-- el indice exista. Solo se usa @> => jsonb_path_ops (mas chico/rapido que el
+-- jsonb_ops por defecto). PENDIENTE: DDL a aplicar por el mantenedor en Supabase
+-- (va en el cuerpo del PR; DataVenezuela/dataVenezuela es ref muerta, sin migracion
+-- cruzada). CREATE INDEX CONCURRENTLY para no bloquear escrituras de staging.
+--   CREATE INDEX CONCURRENTLY IF NOT EXISTS aportes_block_keys_gin
+--     ON public.aportes USING gin (block_keys jsonb_path_ops);
 CREATE TABLE public.events (
   event_id uuid NOT NULL DEFAULT gen_random_uuid(),
   event_type integer NOT NULL,

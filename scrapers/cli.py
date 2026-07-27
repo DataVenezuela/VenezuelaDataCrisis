@@ -174,7 +174,9 @@ def _emit_consolidation_notice(
     notas de error DEDUPLICADAS (cada mensaje unico una vez, con su conteo, tope
     de 5) para que sea un aviso accionable y no un flood. `hard_failed` (un
     FAILED de Event/AcopioCenter) corta con exit 1; un Person DEGRADED (errores
-    parciales / timeout del indice pendiente) se queda en verde a proposito.
+    parciales / statement_timeout 500 del fetch de companeros hasta que exista el
+    indice GIN aportes_block_keys_gin, ver docs/schema.md) se queda en verde a
+    proposito.
     """
     line = " | ".join(f"{name}={status}({detail})" for name, status, detail in stages)
     any_not_ok = any(status != "OK" for _, status, _ in stages)

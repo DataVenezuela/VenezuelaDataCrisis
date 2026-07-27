@@ -902,6 +902,10 @@ def _fetch_block_partners(
     No fatal: si el fetch falla, se degrada a bloqueo solo-pagina (se pierden las
     aristas nuevo-vs-viejo de esta pagina, pero la corrida sigue emitiendo
     nuevo-vs-nuevo) y se registra el error para visibilidad. Sin block_keys => [].
+
+    Un 500 recurrente aca es el statement_timeout del OR de `block_keys @> [...]`
+    sobre una tabla aportes grande sin indice GIN: aplicar el indice pendiente
+    ``aportes_block_keys_gin (block_keys jsonb_path_ops)`` (ver docs/schema.md).
     """
     if not block_keys:
         return []
