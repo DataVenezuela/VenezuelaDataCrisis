@@ -261,7 +261,9 @@ class TestConsolidate:
         """Un entity_type que revienta en la etapa 2 no debe abortar el comando
         antes de la etapa 3 (Person): consolidate_entity_type no envuelve su
         fetch en try/except propio, asi que un error transitorio (red/Supabase)
-        propagaria sin el aislamiento por entity_type de _cmd_consolidate."""
+        propagaria sin el aislamiento por entity_type de _cmd_consolidate. Un
+        FAILED en duro pone el comando en rojo (SystemExit 1) pero SOLO tras
+        correr la etapa Person y emitir el resumen de fin de corrida."""
         import scrapers.jobs.consolidation_job as consolidation_job
 
         for var in (
@@ -281,12 +283,81 @@ class TestConsolidate:
         from scrapers.cli import _cmd_consolidate
 
         args = argparse.Namespace(config=str(_SAMPLE_CONFIG), dry_run=False, batch_size=500)
-        _cmd_consolidate(args)
+        with pytest.raises(SystemExit) as excinfo:
+            _cmd_consolidate(args)
+        assert excinfo.value.code == 1
 
         out = capsys.readouterr()
         assert "Consolidation[Event]: FAILED" in out.err
         assert "Consolidation[AcopioCenter]:" in out.out
+        # La etapa Person corrio igual (el fallo de Event no la bloquea).
         assert "Consolidation[Person]: sin credenciales Supabase, omitido" in out.out
+        # El resumen de fin de corrida nombra que fallo, deduplicado.
+        assert "Consolidation summary:" in out.err
+        assert "Event=FAILED" in out.err
+        assert "WARN consolidate: Event: boom transitorio" in out.err
+
+    def test_person_degraded_surfaces_error_strings_and_stays_green(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Un Person con errores parciales (p.ej. el 500 no-fatal del fetch de
+        companeros de bloque) es DEGRADED, no hard-fail: surfacea los mensajes
+        REALES (no solo el conteo) y se queda en verde (exit 0)."""
+        import scrapers.jobs.consolidation_job as consolidation_job
+        from scrapers.jobs.consolidation_job import PersonConsolidationResult
+
+        for var in (
+            "SUPABASE_URL", "SUPABASE_PUBLISHABLE_KEY", "SUPABASE_CONSOLIDATION_JWT",
+        ):
+            monkeypatch.delenv(var, raising=False)
+
+        monkeypatch.setattr(
+            consolidation_job.PersonConsolidationConfig, "from_env",
+            classmethod(lambda cls, **kw: object()),
+        )
+        degraded = PersonConsolidationResult(
+            run_id="r1", entity_type="person", records_read=7,
+            errors=[
+                "partner_fetch_error: Server error '500 Internal Server Error'",
+                "partner_fetch_error: Server error '500 Internal Server Error'",
+            ],
+        )
+        monkeypatch.setattr(
+            consolidation_job, "run_person_consolidation", lambda cfg: degraded
+        )
+
+        from scrapers.cli import _cmd_consolidate
+
+        args = argparse.Namespace(config=str(_SAMPLE_CONFIG), dry_run=False, batch_size=500)
+        _cmd_consolidate(args)  # NO SystemExit: degradado se queda en verde.
+
+        out = capsys.readouterr()
+        assert "Consolidation summary:" in out.err
+        assert "Person=DEGRADED" in out.err
+        # Mensaje real deduplicado con su conteo (aparecio 2 veces).
+        assert "WARN consolidate: Person: partner_fetch_error" in out.err
+        assert "(x2)" in out.err
+
+    def test_all_ok_emits_summary_and_exits_zero(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Sin fallos: se emite el resumen (Event/AcopioCenter/Person=OK) y exit 0."""
+        for var in (
+            "SUPABASE_URL", "SUPABASE_PUBLISHABLE_KEY", "SUPABASE_CONSOLIDATION_JWT",
+        ):
+            monkeypatch.delenv(var, raising=False)
+
+        from scrapers.cli import _cmd_consolidate
+
+        args = argparse.Namespace(config=str(_SAMPLE_CONFIG), dry_run=False, batch_size=500)
+        _cmd_consolidate(args)  # sin creds: Event/Acopio OK (fake), Person omitido=OK
+
+        out = capsys.readouterr()
+        summary = out.out + out.err
+        assert "Consolidation summary:" in summary
+        assert "Event=OK" in summary
+        assert "AcopioCenter=OK" in summary
+        assert "Person=OK" in summary
 
 
 # ── existing commands still work ──────────────────────────────────

@@ -141,7 +141,7 @@ def test_fetch_envia_filtros_correctos() -> None:
     assert query["select"] == ["*"]
 
 
-def test_fetch_acopio_usa_slug_acopio() -> None:
+def test_fetch_acopio_usa_slug_acopio_center() -> None:
     captured: dict[str, Any] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -151,7 +151,7 @@ def test_fetch_acopio_usa_slug_acopio() -> None:
     adapter = _adapter(handler)
     adapter.fetch_aportes_page("AcopioCenter", 10, ("", ""))
     query = parse_qs(urlparse(str(captured["url"])).query)
-    assert query["entity_type"] == ["eq.acopio"]
+    assert query["entity_type"] == ["eq.acopio_center"]
 
 
 def test_fetch_mapea_columnas_reales_a_record() -> None:
@@ -565,7 +565,7 @@ def test_write_cursor_upsert_por_entity_type() -> None:
     assert ok is True
     assert "on_conflict=entity_type" in str(captured["url"])
     row = captured["body"][0]
-    assert row["entity_type"] == "acopio"
+    assert row["entity_type"] == "acopio_center"
     assert row["cursor_created_at"] == "2024-06-01T00:00:00Z"
     assert row["cursor_id"] == "c-99"
     # updated_at explicito para que el UPDATE de merge-duplicates lo refresque.

@@ -42,7 +42,7 @@ create table public.aportes (
 -- ---------------------------------------------------------------------------
 alter table public.aportes
   add column run_id             uuid,
-  add column entity_type        text,         -- event | acopio | person
+  add column entity_type        text,         -- event | acopio_center | person
   add column dedup_hash         varchar(64),
   add column dedup_version      text,
   add column block_keys         text[],
@@ -139,7 +139,7 @@ create table public.dedup_candidates (
 -- ---------------------------------------------------------------------------
 create table public.gold_entities (
   gold_id               uuid primary key default gen_random_uuid(),
-  entity_type           text not null,          -- enum backend: event | acopio | person
+  entity_type           text not null,          -- enum backend: event | acopio_center | person
   canonical_aporte_id   uuid not null,
   verification_status   text not null default 'unverified',  -- enum verification_status
   verified_by           uuid,
