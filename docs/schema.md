@@ -180,7 +180,7 @@ CREATE TABLE public.silver_materialize_state (
   CONSTRAINT silver_materialize_state_singleton CHECK (singleton)
 );
 -- Cursor durable POR entity_type del consolidation_job (option B, #93). Frontera
--- (created_at, id) del ultimo aporte procesado por cada slug (event|acopio|person),
+-- (created_at, id) del ultimo aporte procesado por cada slug (event|acopio_center|person),
 -- para que la consolidacion procese solo aportes NUEVOS en vez de reescanear todo
 -- (y sin re-pisar la revision humana en dedup_candidates). Espeja
 -- silver_materialize_state pero con PK = entity_type en vez de singleton.

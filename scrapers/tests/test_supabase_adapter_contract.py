@@ -16,6 +16,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from scrapers.exporters.staging_exporter import _ENTITY_TYPE_SLUGS
+from scrapers.jobs.gold_writer import _ENTITY_TYPE_SLUG
 from scrapers.jobs.supabase_adapter import (
     _APORTE_FIELD_MAP,
     _CANONICAL_COLUMNS,
@@ -153,13 +155,35 @@ def test_indices_unique_dedup_hash_existen() -> None:
 
 
 def test_slugs_entity_type_coinciden_con_enum_del_backend() -> None:
-    # El comentario del schema real declara el enum: event | acopio | person.
+    # El comentario del schema real declara el enum: event | acopio_center | person.
     slugs = {slug for slug, _ in _ENTITY_TABLES.values()}
-    assert slugs == {"event", "acopio"}  # #91 solo auto-merge de Event/Acopio
+    assert slugs == {"event", "acopio_center"}  # #91 solo auto-merge de Event/Acopio
     schema = _read_schema().lower()
-    assert "event | acopio | person" in schema
+    assert "event | acopio_center | person" in schema
     for slug in slugs:
         assert slug in schema
+
+
+def test_slug_maps_no_divergen_entre_si() -> None:
+    """Las TRES fuentes del slug de entity_type deben coincidir.
+
+    El slug ("event"/"acopio_center"/"person") vive duplicado en tres mapas
+    hardcodeados independientes: ``staging_exporter._ENTITY_TYPE_SLUGS`` (escribe
+    ``aportes.entity_type``), ``supabase_adapter._ENTITY_TABLES`` (lee/filtra +
+    PK del cursor ``consolidation_state``) y ``gold_writer._ENTITY_TYPE_SLUG``
+    (escribe ``gold_entities.entity_type``). Si divergen, un entity_type se
+    escribe/lee con un valor que el enum del backend rechaza (400 22P02) —
+    exactamente el bug de ``AcopioCenter="acopio"`` contra el enum
+    ``acopio_center``. Este guard rompe si cualquiera vuelve a desincronizarse.
+    """
+    adapter_slugs = {name: slug for name, (slug, _) in _ENTITY_TABLES.items()}
+    for name in ("Event", "AcopioCenter"):
+        assert (
+            _ENTITY_TYPE_SLUGS[name] == adapter_slugs[name] == _ENTITY_TYPE_SLUG[name]
+        ), f"slug de {name} desincronizado entre los tres mapas de entity_type"
+    assert adapter_slugs["AcopioCenter"] == "acopio_center"
+    # Person no entra a _ENTITY_TABLES (no auto-funde), pero si a los otros dos.
+    assert _ENTITY_TYPE_SLUGS["Person"] == _ENTITY_TYPE_SLUG["Person"] == "person"
 
 
 def test_table_paths_apuntan_a_tablas_reales() -> None:

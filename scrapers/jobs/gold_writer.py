@@ -29,10 +29,10 @@ _ACTION_PASSTHROUGH = "passthrough"
 _ACTOR_KIND_SYSTEM = "system"
 
 # Mapeo de nombre interno -> slug del enum de DB (gold_entities.entity_type).
-# El enum del backend acepta: "event" | "acopio" | "person" (minusculas).
+# El enum del backend acepta: "event" | "acopio_center" | "person" (minusculas).
 _ENTITY_TYPE_SLUG: dict[str, str] = {
     "Event": "event",
-    "AcopioCenter": "acopio",
+    "AcopioCenter": "acopio_center",
     "Person": "person",
 }
 

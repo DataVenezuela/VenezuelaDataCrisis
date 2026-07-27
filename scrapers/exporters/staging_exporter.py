@@ -616,7 +616,7 @@ def _opt_str(value: object) -> str | None:
 
 _ENTITY_TYPE_SLUGS = {
     "Event": "event",
-    "AcopioCenter": "acopio",
+    "AcopioCenter": "acopio_center",
     "Person": "person",
 }
 

@@ -4,6 +4,7 @@ import argparse
 import json
 import logging
 import sys
+from collections import Counter
 from pathlib import Path
 
 from scrapers.models._validators import validate_uuid_str
@@ -159,6 +160,38 @@ def _cmd_materialize(args: argparse.Namespace) -> None:
         print(f"WARN materializer: {err}", file=sys.stderr)
 
 
+def _emit_consolidation_notice(
+    stages: list[tuple[str, str, str]],
+    error_notes: "Counter[str]",
+    *,
+    hard_failed: bool,
+) -> None:
+    """Imprime UN aviso de fin de corrida (no un log por intento) y corta en rojo si algo fallo en duro.
+
+    El incidente que motivo esto fue invisible: el cron quedaba verde mientras
+    cada escritura de acopio 400eaba. Aca se emite una sola linea-resumen por
+    stage (Event/AcopioCenter/Person) con OK/FAILED/DEGRADED, seguida de las
+    notas de error DEDUPLICADAS (cada mensaje unico una vez, con su conteo, tope
+    de 5) para que sea un aviso accionable y no un flood. `hard_failed` (un
+    FAILED de Event/AcopioCenter) corta con exit 1; un Person DEGRADED (errores
+    parciales / timeout del indice pendiente) se queda en verde a proposito.
+    """
+    line = " | ".join(f"{name}={status}({detail})" for name, status, detail in stages)
+    any_not_ok = any(status != "OK" for _, status, _ in stages)
+    print(f"Consolidation summary: {line}", file=sys.stderr if any_not_ok else sys.stdout)
+
+    top = error_notes.most_common(5)
+    for note, count in top:
+        suffix = f" (x{count})" if count > 1 else ""
+        print(f"WARN consolidate: {note}{suffix}", file=sys.stderr)
+    extra = len(error_notes) - len(top)
+    if extra > 0:
+        print(f"WARN consolidate: (+{extra} mensajes de error distintos mas)", file=sys.stderr)
+
+    if hard_failed:
+        raise SystemExit(1)
+
+
 def _cmd_consolidate(args: argparse.Namespace) -> None:
     """Consolidacion completa: materializer + auto-merge Event/Acopio + candidatos Person.
 
@@ -188,6 +221,13 @@ def _cmd_consolidate(args: argparse.Namespace) -> None:
     # generacion de aristas; solo comparte la cadencia del cron.
     _cmd_materialize(args)
 
+    # Resumen de fin de corrida: un stage por (Event/AcopioCenter/Person) con su
+    # estado, mas notas de error deduplicadas. Se emite UNA vez al final (ver
+    # _emit_consolidation_notice) para que un fallo parcial deje de ser invisible.
+    stages: list[tuple[str, str, str]] = []
+    error_notes: "Counter[str]" = Counter()
+    hard_failed = False
+
     # Etapa 2: auto-merge exacto Event/AcopioCenter por dedup_hash. Cada
     # entity_type se aisla en su propio try/except: un fetch que revienta
     # (error transitorio de red/Supabase, sin try/except propio dentro de
@@ -205,7 +245,22 @@ def _cmd_consolidate(args: argparse.Namespace) -> None:
                     dry_run=dry_run,
                 )
                 print(f"Consolidation[{entity_type}]: {summary}")
+                detail = (
+                    f"{summary['upserts']} upserts, {summary['groups']} grupos, "
+                    f"{summary['batches']} batches"
+                )
+                if summary.get("errors"):
+                    stages.append((entity_type, "DEGRADED", f"{detail}, {summary['errors']} con error"))
+                    error_notes[f"{entity_type}: {summary['errors']} grupo(s) con error de upsert"] += 1
+                else:
+                    stages.append((entity_type, "OK", detail))
             except Exception as exc:  # noqa: BLE001 - aislar el entity_type, no el comando
+                # Fallo en duro (p.ej. 400 de enum invalido): captura el detalle
+                # que hoy se pierde (raise_for_status propaga el cuerpo PostgREST).
+                hard_failed = True
+                detail = next(iter(str(exc).splitlines()), "") or type(exc).__name__
+                stages.append((entity_type, "FAILED", detail))
+                error_notes[f"{entity_type}: {detail}"] += 1
                 print(f"Consolidation[{entity_type}]: FAILED {exc}", file=sys.stderr)
     finally:
         port.close()
@@ -213,11 +268,15 @@ def _cmd_consolidate(args: argparse.Namespace) -> None:
     # Etapa 3: candidatos Person -> dedup_candidates (nunca auto-funde).
     if dry_run:
         print("Consolidation[Person]: omitido en --dry-run (run_person_consolidation no soporta dry-run)")
+        stages.append(("Person", "OK", "omitido (dry-run)"))
+        _emit_consolidation_notice(stages, error_notes, hard_failed=hard_failed)
         return
 
     person_config = PersonConsolidationConfig.from_env(batch_size=batch_size)
     if person_config is None:
         print("Consolidation[Person]: sin credenciales Supabase, omitido")
+        stages.append(("Person", "OK", "omitido (sin credenciales)"))
+        _emit_consolidation_notice(stages, error_notes, hard_failed=hard_failed)
         return
 
     result = run_person_consolidation(person_config)
@@ -226,6 +285,24 @@ def _cmd_consolidate(args: argparse.Namespace) -> None:
         f"{result.candidates_inserted_or_updated} candidatos, "
         f"{len(result.errors)} errores"
     )
+    if result.errors:
+        # DEGRADED (no hard-fail): p.ej. el 500/timeout del fetch de companeros de
+        # bloque es no-fatal (bloqueo solo-pagina). Se surfacean los mensajes reales,
+        # no solo el conteo, deduplicados por _emit_consolidation_notice.
+        stages.append(("Person", "DEGRADED", f"{len(result.errors)} error(es)"))
+        for msg in result.errors:
+            first_line = next(iter(str(msg).splitlines()), str(msg))
+            error_notes[f"Person: {first_line}"] += 1
+    else:
+        stages.append(
+            (
+                "Person",
+                "OK",
+                f"{result.candidates_inserted_or_updated} candidatos de {result.records_read} aportes",
+            )
+        )
+
+    _emit_consolidation_notice(stages, error_notes, hard_failed=hard_failed)
 
 
 def main() -> None:
