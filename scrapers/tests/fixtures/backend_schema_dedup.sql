@@ -115,3 +115,54 @@ create table public.dedup_candidates (
   resolved_at     timestamptz,
   check (left_aporte_id <> right_aporte_id)
 );
+
+-- ---------------------------------------------------------------------------
+-- gold_entities / gold_members / gold_history : capa gold (#317)
+--
+-- PROVENANCE: a diferencia de los bloques de arriba, estas tablas NO se
+-- re-fetchean del backend viejo (DataVenezuela/dataVenezuela es ref muerta).
+-- Su fuente de verdad es docs/schema.md (mirror autoritativo del schema
+-- desplegado) y la DDL del cuerpo del PR de #317, que el mantenedor aplica en
+-- Supabase. Los tipos enum del schema real (entity_type, verification_status,
+-- action, actor_kind) se representan aca como text: este fixture NO es una
+-- migracion ejecutable, solo fija los NOMBRES de columna para el contract test
+-- (mismo patron que el resto del archivo). Si el schema gold cambia en
+-- docs/schema.md, actualizar este bloque.
+--
+-- DDL-FIRST: el mantenedor crea estas tablas + grants ANTES de que el adapter
+-- de produccion (#318) se active, o la escritura degrada con permission-denied.
+-- ---------------------------------------------------------------------------
+create table public.gold_entities (
+  gold_id               uuid primary key default gen_random_uuid(),
+  entity_type           text not null,          -- enum backend: event | acopio | person
+  canonical_aporte_id   uuid not null,
+  verification_status   text not null default 'unverified',  -- enum verification_status
+  verified_by           uuid,
+  verified_at           timestamptz,
+  confidence_score      numeric not null,
+  superseded_by         uuid,
+  created_at            timestamptz not null default now(),
+  updated_at            timestamptz not null default now(),
+  last_deduplicated_at  timestamptz,
+  constraint gold_entities_superseded_by_foreign
+    foreign key (superseded_by) references public.gold_entities(gold_id)
+);
+
+create table public.gold_members (
+  gold_id       uuid not null references public.gold_entities(gold_id),
+  aporte_id     uuid not null references public.aportes(id),
+  via_candidate uuid references public.dedup_candidates(candidate_id),
+  added_at      timestamptz not null default now(),
+  primary key (gold_id, aporte_id)
+);
+
+create table public.gold_history (
+  history_id    bigint primary key generated always as identity,
+  gold_id       uuid not null references public.gold_entities(gold_id),
+  action        text not null,          -- enum backend: merge | passthrough | ...
+  detail        jsonb,
+  actor_kind    text not null,          -- enum backend: system | human
+  actor_id      uuid,
+  via_candidate uuid references public.dedup_candidates(candidate_id),
+  at            timestamptz not null default now()
+);
