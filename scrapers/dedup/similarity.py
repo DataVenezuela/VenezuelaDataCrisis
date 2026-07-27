@@ -2,7 +2,9 @@
 
 Multi-field weighted scoring with:
 - Jaro-Winkler on full_name (via jellyfish)
-- Cedula binary match with veto
+- Cedula binary match with veto; cedula_partial asymmetric rule (only adds
+  when digits+pattern coincide, never vetoes on mismatch — weaker evidence
+  than a full cedula_hmac match)
 - Partial location scoring (same city=1.0, same state=0.5, different=0.0)
 - Age range overlap
 - Status binary match
@@ -24,6 +26,11 @@ _CEDULA_WEIGHT = 0.30
 _LOCATION_WEIGHT = 0.15
 _AGE_WEIGHT = 0.10
 _STATUS_WEIGHT = 0.05
+
+# Confianza de un match de cedula_partial (digitos+patron coincidentes) frente
+# a un match de cedula_hmac completo: evidencia mas debil (menos digitos,
+# mayor probabilidad de colision), nunca un veto si difiere.
+_PARTIAL_CEDULA_CONFIDENCE = 0.5
 
 
 # ---------------------------------------------------------------------------
@@ -73,6 +80,34 @@ def _location_score(left_loc: str | None, right_loc: str | None) -> float:
         return 1.0
     if left_state == right_state:
         return 0.5
+    return 0.0
+
+
+def _cedula_score(left: dict[str, Any], right: dict[str, Any]) -> float:
+    """Match binario de cedula_hmac completo, o regla asimetrica de cedula_partial.
+
+    1.0 si ambos cedula_hmac coinciden (el veto de mismatch se resuelve antes,
+    en similarity_score). En su ausencia, si ambos registros son
+    identity_kind="partial" con el mismo cedula_partial y
+    cedula_partial_pattern, aporta _PARTIAL_CEDULA_CONFIDENCE: la regla es
+    asimetrica, solo suma cuando coincide, nunca descarta cuando difiere
+    (a diferencia del veto de cedula_hmac completo).
+    """
+    left_cedula = left.get("cedula_hmac") or None
+    right_cedula = right.get("cedula_hmac") or None
+    if left_cedula and right_cedula and left_cedula == right_cedula:
+        return 1.0
+
+    left_partial = left.get("cedula_partial")
+    if (
+        left.get("identity_kind") == "partial"
+        and right.get("identity_kind") == "partial"
+        and left_partial
+        and left_partial == right.get("cedula_partial")
+        and left.get("cedula_partial_pattern") == right.get("cedula_partial_pattern")
+    ):
+        return _PARTIAL_CEDULA_CONFIDENCE
+
     return 0.0
 
 
@@ -134,7 +169,7 @@ def similarity_score(
     name_sc = _name_score(
         str(left.get("full_name", "")), str(right.get("full_name", ""))
     )
-    cedula_sc = 1.0 if left_cedula and right_cedula and left_cedula == right_cedula else 0.0
+    cedula_sc = _cedula_score(left, right)
     location_sc = _location_score(
         left.get("last_known_location"),
         right.get("last_known_location"),
