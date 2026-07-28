@@ -892,7 +892,10 @@ def test_fetch_partners_trocea_block_keys_grandes() -> None:
         adapter.close()
 
     expected_chunks = -(-len(keys) // _PARTNER_BLOCK_KEY_CHUNK)  # ceil
-    assert len(transport.partner_get_urls) == expected_chunks == 3
+    # Se troceo en varios GETs (no un unico request gigante); el numero exacto se
+    # deriva del constante para no acoplar el test a su valor puntual.
+    assert len(transport.partner_get_urls) == expected_chunks
+    assert expected_chunks > 1
     # Ningun GET pliega mas de _PARTNER_BLOCK_KEY_CHUNK clausulas.
     for url in transport.partner_get_urls:
         assert url.count("block_keys.cs") <= _PARTNER_BLOCK_KEY_CHUNK
