@@ -103,6 +103,33 @@ CREATE TABLE public.aportes (
   -- un aporte por registro-fuente por fuente; silver nunca colapsa.
   CONSTRAINT aportes_source_external_uq UNIQUE (source_id, external_id)
 );
+-- Indice GIN + tuning para el fetch de companeros de bloque del consolidation_job
+-- Person (option B, #93). Ese fetch corre, por cada bloque de una pagina:
+--   entity_type = 'person' AND (block_keys @> '["k1"]' OR ... OR block_keys @> '["kN"]')
+-- (PostgREST cs.["clave"], troceado en _PARTNER_BLOCK_KEY_CHUNK claves por request,
+-- ver scrapers/jobs/consolidation_job.py; el fetch NO se acota por filas a
+-- proposito: trae todos los companeros historicos del bloque IGNORANDO la frontera).
+--   1) Indice: sin el, cada rama del OR es un seq scan de aportes; el planner excede
+--      el statement_timeout y PostgREST responde 500. Solo se usa @> => jsonb_path_ops
+--      (mas chico/rapido que el jsonb_ops por defecto).
+--   2) fastupdate=off: aportes es de escritura intensa (staging). Con fastupdate on,
+--      el pending list del GIN se escanea sin ordenar en cada @> hasta que autovacuum
+--      lo vuelca => lecturas lentas. off mantiene lecturas rapidas (costo: escrituras
+--      algo mas pesadas). El VACUUM vuelca el pending list actual una vez.
+--   3) statement_timeout del rol: aun con el indice, un bloque con claves foneticas
+--      cortas y comunes puede unir+serializar (json_agg, select=* incluye raw_json) un
+--      resultado grande y agotar un timeout corto => 500 (SQLSTATE 57014, "canceling
+--      statement due to statement timeout"). El fetch es NO fatal (degrada a bloqueo
+--      solo-pagina), pero la degradacion persiste hasta que la corrida deja de agotar
+--      el timeout.
+-- APLICADO por el mantenedor en Supabase (va en el cuerpo del PR; DataVenezuela/
+-- dataVenezuela es ref muerta, sin migracion cruzada). CREATE INDEX CONCURRENTLY para
+-- no bloquear escrituras de staging.
+--   CREATE INDEX CONCURRENTLY IF NOT EXISTS aportes_block_keys_gin
+--     ON public.aportes USING gin (block_keys jsonb_path_ops);
+--   ALTER INDEX aportes_block_keys_gin SET (fastupdate = off);
+--   ALTER ROLE consolidation_job SET statement_timeout = '120s';
+--   VACUUM (ANALYZE) public.aportes;
 CREATE TABLE public.events (
   event_id uuid NOT NULL DEFAULT gen_random_uuid(),
   event_type integer NOT NULL,
