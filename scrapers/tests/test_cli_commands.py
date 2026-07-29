@@ -234,8 +234,8 @@ class TestMaterialize:
         assert "Materializer=OK" in result.stdout
 
     def test_materialize_without_credentials_and_no_dry_run_fails(self) -> None:
-        """Sin --dry-run, la falta de credenciales es FAILED + exit 1: si el
-        secret del cron se borra o rota mal, StagingConfig.from_env() devuelve
+        """Sin --dry-run, la falta de credenciales es FAILED + exit 1: si la
+        credencial del cron se borra o rota mal, StagingConfig.from_env() devuelve
         None y el materializer entraria en no-op; un cron verde que no
         materializa nada seria indistinguible de uno sano (el fallo invisible
         de #333, aca para siempre porque nadie mira un cron verde)."""

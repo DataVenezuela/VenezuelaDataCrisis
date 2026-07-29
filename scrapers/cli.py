@@ -115,7 +115,7 @@ def _scrub_supabase_url(text: str) -> str:
     """Redacta SUPABASE_URL de un mensaje de error.
 
     El log del cron de materialize sube como artifact de un repo PUBLICO y
-    GitHub solo enmascara secrets, no vars.*: una excepcion de transporte
+    GitHub solo enmascara las credenciales del repo, no las vars.*: una excepcion de transporte
     (httpx incluye la URL completa del request) publicaria el endpoint
     interno de Supabase (ADR 0002: no facilitar mass-scrapers).
     """
@@ -144,8 +144,8 @@ def _cmd_materialize(args: argparse.Namespace) -> None:
     Al final emite UN aviso de fin de corrida (Materialize summary) y corta
     con exit 1 si hubo errores, para que el cron nunca quede verde con fallos
     invisibles (mismo patron que #333 para consolidate). Por lo mismo, sin
-    --dry-run las credenciales SUPABASE_* son OBLIGATORIAS: si faltan (secret
-    borrado/rotado mal), el materializer entraria en no-op y el cron quedaria
+    --dry-run las credenciales SUPABASE_* son OBLIGATORIAS: si faltan (borradas
+    o rotadas mal en el repo), el materializer entraria en no-op y el cron quedaria
     verde para siempre sin materializar nada; eso es FAILED, no OK. El unico
     modo sin credenciales es --dry-run explicito (no-op garantizado, cero red).
     """
