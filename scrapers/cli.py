@@ -458,16 +458,8 @@ def main() -> None:
 
     # --- consolidate ---
     consolidate_cmd = sub.add_parser("consolidate", help="Cross-source deduplication")
-    consolidate_cmd.add_argument(
-        "--config",
-        default="scrapers/config/sources.demo.yaml",
-        help=(
-            "YAML config path. Sin uso directo desde #336 (el materializer, "
-            "unico consumidor de project.event_id, es ahora el comando "
-            "`materialize`); se mantiene por compatibilidad con invocaciones "
-            "existentes (consolidate.yml)."
-        ),
-    )
+    # Sin --config: el materializer (ahora el comando `materialize`, #336) era
+    # su unico consumidor; consolidate no lee ningun YAML.
     consolidate_cmd.add_argument(
         "--dry-run",
         action="store_true",

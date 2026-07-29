@@ -429,28 +429,32 @@ class TestMaterialize:
 
 
 class TestConsolidate:
-    # Anclado a un fixture full-format propio (_SAMPLE_CONFIG) en vez del config
-    # por defecto: el materializer solo necesita project.event_id, y una entrada
-    # completa evita que un futuro cambio a formato thin haga que load_sources
-    # lance ValueError (SUPABASE_* ausentes en CI), que _cmd_materialize traga
-    # antes de imprimir "Materializer:", rompiendo el test sin mensaje obvio.
-    #
-    # Ninguno de estos tests setea SUPABASE_*, asi que las 3 etapas (materializer,
-    # auto-merge Event/Acopio, candidatos Person) corren en su modo no-op/dry-run
-    # implicito (FakeInMemoryAdapter / PersonConsolidationConfig.from_env() -> None):
-    # cero red, cero writes, deterministico.
+    # Ninguno de estos tests setea SUPABASE_* (_run_cli ademas las quita del
+    # entorno), asi que ambas etapas (auto-merge Event/Acopio, candidatos
+    # Person) corren en su modo no-op implicito (FakeInMemoryAdapter /
+    # PersonConsolidationConfig.from_env() -> None): cero red, cero writes,
+    # deterministico.
     def test_consolidate_no_longer_materializes(self, tmp_path: Path) -> None:
         # #336 (ADR 0011): el materializer ya no es una etapa del consolidate;
         # vive en su propio comando `materialize` con su propio cron.
-        result = _run_cli("consolidate", "--config", str(_SAMPLE_CONFIG))
+        result = _run_cli("consolidate")
         assert result.returncode == 0
         assert "Materializer:" not in result.stdout
         assert "Materialize summary:" not in result.stdout
 
+    def test_consolidate_rejects_config_flag(self, tmp_path: Path) -> None:
+        # Separacion limpia (#336): el materializer era el unico consumidor de
+        # --config; consolidate ya no lee ningun YAML y el flag se elimino en
+        # vez de quedar como argumento muerto. Si #337 vuelve a necesitar
+        # config, se re-agrega a conciencia (y este test se elimina).
+        result = _run_cli("consolidate", "--config", str(_SAMPLE_CONFIG))
+        assert result.returncode == 2
+        assert "unrecognized arguments" in result.stderr
+
     def test_automerge_stages_run_for_event_and_acopio(self, tmp_path: Path) -> None:
         # Etapa 2: sin SUPABASE_*, build_port() cae a FakeInMemoryAdapter (vacio),
         # asi que cada entity_type reporta un summary en cero, sin tocar la red.
-        result = _run_cli("consolidate", "--config", str(_SAMPLE_CONFIG))
+        result = _run_cli("consolidate")
         assert result.returncode == 0
         assert "Consolidation[Event]:" in result.stdout
         assert "Consolidation[AcopioCenter]:" in result.stdout
@@ -458,7 +462,7 @@ class TestConsolidate:
     def test_person_stage_skipped_without_credentials(self, tmp_path: Path) -> None:
         # Etapa 3: sin SUPABASE_*, PersonConsolidationConfig.from_env() es None,
         # asi que la etapa se omite explicitamente en vez de intentar un write.
-        result = _run_cli("consolidate", "--config", str(_SAMPLE_CONFIG))
+        result = _run_cli("consolidate")
         assert result.returncode == 0
         assert "Consolidation[Person]: sin credenciales Supabase, omitido" in result.stdout
 
@@ -466,26 +470,17 @@ class TestConsolidate:
         # run_person_consolidation no soporta dry-run propio, asi que --dry-run
         # omite la etapa Person por completo (nunca llega a preguntar por
         # credenciales) en vez de arriesgar un write real pese al flag.
-        result = _run_cli(
-            "consolidate", "--dry-run",
-            "--config", str(_SAMPLE_CONFIG),
-        )
+        result = _run_cli("consolidate", "--dry-run")
         assert result.returncode == 0
         assert "Consolidation[Person]: omitido en --dry-run" in result.stdout
         assert "sin credenciales Supabase" not in result.stdout
 
     def test_dry_run_flag_accepted(self, tmp_path: Path) -> None:
-        result = _run_cli(
-            "consolidate", "--dry-run",
-            "--config", str(_SAMPLE_CONFIG),
-        )
+        result = _run_cli("consolidate", "--dry-run")
         assert result.returncode == 0
 
     def test_batch_size_flag_accepted(self, tmp_path: Path) -> None:
-        result = _run_cli(
-            "consolidate", "--batch-size", "10",
-            "--config", str(_SAMPLE_CONFIG),
-        )
+        result = _run_cli("consolidate", "--batch-size", "10")
         assert result.returncode == 0
 
     def test_automerge_failure_does_not_block_person_stage(
@@ -515,7 +510,7 @@ class TestConsolidate:
 
         from scrapers.cli import _cmd_consolidate
 
-        args = argparse.Namespace(config=str(_SAMPLE_CONFIG), dry_run=False, batch_size=500)
+        args = argparse.Namespace(dry_run=False, batch_size=500)
         with pytest.raises(SystemExit) as excinfo:
             _cmd_consolidate(args)
         assert excinfo.value.code == 1
@@ -561,7 +556,7 @@ class TestConsolidate:
 
         from scrapers.cli import _cmd_consolidate
 
-        args = argparse.Namespace(config=str(_SAMPLE_CONFIG), dry_run=False, batch_size=500)
+        args = argparse.Namespace(dry_run=False, batch_size=500)
         _cmd_consolidate(args)  # NO SystemExit: degradado se queda en verde.
 
         out = capsys.readouterr()
@@ -582,7 +577,7 @@ class TestConsolidate:
 
         from scrapers.cli import _cmd_consolidate
 
-        args = argparse.Namespace(config=str(_SAMPLE_CONFIG), dry_run=False, batch_size=500)
+        args = argparse.Namespace(dry_run=False, batch_size=500)
         _cmd_consolidate(args)  # sin creds: Event/Acopio OK (fake), Person omitido=OK
 
         out = capsys.readouterr()
