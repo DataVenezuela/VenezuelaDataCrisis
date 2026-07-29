@@ -2,11 +2,11 @@
 
 | Campo | Valor |
 |---|---|
-| Estado | Aceptada (§2.1 modelo de `events` y §3 gating enmendados por ADR 0010) |
+| Estado | Aceptada (§3 gating enmendado por ADR 0010; §2 enmendada por ADR 0011 — materializer en workflow propio, consolidador lee proxies tipados; §2.1 `events` catálogo restaurada por ADR 0011) |
 | Fecha | 2026-07-06 |
 | Decisores | DB/API, Scrapers/Cleaners, Verification |
 | Reemplaza a | [ADR 0001](./0001-arquitectura-serving-publico.md) §5 (modelo de datos del artefacto público) |
-| Reemplazada por | [ADR 0010](./0010-fusion-uniforme-por-aristas.md) (parcial: §2.1 `events` como catálogo compartido y §3 compuerta de publicación, ahora uniforme para todos los tipos) |
+| Reemplazada por | [ADR 0010](./0010-fusion-uniforme-por-aristas.md) (parcial: §3 compuerta de publicación, uniforme para todos los tipos) y [ADR 0011](./0011-materializer-separado-y-consolidador-sobre-proxies.md) (parcial: §2 orquestación y ruta de lectura; §2.1 `events` catálogo queda restaurada y vigente) |
 | Complementa | [ADR 0006](./0006-proteccion-pii-ingesta.md) (protección de PII) |
 | Relacionado con | `docs/pipeline.md`, `docs/schema.md`, `docs/specs/person-dedup.md` |
 

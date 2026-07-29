@@ -28,9 +28,10 @@ Claves de dedup pre-calculadas (dedup_hash, block_keys)
 └─────────────────────────────┘     └──────────────────────┘
       ↓
 Staging exporter → POST /rest/v1/aportes → aportes (Supabase)   [silver / staging]
-      ├─ materializer → persons / acopio_centers (silver 1:1, PK = aportes.id) + events (catálogo)
+      ├─ materializer (workflow propio, ADR 0011 / #336) → persons / acopio_centers (silver 1:1, PK = aportes.id) + events (catálogo)
       │
-      ↓  consolidation job (cada 20 min): similaridad sobre aportes → aristas
+      ↓  consolidation job (cada 20 min): lee proxies tipados vía embed, hasta el
+      ↓  watermark del materializer (ADR 0011 / #337) → similaridad → aristas
 dedup_candidates (edges: ced:… fuertes / phon:… difusas)
       ↓  gold clustering (agrupa por relación, no por tiempo)
 gold_entities + gold_members + gold_history (gold, fusión canónica)
@@ -826,9 +827,9 @@ aportes (silver)
    ▼
 persons / acopio_centers (silver 1:1, PK = aportes.id) + events (catálogo)
 
-aportes (silver)
-   │  consolidation job (similaridad → aristas puntuadas)
-   ▼
+aportes (sobre: id, created_at, block_keys) ⋈ proxies tipados (embed, sin raw_json)
+   │  consolidation job (similaridad → aristas puntuadas; frontera ≤ watermark
+   ▼  del materializer — ADR 0011)
 dedup_candidates (edges entre aportes)
    │  gold clustering (componentes conexos por relación)
    ▼
@@ -878,9 +879,11 @@ confirmar cada página de forma contigua (una página que falla por red no lo mu
 así la siguiente corrida la reintenta). Si la tabla del cursor todavía no existe,
 el materializer se degrada a un scan completo (comportamiento previo) sin fallar.
 
-El materializer corre como **primera etapa del cron de consolidación**
-(`consolidate.yml`), antes de la generación de aristas (es independiente de ella,
-solo comparte la cadencia de 20 min). El upsert usa `resolution=ignore-duplicates`
+Hoy el materializer corre como primera etapa del cron de consolidación
+(`consolidate.yml`); ADR 0011 lo separa a un **workflow propio**
+(`materialize.yml`, pendiente #336): solo proyecta el proxy, no actúa sobre los
+datos, así que no pertenece a la consolidación — que es independiente de él y
+solo consume su watermark (`silver_materialize_state`). El upsert usa `resolution=ignore-duplicates`
 (ON CONFLICT DO NOTHING) sobre la PK compartida: re-correr no duplica ni reescribe
 filas ya proyectadas. Sin las variables `SUPABASE_*` el materializer entra en
 dry-run silencioso (no toca la red). Limitación conocida (follow-up): un aporte
@@ -896,7 +899,9 @@ puntuadas** en `dedup_candidates`, en lugar de fusionar en el sitio. Cada arista
 referencia dos aportes:
 
 - `left_aporte_id` / `right_aporte_id`: FK a `aportes.id` (no a las tablas
-  tipadas de silver).
+  tipadas de silver; para person/acopio ese id **es** la PK compartida de la
+  subtabla, así que la arista ancla la misma fila del proxy — ADR 0011 §2
+  punto 6).
 - `blocking_key`: la clave de bloqueo que produjo el par (`ced:…` determinista o
   `phon:…` fonética).
 - `score` (numeric) y `reasons` (jsonb): la fuerza y el porqué del candidato.
@@ -904,6 +909,15 @@ referencia dos aportes:
 - `touches_gold` (boolean): si el par ya toca un cluster de gold existente.
 - `decision` (enum `dedup_decision`, default `pending`), `resolved_by`,
   `second_reviewer`, `resolved_at`: la resolución humana cuando aplica.
+
+**Ruta de lectura (ADR 0011, pendiente #337).** El job conduce `aportes`
+seleccionando solo columnas del sobre (`id`, `created_at`, `block_keys`) y trae
+el dominio **únicamente** vía embed del proxy tipado (`persons!inner(...)`):
+`raw_json` no se pide ni se parsea. La frontera keyset de `consolidation_state`
+nunca avanza más allá del watermark del materializer
+(`silver_materialize_state`): el atraso de proyección es latencia, nunca filas
+saltadas. Para event/acopio la estrategia (coincidencia exacta de `dedup_hash`,
+ADR 0010 / #338) lee solo el sobre, sin embed.
 
 **Person nunca auto-fusiona.** El job calcula similaridad (Jaro-Winkler sobre
 nombre + match de `cedula_hmac` + rango de edad + ubicación) dentro de bloques
