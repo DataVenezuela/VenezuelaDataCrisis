@@ -37,8 +37,7 @@ jobs:
           SUPABASE_CONSOLIDATION_JWT: ${{ secrets.SUPABASE_CONSOLIDATION_JWT }}
         run: |
           python -m scrapers.cli consolidate \
-            --dry-run \
-            --config scrapers/config/sources.custom.yaml
+            --dry-run
 
       - name: Run consolidation
         env:
@@ -50,7 +49,6 @@ jobs:
         run: |
           set -o pipefail
           python -m scrapers.cli consolidate \
-            --config scrapers/config/sources.custom.yaml \
             2>&1 | tee consolidation.log
 
       - name: Upload consolidation log

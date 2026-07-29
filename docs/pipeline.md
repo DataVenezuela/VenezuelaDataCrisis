@@ -879,14 +879,17 @@ confirmar cada página de forma contigua (una página que falla por red no lo mu
 así la siguiente corrida la reintenta). Si la tabla del cursor todavía no existe,
 el materializer se degrada a un scan completo (comportamiento previo) sin fallar.
 
-Hoy el materializer corre como primera etapa del cron de consolidación
-(`consolidate.yml`); ADR 0011 lo separa a un **workflow propio**
-(`materialize.yml`, pendiente #336): solo proyecta el proxy, no actúa sobre los
-datos, así que no pertenece a la consolidación — que es independiente de él y
-solo consume su watermark (`silver_materialize_state`). El upsert usa `resolution=ignore-duplicates`
+Desde #336 (ADR 0011) el materializer corre como un **workflow propio**
+(`materialize.yml`, cron cada 10 minutos, comando `python -m scrapers.cli
+materialize`) y ya no es una etapa del cron de consolidación: solo proyecta el
+proxy, no actúa sobre los datos, así que no pertenece a la consolidación, que
+es independiente de él y solo consume su watermark (`silver_materialize_state`).
+El upsert usa `resolution=ignore-duplicates`
 (ON CONFLICT DO NOTHING) sobre la PK compartida: re-correr no duplica ni reescribe
-filas ya proyectadas. Sin las variables `SUPABASE_*` el materializer entra en
-dry-run silencioso (no toca la red). Limitación conocida (follow-up): un aporte
+filas ya proyectadas. Sin `--dry-run`, las credenciales `SUPABASE_*` son
+obligatorias: si faltan o están a medias, el comando falla con aviso y exit 1
+en vez de degradarse a un no-op con el cron en verde. Con `--dry-run` valida el
+config y `project.event_id` sin crear cliente ni tocar la red. Limitación conocida (follow-up): un aporte
 con `source_record_id` estable que se re-scrapea con contenido nuevo actualiza su
 `raw_json` in situ (mismo `id`), pero su fila tipada no se re-proyecta hasta que
 un paso gated por `content_hash` lo habilite; los aportes sin `source_record_id`

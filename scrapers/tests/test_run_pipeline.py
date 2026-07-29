@@ -1871,7 +1871,11 @@ sources:
         instance = mock_cls.return_value.__enter__.return_value
         instance.materialize.return_value = mock_result
 
-        args = argparse.Namespace(config=str(cfg))
+        # dry_run=True: desde #336 el comando standalone exige SUPABASE_* (sin
+        # ellas, FAILED + exit 1); el modo dry-run mantiene la premisa de este
+        # test (sin env, sin red) y sigue ejercitando el parse del config y la
+        # llamada a materialize con el event_id del YAML.
+        args = argparse.Namespace(config=str(cfg), dry_run=True)
         with patch("scrapers.jobs.materializer.SilverMaterializer", mock_cls):
             cli._cmd_materialize(args)
 

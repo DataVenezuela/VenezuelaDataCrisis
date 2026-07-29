@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 from collections import Counter
 from pathlib import Path
@@ -110,15 +111,48 @@ def _cmd_ingest(args: argparse.Namespace) -> None:
         raise SystemExit(1)
 
 
-def _cmd_materialize(args: argparse.Namespace) -> None:
-    """Primera etapa del consolidate: proyecta aportes -> persons/acopio_centers.
+def _scrub_supabase_url(text: str) -> str:
+    """Redacta SUPABASE_URL de un mensaje de error.
 
-    Corre antes de la generacion de aristas (es independiente de ella, solo
-    comparte la cadencia del cron). Sin SUPABASE_* entra en dry-run silencioso
-    (no-op), asi que en CI no toca la red.
+    El log del cron de materialize sube como artifact de un repo PUBLICO y
+    GitHub solo enmascara las credenciales del repo, no las vars.*: una excepcion de transporte
+    (httpx incluye la URL completa del request) publicaria el endpoint
+    interno de Supabase (ADR 0002: no facilitar mass-scrapers).
+    """
+    url = os.getenv("SUPABASE_URL")
+    return text.replace(url, "<SUPABASE_URL>") if url else text
+
+
+def _fail_materialize(detail: str, note: str) -> None:
+    """Aviso FAILED de fin de corrida del materialize + exit 1."""
+    _emit_run_notice(
+        [("Materializer", "FAILED", detail)],
+        Counter({note: 1}),
+        hard_failed=True,
+        command="materialize",
+        title="Materialize summary",
+    )
+
+
+def _cmd_materialize(args: argparse.Namespace) -> None:
+    """Materializer standalone: proyecta aportes -> persons/acopio_centers (#336, ADR 0011).
+
+    Antes era la etapa 1 del consolidate; ahora tiene su propio comando y su
+    propio cron (materialize.yml) porque no actua sobre los datos, solo crea
+    las filas proxy tipadas.
+
+    Al final emite UN aviso de fin de corrida (Materialize summary) y corta
+    con exit 1 si hubo errores, para que el cron nunca quede verde con fallos
+    invisibles (mismo patron que #333 para consolidate). Por lo mismo, sin
+    --dry-run las credenciales SUPABASE_* son OBLIGATORIAS: si faltan (borradas
+    o rotadas mal en el repo), el materializer entraria en no-op y el cron quedaria
+    verde para siempre sin materializar nada; eso es FAILED, no OK. El unico
+    modo sin credenciales es --dry-run explicito (no-op garantizado, cero red).
     """
     from scrapers.exporters.staging_exporter import StagingConfig
     from scrapers.jobs.materializer import SilverMaterializer
+
+    dry_run: bool = getattr(args, "dry_run", False)
 
     try:
         # El materializer solo necesita project.event_id (una constante del YAML),
@@ -129,12 +163,39 @@ def _cmd_materialize(args: argparse.Namespace) -> None:
         payload = validate_sources_config(Path(args.config))
         project = payload.get("project", {})
         event_id = validate_uuid_str(str(project.get("event_id")))
-    except (ValueError, FileNotFoundError, KeyError) as exc:
-        print(f"WARN: no se pudo leer project.event_id de {args.config}: {exc}", file=sys.stderr)
+    except Exception as exc:  # noqa: BLE001 - cualquier config ilegible (YAML roto
+        # incluido: yaml.YAMLError NO es ValueError) sale por el aviso FAILED,
+        # no por un traceback. Cuando esto era una etapa del consolidate, un
+        # config ilegible era WARN+verde (las demas etapas seguian); standalone,
+        # sin event_id no se puede hacer NADA (#333: nada de fallos invisibles).
+        detail = f"no se pudo leer project.event_id de {args.config}"
+        print(f"ERROR materialize: {detail}: {exc}", file=sys.stderr)
+        _fail_materialize(detail, f"{detail}: {exc}")
         return
 
-    with SilverMaterializer(StagingConfig.from_env()) as materializer:
-        result = materializer.materialize(event_id=event_id)
+    if dry_run:
+        # Config None => SilverMaterializer deshabilitado: no crea cliente, no
+        # toca la red, no escribe, AUNQUE haya SUPABASE_* en el entorno. Valida
+        # config/event_id y el wiring del subcomando (step de verificacion del cron).
+        config = None
+    else:
+        config = StagingConfig.from_env()
+        if config is None:
+            # from_env ya logueo que falta (todas ausentes o config parcial).
+            detail = "sin credenciales Supabase (config ausente o parcial)"
+            print(f"ERROR materialize: {detail}", file=sys.stderr)
+            _fail_materialize(detail, detail)
+            return
+
+    try:
+        with SilverMaterializer(config) as materializer:
+            result = materializer.materialize(event_id=event_id)
+    except Exception as exc:  # noqa: BLE001 - FAILED visible en el cron, no traceback verde
+        message = _scrub_supabase_url(str(exc))
+        detail = next(iter(message.splitlines()), "") or type(exc).__name__
+        print(f"Materialize: FAILED {message}", file=sys.stderr)
+        _fail_materialize(detail, detail)
+        return
     print(
         "Materializer: "
         f"{result.persons_projected} persons, "
@@ -156,50 +217,81 @@ def _cmd_materialize(args: argparse.Namespace) -> None:
             "SUPABASE_INGEST_JWT => scraper_ingest)",
             file=sys.stderr,
         )
+    # Los errores van SOLO a las notas deduplicadas del aviso final (sin linea
+    # cruda por error): un 403-storm de miles de errores identicos no debe
+    # inundar el log del cron (#333: un aviso accionable, no un flood).
+    error_notes: "Counter[str]" = Counter()
     for err in result.errors:
-        print(f"WARN materializer: {err}", file=sys.stderr)
+        first_line = next(iter(str(err).splitlines()), str(err))
+        error_notes[first_line] += 1
+
+    detail = (
+        f"{result.persons_projected} persons, {result.acopio_projected} acopio, "
+        f"{result.events_seeded} eventos"
+    )
+    if dry_run:
+        detail = f"{detail}, dry-run (sin escrituras)"
+    if result.errors:
+        status = "FAILED"
+        detail = f"{detail}, {len(result.errors)} error(es)"
+    else:
+        status = "OK"
+    _emit_run_notice(
+        [("Materializer", status, detail)],
+        error_notes,
+        hard_failed=status == "FAILED",
+        command="materialize",
+        title="Materialize summary",
+    )
 
 
-def _emit_consolidation_notice(
+def _emit_run_notice(
     stages: list[tuple[str, str, str]],
     error_notes: "Counter[str]",
     *,
     hard_failed: bool,
+    command: str = "consolidate",
+    title: str = "Consolidation summary",
 ) -> None:
     """Imprime UN aviso de fin de corrida (no un log por intento) y corta en rojo si algo fallo en duro.
 
     El incidente que motivo esto fue invisible: el cron quedaba verde mientras
     cada escritura de acopio 400eaba. Aca se emite una sola linea-resumen por
-    stage (Event/AcopioCenter/Person) con OK/FAILED/DEGRADED, seguida de las
-    notas de error DEDUPLICADAS (cada mensaje unico una vez, con su conteo, tope
-    de 5) para que sea un aviso accionable y no un flood. `hard_failed` (un
-    FAILED de Event/AcopioCenter) corta con exit 1; un Person DEGRADED (errores
-    parciales / timeout del indice pendiente) se queda en verde a proposito.
+    stage con OK/FAILED/DEGRADED, seguida de las notas de error DEDUPLICADAS
+    (cada mensaje unico una vez, con su conteo, tope de 5) para que sea un
+    aviso accionable y no un flood. `hard_failed` corta con exit 1; un stage
+    DEGRADED (errores parciales) se queda en verde a proposito.
+
+    Para consolidate los stages son Event/AcopioCenter/Person; para
+    materialize hay un unico stage Materializer (#336). `command`/`title`
+    ajustan los prefijos de las lineas para cada comando.
     """
     line = " | ".join(f"{name}={status}({detail})" for name, status, detail in stages)
     any_not_ok = any(status != "OK" for _, status, _ in stages)
-    print(f"Consolidation summary: {line}", file=sys.stderr if any_not_ok else sys.stdout)
+    print(f"{title}: {line}", file=sys.stderr if any_not_ok else sys.stdout)
 
     top = error_notes.most_common(5)
     for note, count in top:
         suffix = f" (x{count})" if count > 1 else ""
-        print(f"WARN consolidate: {note}{suffix}", file=sys.stderr)
+        print(f"WARN {command}: {note}{suffix}", file=sys.stderr)
     extra = len(error_notes) - len(top)
     if extra > 0:
-        print(f"WARN consolidate: (+{extra} mensajes de error distintos mas)", file=sys.stderr)
+        print(f"WARN {command}: (+{extra} mensajes de error distintos mas)", file=sys.stderr)
 
     if hard_failed:
         raise SystemExit(1)
 
 
 def _cmd_consolidate(args: argparse.Namespace) -> None:
-    """Consolidacion completa: materializer + auto-merge Event/Acopio + candidatos Person.
+    """Consolidacion: auto-merge Event/Acopio + candidatos Person.
 
-    Etapa 1: materializer (aportes -> persons/acopio_centers silver).
-    Etapa 2: auto-merge exacto de Event/AcopioCenter por `dedup_hash` via
+    El materializer ya NO corre aca (#336, ADR 0011): es el comando
+    `materialize`, con su propio cron (materialize.yml).
+
+    Etapa 1: auto-merge exacto de Event/AcopioCenter por `dedup_hash` via
     `consolidation_job.consolidate_entity_type` (#91). En --dry-run solo
     loguea el plan, no upserta ni marca.
-    Etapa 3: candidatos de dedup para Person hacia `dedup_candidates` via
+    Etapa 2: candidatos de dedup para Person hacia `dedup_candidates` via
     `consolidation_job.run_person_consolidation` (#92). Person nunca
     auto-funde: solo emite candidatos `pending` para revision humana.
     `run_person_consolidation` no tiene modo dry-run propio (escribiria
@@ -217,22 +309,18 @@ def _cmd_consolidate(args: argparse.Namespace) -> None:
     dry_run: bool = getattr(args, "dry_run", False)
     batch_size: int = getattr(args, "batch_size", 500)
 
-    # Etapa 1: materializer (aportes -> silver tipado). Independiente de la
-    # generacion de aristas; solo comparte la cadencia del cron.
-    _cmd_materialize(args)
-
     # Resumen de fin de corrida: un stage por (Event/AcopioCenter/Person) con su
     # estado, mas notas de error deduplicadas. Se emite UNA vez al final (ver
-    # _emit_consolidation_notice) para que un fallo parcial deje de ser invisible.
+    # _emit_run_notice) para que un fallo parcial deje de ser invisible.
     stages: list[tuple[str, str, str]] = []
     error_notes: "Counter[str]" = Counter()
     hard_failed = False
 
-    # Etapa 2: auto-merge exacto Event/AcopioCenter por dedup_hash. Cada
+    # Etapa 1: auto-merge exacto Event/AcopioCenter por dedup_hash. Cada
     # entity_type se aisla en su propio try/except: un fetch que revienta
     # (error transitorio de red/Supabase, sin try/except propio dentro de
     # consolidate_entity_type) no debe abortar el comando entero antes de
-    # llegar a la Etapa 3 (Person no depende de que Event/AcopioCenter salgan
+    # llegar a la Etapa 2 (Person no depende de que Event/AcopioCenter salgan
     # bien).
     port = build_port()
     try:
@@ -265,18 +353,18 @@ def _cmd_consolidate(args: argparse.Namespace) -> None:
     finally:
         port.close()
 
-    # Etapa 3: candidatos Person -> dedup_candidates (nunca auto-funde).
+    # Etapa 2: candidatos Person -> dedup_candidates (nunca auto-funde).
     if dry_run:
         print("Consolidation[Person]: omitido en --dry-run (run_person_consolidation no soporta dry-run)")
         stages.append(("Person", "OK", "omitido (dry-run)"))
-        _emit_consolidation_notice(stages, error_notes, hard_failed=hard_failed)
+        _emit_run_notice(stages, error_notes, hard_failed=hard_failed)
         return
 
     person_config = PersonConsolidationConfig.from_env(batch_size=batch_size)
     if person_config is None:
         print("Consolidation[Person]: sin credenciales Supabase, omitido")
         stages.append(("Person", "OK", "omitido (sin credenciales)"))
-        _emit_consolidation_notice(stages, error_notes, hard_failed=hard_failed)
+        _emit_run_notice(stages, error_notes, hard_failed=hard_failed)
         return
 
     result = run_person_consolidation(person_config)
@@ -288,7 +376,7 @@ def _cmd_consolidate(args: argparse.Namespace) -> None:
     if result.errors:
         # DEGRADED (no hard-fail): p.ej. el 500/timeout del fetch de companeros de
         # bloque es no-fatal (bloqueo solo-pagina). Se surfacean los mensajes reales,
-        # no solo el conteo, deduplicados por _emit_consolidation_notice.
+        # no solo el conteo, deduplicados por _emit_run_notice.
         stages.append(("Person", "DEGRADED", f"{len(result.errors)} error(es)"))
         for msg in result.errors:
             first_line = next(iter(str(msg).splitlines()), str(msg))
@@ -302,7 +390,7 @@ def _cmd_consolidate(args: argparse.Namespace) -> None:
             )
         )
 
-    _emit_consolidation_notice(stages, error_notes, hard_failed=hard_failed)
+    _emit_run_notice(stages, error_notes, hard_failed=hard_failed)
 
 
 def main() -> None:
@@ -347,21 +435,37 @@ def main() -> None:
     )
     ingest_cmd.add_argument("--limit", type=int, default=None, help="Max documents")
 
-    # --- consolidate ---
-    consolidate_cmd = sub.add_parser("consolidate", help="Cross-source deduplication")
-    consolidate_cmd.add_argument(
+    # --- materialize ---
+    materialize_cmd = sub.add_parser(
+        "materialize",
+        help="Proyecta aportes -> filas tipadas (persons/acopio_centers/events)",
+    )
+    materialize_cmd.add_argument(
         "--config",
         default="scrapers/config/sources.demo.yaml",
         help="YAML config path (para project.event_id del seed del catalogo)",
     )
+    materialize_cmd.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "No-op garantizado: valida config y project.event_id pero no crea "
+            "cliente ni escribe nada, AUNQUE haya SUPABASE_* en el entorno. "
+            "Sin este flag, las credenciales SUPABASE_* son obligatorias "
+            "(faltantes => FAILED + exit 1, nunca un no-op verde)."
+        ),
+    )
+
+    # --- consolidate ---
+    consolidate_cmd = sub.add_parser("consolidate", help="Cross-source deduplication")
+    # Sin --config: el materializer (ahora el comando `materialize`, #336) era
+    # su unico consumidor; consolidate no lee ningun YAML.
     consolidate_cmd.add_argument(
         "--dry-run",
         action="store_true",
         help=(
-            "Aplica solo a las etapas 2-3 (auto-merge Event/AcopioCenter, "
-            "candidatos Person): no upserta ni marca nada ahi, y omite la "
-            "etapa de Person por completo. La etapa 1 (materializer) SIEMPRE "
-            "corre y escribe si hay credenciales Supabase, sin mirar este flag."
+            "No upserta ni marca nada en el auto-merge Event/AcopioCenter, "
+            "y omite la etapa de candidatos Person por completo."
         ),
     )
     consolidate_cmd.add_argument(
@@ -385,6 +489,7 @@ def main() -> None:
         "run": _cmd_run,
         "list-enabled": _cmd_list_enabled,
         "ingest": _cmd_ingest,
+        "materialize": _cmd_materialize,
         "consolidate": _cmd_consolidate,
     }
     commands[args.command](args)
