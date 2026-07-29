@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<pfif:pfif xmlns:pfif="http://zesty.ca/pfif/1.5">
+  <pfif:person>
+    <pfif:entry_date>2026-06-24T12:00:00Z</pfif:entry_date>
+    <pfif:full_name>JOSE LUIS PEREZ DEMO</pfif:full_name>
+    <pfif:home_city>Maracaibo</pfif:home_city>
+    <pfif:home_state>Zulia</pfif:home_state>
+    <pfif:source_name>Fuente PFIF Demo</pfif:source_name>
+    <pfif:source_url>https://example.org/pfif/demo-001</pfif:source_url>
+    <pfif:profile_url>https://example.org/pfif/profile/demo-001</pfif:profile_url>
+    <pfif:photo_url>https://example.org/pfif/photo/demo-001.jpg</pfif:photo_url>
+    <pfif:notes>Contacto demo demo@example.org o +58 000 000 0000. Documento V-00000000.</pfif:notes>
+    <pfif:person_record>
+      <pfif:person_id>pfif-demo-001</pfif:person_id>
+      <pfif:status>missing</pfif:status>
+      <pfif:date_of_birth>1990-05-15</pfif:date_of_birth>
+      <pfif:description>Visto por ultima vez cerca del mercado demo.</pfif:description>
+    </pfif:person_record>
+  </pfif:person>
+  <pfif:person>
+    <pfif:full_name>MARIA DEMO</pfif:full_name>
+    <pfif:home_state>Lara</pfif:home_state>
+    <pfif:profile_url>https://example.org/pfif/profile/demo-002</pfif:profile_url>
+    <pfif:person_record>
+      <pfif:status>alive</pfif:status>
+      <pfif:date_of_birth>2010-07-02</pfif:date_of_birth>
+    </pfif:person_record>
+  </pfif:person>
+  <pfif:person>
+    <pfif:home_state>Carabobo</pfif:home_state>
+    <pfif:person_record>
+      <pfif:status>injured</pfif:status>
+    </pfif:person_record>
+  </pfif:person>
+</pfif:pfif>
