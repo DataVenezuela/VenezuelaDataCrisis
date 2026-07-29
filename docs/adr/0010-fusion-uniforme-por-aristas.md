@@ -2,10 +2,11 @@
 
 | Campo | Valor |
 |---|---|
-| Estado | Aceptada |
+| Estado | Aceptada (§2 punto 1, `events` 1:1 por aporte, reemplazado por ADR 0011; la compuerta uniforme de §3 y el retiro del auto-merge siguen vigentes) |
 | Fecha | 2026-07-27 |
 | Decisores | DB/API, Scrapers/Cleaners, Verification |
 | Reemplaza a | [ADR 0007](./0007-modelo-consolidacion-gold.md) §2.1 (`events` como catálogo compartido) y §3 (compuerta de publicación, ahora uniforme para los tres tipos) |
+| Reemplazada por | [ADR 0011](./0011-materializer-separado-y-consolidador-sobre-proxies.md) (parcial: §2 punto 1 — `events` vuelve a ser catálogo compartido, restaurando 0007 §2.1) |
 | Complementa | [ADR 0007](./0007-modelo-consolidacion-gold.md) (mantiene el resto del modelo medallón y la regla de oro §8) |
 | Relacionado con | `docs/pipeline.md`, `docs/schema.md`, `docs/specs/person-dedup.md`, [ADR 0009](./0009-fuentes-en-db-clave-source-id.md), #315, #316, #319 |
 
@@ -42,7 +43,10 @@ AcopioCenter). Silver queda 1:1 sin excepción y la fusión vive solo en gold.
    aporte a su tabla tipada 1:1. `events` deja de ser catálogo compartido: recibe
    una fila por aporte con PK compartida y FK a `aportes.id`, igual que
    `persons`/`acopio_centers`. Esto **reemplaza** el modelo de catálogo de 0007
-   §2.1.
+   §2.1. *(Reemplazado por
+   [ADR 0011](./0011-materializer-separado-y-consolidador-sobre-proxies.md):
+   `events` sigue siendo catálogo compartido; las estrategias por `dedup_hash`
+   no necesitan fila tipada 1:1.)*
 2. **La fusión de Event/Acopio se emite como aristas**, no como merge en el sitio.
    La coincidencia que hoy colapsa silver (`dedup_hash` exacto) se convierte en una
    **arista fuerte** en `dedup_candidates`, exactamente como `person` ya hace con
@@ -132,7 +136,10 @@ forma **uniforme** a los tres tipos:
 - **#318:** production `GoldDataPort` adapter (Supabase PostgREST).
 - **#319:** Event/Acopio emiten aristas fuertes (`dedup_hash` exacto) y se retira el
   auto-merge en silver (`on_conflict=dedup_hash` con merge-duplicates en
-  `upsert_canonical`); ajustar los índices que 0009 exige para ese `on_conflict`.
+  `upsert_canonical`); revisar los índices únicos de `dedup_hash` que ese
+  `on_conflict` exigía (ver `docs/schema.md`; la referencia original de esta
+  línea a "los índices que 0009 exige" era errónea — ADR 0009 no define
+  índices). *(#319 queda absorbido por #338, per ADR 0011.)*
 - **#320:** clustering orchestrator (componentes conexos hacia `GoldWriter`) para
   los tres tipos.
 - **#321:** cablear el clustering al `consolidate` CLI/cron.

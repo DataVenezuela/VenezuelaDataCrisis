@@ -25,6 +25,15 @@
 > un duplicado recién llegado sigue bloqueando contra registros ya procesados. La
 > idempotencia de escritura la da `find_existing_candidates`. Si `consolidation_state`
 > falta o rechaza el acceso, el cursor degrada a scan completo (no repite el 400).
+>
+> **Enmendado (2026-07-29, ADR 0011 / #337):** la lectura de dominio deja de
+> parsear `raw_json`: el job conduce `aportes` seleccionando solo columnas del
+> sobre (`id`, `created_at`, `block_keys`) y trae el dominio únicamente vía
+> embed del proxy tipado (`persons!inner(...)`). Además, la frontera de §2 se
+> acota al watermark del materializer (`silver_materialize_state`): nunca se
+> avanza más allá de lo ya proyectado (el atraso del materializer es latencia,
+> no filas saltadas). El SQL de §2 refleja la forma objetivo; el código vigente
+> hasta #337 hace `SELECT *` sobre `aportes` y parsea `raw_json`.
 
 ---
 
@@ -44,10 +53,15 @@ El consolidation job para Person lee de `aportes` en Supabase, agrupa registros 
 Lectura por páginas con cursor keyset desde `aportes`, arrancando desde la frontera durable:
 
 ```sql
-SELECT * FROM aportes
-WHERE entity_type = 'person'
-  AND (created_at, id) > (:cursor_created_at, :cursor_id)  -- frontera de consolidation_state
-ORDER BY created_at ASC, id ASC
+-- Forma objetivo (ADR 0011 / #337). PostgREST:
+--   /rest/v1/aportes?select=id,created_at,block_keys,persons!inner(...)
+SELECT a.id, a.created_at, a.block_keys, p.*     -- p.* = proxy tipado; raw_json no se lee
+FROM aportes a
+JOIN persons p ON p.person_record_id = a.id
+WHERE a.entity_type = 'person'
+  AND (a.created_at, a.id) > (:cursor_created_at, :cursor_id)   -- frontera de consolidation_state
+  AND (a.created_at, a.id) <= (:wm_created_at, :wm_id)          -- tope: watermark de silver_materialize_state
+ORDER BY a.created_at ASC, a.id ASC
 LIMIT :batch_size;
 ```
 
@@ -60,6 +74,13 @@ LIMIT :batch_size;
 - **Batch size default:** 500, configurable
 - **Avance del cursor:** después de cada página, la frontera avanza al último
   `(created_at, id)` leído y se persiste (`write_cursor`, best-effort).
+- **Tope de watermark (ADR 0011 / #337):** la frontera nunca avanza más allá del
+  watermark del materializer (`silver_materialize_state`). Sin ese tope, una
+  fila proyectada tarde (aporte viejo, proyección posterior al paso del cursor)
+  quedaría detrás de la frontera y se saltaría para siempre — `persons` no
+  tiene columna de timestamp por la que detectar el atraso. Con el tope, el
+  atraso del materializer es pura latencia. Si el materializer se atasca, el
+  consolidador se detiene (correctamente) en el watermark.
 - **Compañeros históricos (completitud nuevo-vs-viejo):** la frontera sola solo
   compararía un aporte nuevo contra otros nuevos de su propia página. Para las
   aristas nuevo-vs-viejo, cada página trae además los compañeros de bloque
