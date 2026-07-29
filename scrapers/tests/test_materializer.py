@@ -81,7 +81,7 @@ def _acopio_aporte(
         "fuente": "demo",
     }
     raw.update(overrides)
-    return {"id": aporte_id, "entity_type": "acopio", "raw_json": raw}
+    return {"id": aporte_id, "entity_type": "acopio_center", "raw_json": raw}
 
 
 def _event_aporte(aporte_id: str) -> dict[str, Any]:
@@ -244,7 +244,7 @@ class TestProjectAcopio:
         assert list(t.acopios.keys()) == ["ap-9"]
         row = t.acopios["ap-9"]
         assert row["acopio_id"] == "ap-9"
-        assert row["entity_type"] == "acopio"
+        assert row["entity_type"] == "acopio_center"
         assert row["name"] == "Refugio Ficticio"
         assert row["location_text"] == "Plaza Ficticia, Chacao"
         assert row["coordinates"] == {"lat": 10.5, "lon": -66.9}

@@ -67,14 +67,22 @@ _PERSON_DEFAULT_BATCH_SIZE = 500
 _PERSON_DEFAULT_THRESHOLD = 0.85
 _INITIAL_CURSOR = ("1970-01-01T00:00:00Z", "00000000-0000-0000-0000-000000000000")
 
-# Maximo de block_keys por request al traer companeros historicos. Una pagina de
-# 500 aportes puede producir ~1000 block keys; plegarlas todas en un solo
-# ``or=(block_keys.cs.["k1"],...,block_keys.cs.["kN"])`` desborda el limite de URL
-# del proxy frente a PostgREST (~8KB) => 414/431. Como el fetch de companeros es
-# NO fatal, ese fallo degradaria en silencio a bloqueo solo-pagina (justo el caso
-# "peor que el rescan completo"). Se trocea en grupos acotados y se une por id.
-# 40 claves ~100 chars c/u encodeadas quedan holgadas bajo el limite.
-_PARTNER_BLOCK_KEY_CHUNK = 40
+# Maximo de block_keys por request al traer companeros historicos. Dos limites lo
+# acotan, por eso es chico:
+#  1) URL: una pagina de 500 aportes produce ~1000 block keys; plegarlas todas en
+#     un solo ``or=(block_keys.cs.["k1"],...)`` desborda el limite de URL del proxy
+#     frente a PostgREST (~8KB) => 414/431.
+#  2) Costo por statement: cada rama del OR es un @> sobre aportes (jsonb, indice
+#     GIN aportes_block_keys_gin). Aun con el indice, un chunk grande cuyas claves
+#     matcheen muchas filas (p.ej. claves foneticas cortas y comunes) une+serializa
+#     via json_agg un resultado enorme con ``select=*`` (incluye raw_json) y excede
+#     el statement_timeout del rol consolidation_job => 500 (SQLSTATE 57014). Ver
+#     docs/schema.md.
+# Como el fetch de companeros es NO fatal, ese fallo degradaria en silencio a
+# bloqueo solo-pagina (justo el caso "peor que el rescan completo"). Se trocea en
+# grupos chicos (menos ramas y menos filas por statement) y se une por id. 10
+# claves quedan holgadas bajo ambos limites.
+_PARTNER_BLOCK_KEY_CHUNK = 10
 
 
 def _chunked(items: list[str], size: int) -> list[list[str]]:
@@ -537,7 +545,11 @@ class SupabasePersonDedupAdapter:
                 "Authorization": f"Bearer {config.consolidation_jwt}",
                 "Content-Type": "application/json",
             },
-            timeout=httpx.Timeout(60.0),
+            # >= statement_timeout del rol consolidation_job (120s, ver
+            # docs/schema.md) mas margen de red: si el cliente abortara antes que
+            # la DB, cambiariamos el 57014 (statement timeout, manejable) por un
+            # ReadTimeout del cliente a mitad del fetch de companeros.
+            timeout=httpx.Timeout(150.0),
         )
         return cls(client)
 

@@ -86,13 +86,13 @@ _ROLE_HINT = "revisar grants de consolidation_job"
 
 # Nombre interno del tipo (Event/AcopioCenter) -> (slug de aportes.entity_type,
 # path PostgREST de la tabla canonica). Los slugs replican _ENTITY_TYPE_SLUGS del
-# staging_exporter y el enum del backend (0008): "event" | "acopio" | "person".
+# staging_exporter y el enum del backend (0008): "event" | "acopio_center" | "person".
 _ENTITY_TABLES: dict[str, tuple[str, str]] = {
     "Event": ("event", "/rest/v1/events"),
-    "AcopioCenter": ("acopio", "/rest/v1/acopio_centers"),
+    "AcopioCenter": ("acopio_center", "/rest/v1/acopio_centers"),
 }
 
-# Inverso de _ENTITY_TABLES: slug de DB ("event", "acopio", "person") ->
+# Inverso de _ENTITY_TABLES: slug de DB ("event", "acopio_center", "person") ->
 # nombre interno del tipo ("Event", "AcopioCenter", "Person"). Person no entra
 # al auto-merge de #91 pero si al fetch de candidatos de #92, por eso se
 # agrega manualmente.

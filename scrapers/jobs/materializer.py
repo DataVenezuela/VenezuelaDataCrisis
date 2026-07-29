@@ -4,7 +4,7 @@ Issue #257. Primera etapa del cron de consolidacion (``consolidate.yml``), antes
 de la generacion de aristas. Proyeccion casi-pura, SIN decisiones de dedup:
 
   - ``aportes`` de tipo ``person``  -> una fila ``persons``        (PK = aportes.id).
-  - ``aportes`` de tipo ``acopio``  -> una fila ``acopio_centers`` (PK = aportes.id).
+  - ``aportes`` de tipo ``acopio_center``  -> una fila ``acopio_centers`` (PK = aportes.id).
   - ``events`` es un catalogo COMPARTIDO, no una proyeccion por-aporte: se siembra
     una fila desde el ``event_id`` de config (``project.event_id``) y esa fila debe
     existir antes de proyectar persons/acopio (FK ``*.event_id`` -> ``events``).
@@ -518,7 +518,7 @@ class SilverMaterializer:
                     continue
             if entity_type == "person":
                 persons.append(self._person_row(str(aporte_id), raw, default_event_id))
-            elif entity_type == "acopio":
+            elif entity_type == "acopio_center":
                 acopios.append(self._acopio_row(str(aporte_id), raw, default_event_id))
             else:
                 # Tipo desconocido: poison permanente, no bloquea el avance.
@@ -527,7 +527,7 @@ class SilverMaterializer:
         if persons:
             ok = self._upsert_rows(_PERSONS_UPSERT_PATH, persons, "persons", result) and ok
         if acopios:
-            ok = self._upsert_rows(_ACOPIO_UPSERT_PATH, acopios, "acopio", result) and ok
+            ok = self._upsert_rows(_ACOPIO_UPSERT_PATH, acopios, "acopio_center", result) and ok
         return ok
 
     def _upsert_rows(
@@ -667,7 +667,7 @@ class SilverMaterializer:
     ) -> dict[str, object]:
         row: dict[str, object] = {
             "acopio_id": aporte_id,
-            "entity_type": "acopio",
+            "entity_type": "acopio_center",
             "event_id": _row_event_id(raw, default_event_id),
         }
         row.update(_typed_payload(raw, _ACOPIO_FIELDS))

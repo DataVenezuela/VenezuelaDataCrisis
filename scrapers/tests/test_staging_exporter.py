@@ -208,9 +208,9 @@ class TestPayload:
         body = t.batch_posts[0][0]
         assert "dedup_hash" not in body
 
-    def test_entity_type_acopio_uses_acopio_slug(self) -> None:
+    def test_entity_type_acopio_uses_acopio_center_slug(self) -> None:
         body = self._export_one(_acopio())
-        assert body["entity_type"] == "acopio"
+        assert body["entity_type"] == "acopio_center"
 
 
 class TestSharedFingerprint:

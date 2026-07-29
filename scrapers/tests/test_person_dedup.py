@@ -39,6 +39,9 @@ def _person(
     event_id: str = _EVENT_ID,
     phonetic_hash: str = _PH_HASH,
     block_keys: list[str] | None = None,
+    identity_kind: str | None = None,
+    cedula_partial: str | None = None,
+    cedula_partial_pattern: str | None = None,
 ) -> dict:
     rec = {
         "id": id_,
@@ -50,6 +53,9 @@ def _person(
         "age_range": age_range,
         "event_id": event_id,
         "phonetic_hash": phonetic_hash,
+        "identity_kind": identity_kind,
+        "cedula_partial": cedula_partial,
+        "cedula_partial_pattern": cedula_partial_pattern,
     }
     if block_keys is not None:
         rec["block_keys"] = block_keys
@@ -110,6 +116,45 @@ class TestSimilarity:
         score, reasons = similarity_score(a, b)
         assert score == 0.0
         assert all(value == 0.0 for value in reasons.values())
+
+    def test_cedula_partial_match_contributes(self) -> None:
+        """cedula_partial + pattern coincidentes → aporta, no queda ciego."""
+        a = _person("1", name="Juan Perez", identity_kind="partial",
+                     cedula_partial="1234", cedula_partial_pattern="suffix_4")
+        b = _person("2", name="Juan Perez", identity_kind="partial",
+                     cedula_partial="1234", cedula_partial_pattern="suffix_4")
+        score, reasons = similarity_score(a, b)
+        assert reasons["cedula"] == pytest.approx(0.15)
+        assert score > 0.0
+
+    def test_cedula_partial_mismatch_no_veto(self) -> None:
+        """Regla asimetrica: digitos distintos aporta 0 pero NO veta el total."""
+        a = _person("1", name="Juan Perez", identity_kind="partial",
+                     cedula_partial="1234", cedula_partial_pattern="suffix_4")
+        b = _person("2", name="Juan Perez", identity_kind="partial",
+                     cedula_partial="5678", cedula_partial_pattern="suffix_4")
+        score, reasons = similarity_score(a, b)
+        assert reasons["cedula"] == 0.0
+        assert score > 0.0  # no veto, a diferencia de cedula_hmac completo
+
+    def test_cedula_partial_different_pattern_no_match(self) -> None:
+        """Mismos digitos pero distinto patron → no comparable, aporta 0."""
+        a = _person("1", name="Juan Perez", identity_kind="partial",
+                     cedula_partial="12", cedula_partial_pattern="suffix_2")
+        b = _person("2", name="Juan Perez", identity_kind="partial",
+                     cedula_partial="12", cedula_partial_pattern="edges_2_2")
+        _, reasons = similarity_score(a, b)
+        assert reasons["cedula"] == 0.0
+
+    def test_cedula_full_hmac_vs_partial_not_comparable(self) -> None:
+        """Un cedula_hmac completo frente a un cedula_partial no se puede
+        comparar (hash opaco vs digitos en claro): aporta 0, sin veto."""
+        a = _person("1", name="Juan Perez", cedula_hmac="aaa")
+        b = _person("2", name="Juan Perez", identity_kind="partial",
+                     cedula_partial="1234", cedula_partial_pattern="suffix_4")
+        score, reasons = similarity_score(a, b)
+        assert reasons["cedula"] == 0.0
+        assert score > 0.0
 
     def test_location_same_city_state_scores_1(self) -> None:
         """Same city and state → location component = 1.0 * 0.15 = 0.15."""
@@ -308,7 +353,7 @@ class TestClustering:
         assert len(candidates) == 0
 
     def test_priority_high_when_score_above_95(self) -> None:
-        """score >= 0.95 → priority=1 (high)."""
+        """score >= 0.95 → priority=2 (mayor = mas urgente, spec person-dedup.md §5)."""
         # Use identical persons for high score
         a = _person("a", name="Juan Perez", cedula_hmac="same",
                      location="Caracas, Miranda", status="missing",
@@ -321,6 +366,16 @@ class TestClustering:
         assert len(candidates) >= 1
         # With identical everything, score should be very high
         assert candidates[0]["score"] >= 0.95
+        assert candidates[0]["priority"] == 2
+
+    def test_priority_medium_when_score_below_95(self) -> None:
+        """0.85 <= score < 0.95 → priority=1 (media)."""
+        a = _person("a", name="Juan Perez Gonzalez", cedula_hmac="same")
+        b = _person("b", name="Juan Perez Gonzales", cedula_hmac="same")
+        blocks = build_blocks([a, b])
+        candidates = find_candidates(blocks, threshold=0.80)
+        assert len(candidates) >= 1
+        assert 0.80 <= candidates[0]["score"] < 0.95
         assert candidates[0]["priority"] == 1
 
     def test_candidate_has_expected_keys(self) -> None:

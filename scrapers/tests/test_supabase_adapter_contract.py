@@ -16,6 +16,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from scrapers.exporters.staging_exporter import _ENTITY_TYPE_SLUGS
+from scrapers.jobs.gold_writer import _ENTITY_TYPE_SLUG
 from scrapers.jobs.supabase_adapter import (
     _APORTE_FIELD_MAP,
     _CANONICAL_COLUMNS,
@@ -153,13 +155,35 @@ def test_indices_unique_dedup_hash_existen() -> None:
 
 
 def test_slugs_entity_type_coinciden_con_enum_del_backend() -> None:
-    # El comentario del schema real declara el enum: event | acopio | person.
+    # El comentario del schema real declara el enum: event | acopio_center | person.
     slugs = {slug for slug, _ in _ENTITY_TABLES.values()}
-    assert slugs == {"event", "acopio"}  # #91 solo auto-merge de Event/Acopio
+    assert slugs == {"event", "acopio_center"}  # #91 solo auto-merge de Event/Acopio
     schema = _read_schema().lower()
-    assert "event | acopio | person" in schema
+    assert "event | acopio_center | person" in schema
     for slug in slugs:
         assert slug in schema
+
+
+def test_slug_maps_no_divergen_entre_si() -> None:
+    """Las TRES fuentes del slug de entity_type deben coincidir.
+
+    El slug ("event"/"acopio_center"/"person") vive duplicado en tres mapas
+    hardcodeados independientes: ``staging_exporter._ENTITY_TYPE_SLUGS`` (escribe
+    ``aportes.entity_type``), ``supabase_adapter._ENTITY_TABLES`` (lee/filtra +
+    PK del cursor ``consolidation_state``) y ``gold_writer._ENTITY_TYPE_SLUG``
+    (escribe ``gold_entities.entity_type``). Si divergen, un entity_type se
+    escribe/lee con un valor que el enum del backend rechaza (400 22P02) —
+    exactamente el bug de ``AcopioCenter="acopio"`` contra el enum
+    ``acopio_center``. Este guard rompe si cualquiera vuelve a desincronizarse.
+    """
+    adapter_slugs = {name: slug for name, (slug, _) in _ENTITY_TABLES.items()}
+    for name in ("Event", "AcopioCenter"):
+        assert (
+            _ENTITY_TYPE_SLUGS[name] == adapter_slugs[name] == _ENTITY_TYPE_SLUG[name]
+        ), f"slug de {name} desincronizado entre los tres mapas de entity_type"
+    assert adapter_slugs["AcopioCenter"] == "acopio_center"
+    # Person no entra a _ENTITY_TABLES (no auto-funde), pero si a los otros dos.
+    assert _ENTITY_TYPE_SLUGS["Person"] == _ENTITY_TYPE_SLUG["Person"] == "person"
 
 
 def test_table_paths_apuntan_a_tablas_reales() -> None:
@@ -235,4 +259,116 @@ def test_candidate_payload_solo_emite_columnas_reales() -> None:
     assert not unknown, (
         f"_candidate_payload() emite claves sin columna real en dedup_candidates: {unknown}. "
         "Actualizar el payload o el fixture si el schema cambió."
+    )
+
+
+# ---------------------------------------------------------------------------
+# gold_entities / gold_members / gold_history — contrato del GoldWriter (#317)
+#
+# #317 despliega la capa gold + grants de consolidation_job (DDL en el cuerpo del
+# PR, aplicada por el mantenedor). Estos tests fijan que las columnas que EMITE
+# `GoldWriter` (lo que el adapter de produccion de #318 tendra que escribir)
+# existan de verdad en el schema gold, usando el mismo patron anti-drift que
+# `test_candidate_payload_solo_emite_columnas_reales`: si el schema gold cambia,
+# rompe aca en vez de dar un 4xx en produccion (ver #90/#104/#187 y el incidente
+# de `aportes.consolidated_at`).
+# ---------------------------------------------------------------------------
+
+
+class _GoldColumnSpy:
+    """Port que registra las columnas exactas que `GoldWriter` emite por tabla.
+
+    No persiste nada: solo acumula los nombres de columna de cada payload para
+    contrastarlos contra el fixture congelado. Implementa `GoldDataPort`.
+    """
+
+    def __init__(self) -> None:
+        self.entity_cols: set[str] = set()
+        self.member_cols: set[str] = set()
+        self.history_cols: set[str] = set()
+
+    def upsert_gold_entity(self, entity: dict) -> str:
+        self.entity_cols |= set(entity)
+        return "00000000-0000-4000-8000-000000000000"
+
+    def upsert_gold_member(
+        self, gold_id: str, aporte_id: str, via_candidate: str | None = None
+    ) -> None:
+        # El writer pasa estos tres campos posicionalmente; el adapter real los
+        # escribe como columnas de gold_members.
+        self.member_cols |= {"gold_id", "aporte_id", "via_candidate"}
+
+    def insert_gold_history(self, event: dict) -> None:
+        self.history_cols |= set(event)
+
+    def close(self) -> None:
+        return None
+
+
+def _emit_gold_columns() -> _GoldColumnSpy:
+    """Corre `GoldWriter.write_cluster` con un cluster de 2 miembros y captura
+    las columnas emitidas hacia cada tabla gold."""
+    from scrapers.jobs.gold_writer import GoldWriter
+
+    spy = _GoldColumnSpy()
+    winner = {
+        "id": "aaaaaaaa-0000-4000-8000-000000000001",
+        "entity_type": "Person",
+        "confidence_score": 0.91,
+        "dedup_hash": "abc123",
+    }
+    other = {
+        "id": "aaaaaaaa-0000-4000-8000-000000000002",
+        "entity_type": "Person",
+        "confidence_score": 0.80,
+    }
+    GoldWriter(spy).write_cluster(
+        [winner, other],
+        winner,
+        via_candidate="cccccccc-0000-4000-8000-000000000009",
+    )
+    return spy
+
+
+def test_tablas_gold_existen_en_fixture() -> None:
+    sql = _read_schema()
+    for table in ("gold_entities", "gold_members", "gold_history"):
+        cols = _columns_of_table(sql, table)
+        assert cols, (
+            f"la tabla public.{table} no esta en el fixture; #317 despliega la "
+            "capa gold y el fixture debe reflejar el schema aplicado (ver docs/schema.md)."
+        )
+
+
+def test_gold_entities_columnas_que_el_writer_emite_existen() -> None:
+    cols = _columns_of_table(_read_schema(), "gold_entities")
+    emitted = _emit_gold_columns().entity_cols
+    unknown = emitted - cols
+    assert not unknown, (
+        f"GoldWriter emite claves sin columna real en gold_entities: {unknown}. "
+        "Actualizar el writer o el fixture si el schema gold cambió."
+    )
+    # canonical_aporte_id es la clave del UPSERT idempotente: debe existir.
+    assert "canonical_aporte_id" in cols
+
+
+def test_gold_members_columnas_que_el_writer_emite_existen() -> None:
+    cols = _columns_of_table(_read_schema(), "gold_members")
+    emitted = _emit_gold_columns().member_cols
+    unknown = emitted - cols
+    assert not unknown, (
+        f"GoldWriter escribe claves sin columna real en gold_members: {unknown}. "
+        "gold_members se upsertea por (gold_id, aporte_id)."
+    )
+    for col in ("gold_id", "aporte_id"):
+        assert col in cols
+
+
+def test_gold_history_columnas_que_el_writer_emite_existen() -> None:
+    cols = _columns_of_table(_read_schema(), "gold_history")
+    emitted = _emit_gold_columns().history_cols
+    unknown = emitted - cols
+    assert not unknown, (
+        f"GoldWriter emite claves sin columna real en gold_history: {unknown}. "
+        "gold_history es append-only (INSERT)."
     )
