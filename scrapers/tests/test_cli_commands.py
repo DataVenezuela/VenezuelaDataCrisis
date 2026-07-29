@@ -1,9 +1,10 @@
-"""Tests para los subcomandos CLI: list-enabled, ingest, consolidate."""
+"""Tests para los subcomandos CLI: list-enabled, ingest, materialize, consolidate."""
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess  # nosec B404
 import sys
 from pathlib import Path
@@ -17,11 +18,20 @@ _SAMPLE_CONFIG = Path("scrapers/tests/fixtures/sources.sample.yaml")
 
 
 def _run_cli(*args: str) -> subprocess.CompletedProcess[str]:
+    # SUPABASE_*/PII_* se quitan del entorno del subproceso: estos tests asumen
+    # el modo sin credenciales (no-op/dry-run implicito) y un dev con SUPABASE_*
+    # exportadas en su shell no debe disparar escrituras REALES desde pytest.
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if not k.startswith(("SUPABASE_", "PII_"))
+    }
     return subprocess.run(  # nosec B603
         [sys.executable, "-m", "scrapers.cli", *args],
         capture_output=True,
         text=True,
         timeout=30,
+        env=env,
     )
 
 
@@ -193,6 +203,228 @@ sources:
         assert "errors" in output
 
 
+# ── materialize ───────────────────────────────────────────────────
+
+
+_FAKE_SUPABASE_ENV = {
+    "SUPABASE_URL": "https://example.supabase.co",
+    "SUPABASE_PUBLISHABLE_KEY": "pk-test",
+    "SUPABASE_CONSOLIDATION_JWT": "jwt-test",
+}
+
+
+def _set_fake_supabase_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for key, value in _FAKE_SUPABASE_ENV.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.delenv("SUPABASE_INGEST_JWT", raising=False)
+
+
+class TestMaterialize:
+    # Los tests por subproceso corren via _run_cli, que quita SUPABASE_* del
+    # entorno: el unico camino verde sin credenciales es --dry-run explicito.
+    # Los tests in-process setean credenciales FALSAS y monkeypatchean
+    # SilverMaterializer, asi que nada toca la red.
+    def test_materialize_dry_run_runs_standalone_without_credentials(self) -> None:
+        result = _run_cli("materialize", "--dry-run", "--config", str(_SAMPLE_CONFIG))
+        assert result.returncode == 0
+        assert "Materializer:" in result.stdout
+        # Aviso de fin de corrida estilo _emit_run_notice (#333):
+        # una linea-resumen con el estado del stage.
+        assert "Materialize summary:" in result.stdout
+        assert "Materializer=OK" in result.stdout
+
+    def test_materialize_without_credentials_and_no_dry_run_fails(self) -> None:
+        """Sin --dry-run, la falta de credenciales es FAILED + exit 1: si el
+        secret del cron se borra o rota mal, StagingConfig.from_env() devuelve
+        None y el materializer entraria en no-op; un cron verde que no
+        materializa nada seria indistinguible de uno sano (el fallo invisible
+        de #333, aca para siempre porque nadie mira un cron verde)."""
+        result = _run_cli("materialize", "--config", str(_SAMPLE_CONFIG))
+        assert result.returncode == 1
+        assert "Materialize summary:" in result.stderr
+        assert "Materializer=FAILED" in result.stderr
+        assert "credenciales" in result.stderr
+
+    def test_materialize_dry_run_never_writes_even_with_credentials(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """--dry-run fuerza el no-op AUNQUE haya SUPABASE_* en el entorno:
+        el materializer recibe config None (sin config no crea cliente ni
+        escribe). Sin esto, el step de verificacion del cron escribiria."""
+        import scrapers.jobs.materializer as materializer_module
+        from scrapers.jobs.materializer import MaterializeResult
+
+        captured: dict[str, Any] = {}
+
+        class _CapturingMaterializer:
+            def __init__(self, config: Any) -> None:
+                captured["config"] = config
+
+            def __enter__(self) -> "_CapturingMaterializer":
+                return self
+
+            def __exit__(self, *exc: Any) -> bool:
+                return False
+
+            def materialize(self, *, event_id: str) -> MaterializeResult:
+                return MaterializeResult()
+
+        _set_fake_supabase_env(monkeypatch)
+        monkeypatch.setattr(materializer_module, "SilverMaterializer", _CapturingMaterializer)
+
+        from scrapers.cli import _cmd_materialize
+
+        _cmd_materialize(argparse.Namespace(config=str(_SAMPLE_CONFIG), dry_run=True))
+
+        assert captured["config"] is None
+        out = capsys.readouterr()
+        assert "Materializer=OK" in out.out
+
+    def test_materialize_broken_yaml_fails_with_notice_not_traceback(
+        self, tmp_path: Path
+    ) -> None:
+        """Un YAML sintacticamente roto (yaml.YAMLError, que NO es ValueError)
+        debe salir por el mismo aviso FAILED que el resto de fallos de config,
+        no por un traceback crudo."""
+        broken = tmp_path / "broken.yaml"
+        broken.write_text("project: [broken", encoding="utf-8")
+        result = _run_cli("materialize", "--config", str(broken))
+        assert result.returncode == 1
+        assert "Materialize summary:" in result.stderr
+        assert "Materializer=FAILED" in result.stderr
+        assert "Traceback" not in result.stderr
+
+    def test_materialize_unreadable_config_fails_visibly(self, tmp_path: Path) -> None:
+        """Config ilegible => exit 1. Cuando era etapa del consolidate esto era
+        WARN+verde (las otras etapas seguian); standalone, no poder leer
+        project.event_id significa que el comando no puede hacer NADA y un
+        cron verde seria el mismo fallo invisible de #333."""
+        result = _run_cli("materialize", "--config", str(tmp_path / "no-existe.yaml"))
+        assert result.returncode == 1
+        assert "Materialize summary:" in result.stderr
+        assert "Materializer=FAILED" in result.stderr
+
+    def test_materialize_errors_fail_visibly(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Errores del materializer => aviso de fin de corrida + exit 1: el cron
+        de materialize.yml nunca debe quedar verde con fallos (mismo incidente
+        invisible que motivo #333 en consolidate). Las notas se deduplican con
+        su conteo."""
+        import scrapers.jobs.materializer as materializer_module
+        from scrapers.jobs.materializer import MaterializeResult
+
+        failed = MaterializeResult(
+            persons_projected=3,
+            errors=[
+                "POST /persons: status 403 (2 filas)",
+                "POST /persons: status 403 (2 filas)",
+            ],
+        )
+
+        class _FakeMaterializer:
+            def __init__(self, config: Any) -> None: ...
+
+            def __enter__(self) -> "_FakeMaterializer":
+                return self
+
+            def __exit__(self, *exc: Any) -> bool:
+                return False
+
+            def materialize(self, *, event_id: str) -> MaterializeResult:
+                return failed
+
+        _set_fake_supabase_env(monkeypatch)
+        monkeypatch.setattr(materializer_module, "SilverMaterializer", _FakeMaterializer)
+
+        from scrapers.cli import _cmd_materialize
+
+        args = argparse.Namespace(config=str(_SAMPLE_CONFIG), dry_run=False)
+        with pytest.raises(SystemExit) as excinfo:
+            _cmd_materialize(args)
+        assert excinfo.value.code == 1
+
+        out = capsys.readouterr()
+        assert "Materialize summary:" in out.err
+        assert "Materializer=FAILED" in out.err
+        # Nota real deduplicada con su conteo (aparecio 2 veces), y UNA sola
+        # vez: sin linea cruda por error ademas de la nota (un 403-storm de
+        # miles de errores no debe inundar el log del cron; #333).
+        assert "WARN materialize: POST /persons: status 403 (2 filas) (x2)" in out.err
+        assert out.err.count("POST /persons: status 403 (2 filas)") == 1
+
+    def test_materialize_exception_fails_visibly(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Una excepcion del materializer (p.ej. red/Supabase caido sin catch
+        propio) => FAILED en el aviso + exit 1, no un traceback crudo verde."""
+        import scrapers.jobs.materializer as materializer_module
+
+        class _BoomMaterializer:
+            def __init__(self, config: Any) -> None: ...
+
+            def __enter__(self) -> "_BoomMaterializer":
+                return self
+
+            def __exit__(self, *exc: Any) -> bool:
+                return False
+
+            def materialize(self, *, event_id: str) -> Any:
+                raise RuntimeError("boom transitorio")
+
+        _set_fake_supabase_env(monkeypatch)
+        monkeypatch.setattr(materializer_module, "SilverMaterializer", _BoomMaterializer)
+
+        from scrapers.cli import _cmd_materialize
+
+        args = argparse.Namespace(config=str(_SAMPLE_CONFIG), dry_run=False)
+        with pytest.raises(SystemExit) as excinfo:
+            _cmd_materialize(args)
+        assert excinfo.value.code == 1
+
+        out = capsys.readouterr()
+        assert "Materialize summary:" in out.err
+        assert "Materializer=FAILED" in out.err
+        assert "boom transitorio" in out.err
+
+    def test_materialize_exception_redacts_supabase_url(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """El log del cron sube como artifact PUBLICO (repo publico) y
+        vars.SUPABASE_URL no esta enmascarada por GitHub: una excepcion de
+        transporte (httpx incluye la URL completa) no debe publicar el
+        endpoint interno de Supabase (ADR 0002: anti mass-scrapers)."""
+        import scrapers.jobs.materializer as materializer_module
+
+        class _LeakyMaterializer:
+            def __init__(self, config: Any) -> None: ...
+
+            def __enter__(self) -> "_LeakyMaterializer":
+                return self
+
+            def __exit__(self, *exc: Any) -> bool:
+                return False
+
+            def materialize(self, *, event_id: str) -> Any:
+                raise RuntimeError(
+                    "ConnectionError en https://example.supabase.co/rest/v1/aportes"
+                )
+
+        _set_fake_supabase_env(monkeypatch)
+        monkeypatch.setattr(materializer_module, "SilverMaterializer", _LeakyMaterializer)
+
+        from scrapers.cli import _cmd_materialize
+
+        args = argparse.Namespace(config=str(_SAMPLE_CONFIG), dry_run=False)
+        with pytest.raises(SystemExit):
+            _cmd_materialize(args)
+
+        out = capsys.readouterr()
+        assert "https://example.supabase.co" not in out.err
+        assert "https://example.supabase.co" not in out.out
+        assert "Materializer=FAILED" in out.err
+
+
 # ── consolidate ───────────────────────────────────────────────────
 
 
@@ -207,12 +439,13 @@ class TestConsolidate:
     # auto-merge Event/Acopio, candidatos Person) corren en su modo no-op/dry-run
     # implicito (FakeInMemoryAdapter / PersonConsolidationConfig.from_env() -> None):
     # cero red, cero writes, deterministico.
-    def test_materializer_runs_as_first_stage(self, tmp_path: Path) -> None:
-        # El materializer (etapa 1) corre siempre, antes de las etapas de
-        # consolidacion; en dry-run (sin SUPABASE_*) es un no-op silencioso.
+    def test_consolidate_no_longer_materializes(self, tmp_path: Path) -> None:
+        # #336 (ADR 0011): el materializer ya no es una etapa del consolidate;
+        # vive en su propio comando `materialize` con su propio cron.
         result = _run_cli("consolidate", "--config", str(_SAMPLE_CONFIG))
         assert result.returncode == 0
-        assert "Materializer:" in result.stdout
+        assert "Materializer:" not in result.stdout
+        assert "Materialize summary:" not in result.stdout
 
     def test_automerge_stages_run_for_event_and_acopio(self, tmp_path: Path) -> None:
         # Etapa 2: sin SUPABASE_*, build_port() cae a FakeInMemoryAdapter (vacio),
